@@ -13,7 +13,7 @@ Normal launches use local application data for preferences and the encrypted bot
 
 For isolated development runs, set `ECHOCORD_DATA_DIR` to an ignored local directory. An explicit `ECHOCORD_TOKEN_FILE` override selects a different encrypted credential destination; plaintext files are rejected. These overrides are optional, not part of ordinary setup.
 
-Route the music application's playback to VB-Cable's playback endpoint in Windows. In Echocord, choose its recording endpoint and a Discord room in their drawers, apply the selection, and press Connect. During a session, route edits remain queued until Apply & reconnect. Listen through the regular Discord client. Test volume, Mute output, Disconnect, and another connection after the short connection-start cooldown. Closing the window keeps the session in the tray; Open restores it and Quit ends the application.
+Route the music application's playback to VB-Cable's playback endpoint in Windows. In Echocord, choose its recording endpoint and a Discord room in their drawers, apply the selection, and press Connect. During a session, route edits remain queued until Apply & reconnect. Listen through the regular Discord client. Test volume, Mute/Unmute, Stop, and another connection after the short connection-start cooldown. Closing the window keeps the session in the tray; Open restores it and Quit ends the application.
 
 ## Verification and remaining acceptance
 

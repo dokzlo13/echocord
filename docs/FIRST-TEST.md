@@ -9,7 +9,7 @@ make build
 make app-run
 ```
 
-Normal launches use local application data for preferences and the encrypted bot token. First-run setup accepts a token in the app and tests it before saving. Credentials use current-user Windows DPAPI; they stay out of snapshots and Git. No voice connection starts automatically. Keep other applications using the same bot stopped during the test.
+Normal launches use local application data for preferences and the encrypted bot token. The backend setup command validates tokens before saving; its user-facing form awaits the reviewed UI implementation. Current development can provision the encrypted file locally. Credentials use current-user Windows DPAPI; they stay out of snapshots and Git. No voice connection starts automatically. Keep other applications using the same bot stopped during the test.
 
 For isolated development runs, set `ECHOCORD_DATA_DIR` to an ignored local directory. An explicit `ECHOCORD_TOKEN_FILE` override selects a different encrypted credential destination; plaintext files are rejected. These overrides are optional, not part of ordinary setup.
 

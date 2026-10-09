@@ -22,4 +22,6 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-015 | Repository and handoff cleanup | active | alpha accepted | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Secure setup and app storage | active | alpha accepted | storage worker / a1 | agent/EC-016-a1 | [task](EC-016.md) |
 
+| EC-017 | Process-capture and local-mute experiment | ready | EC-014 | unassigned; next iteration | — | [task](EC-017.md) |
+
 Blocked here means an explicit task dependency, not a stalled runtime goal.

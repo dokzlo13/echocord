@@ -1,6 +1,6 @@
 # Candidate first-build architecture
 
-Status: proposal for EC-008 review, not a settled implementation contract. Existing code is isolated dependency probes and a draft mocked UI.
+Status: initial proposal, superseded where noted by the adopted [advisory decisions](REVIEW.md). In particular, an owned engine process is the cancellation boundary, and Rust model types now generate the frontend contract. Keep this document as the rationale for the small code boundaries, not a second source of implementation decisions.
 
 ## First testable outcome
 

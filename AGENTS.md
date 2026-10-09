@@ -22,3 +22,5 @@ Checkpoint task evidence and next actions in Git before handoff. A chat summary 
 Read `docs/QUALITY.md` for applicable gates. Report checks actually run and limitations. Mark tasks done only after integration and relevant checks; Linux checks do not prove Windows audio behavior.
 
 Use only researched existing skills after the stack is validated. Record source, pinned revision, license, maintenance/adoption evidence, and applicability before importing a skill. Do not generate placeholder skills or copy third-party material without checking its license. UI acceptance belongs in `docs/QUALITY.md` until suitable skills are selected. Keep this file short; task-specific detail belongs in the task or relevant document.
+
+For UI work, read the vetted `.agents/skills/frontend-design/SKILL.md`; for browser review/testing, read `.agents/skills/playwright-cli/SKILL.md`. Pins, licenses, applicability limits, and private artifact handling are in `.agents/SOURCES.md`. Project desktop/privacy requirements take precedence over generic skill advice.

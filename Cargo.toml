@@ -1,0 +1,11 @@
+[workspace]
+members = ["crates/core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[patch.crates-io]
+libopus_sys = { path = ".cache/libopus_sys-0.3.3" }

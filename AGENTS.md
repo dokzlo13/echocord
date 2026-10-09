@@ -19,6 +19,8 @@ Checkpoint task evidence and next actions in Git before handoff. A chat summary 
 
 Finish with a clean working tree and linear `main` history: integrate scoped worker commits without merge commits, remove accepted worker branches/worktrees after verification, and remove rejected or permanently frozen work when the owner concludes the session. Preserve private/user artifacts under `.trash/` before worktree removal; never discard an active worker or unidentified changes. Retire obsolete prototypes and duplicate commands after production replacements are verified; Git history preserves the experiment.
 
+At session close, remove redundant agent-created logs, synthetic fixtures, obsolete previews and copied build artifacts under `.trash/` after recording useful final evidence. Keep a small current handoff/evidence set. Preserve user notes, credentials, settings, recordings and artifacts of unclear ownership; ignored does not mean disposable. Stop owned preview/test processes before removing their files.
+
 Before handoff, reconcile STATE, the board, current architecture/design, commands, and next actions with the actual code. Distinguish user-confirmed behavior from automated measurements and unfinished acceptance. Every substantial feature set needs a design → review → implementation seam.
 
 ## Validation and design

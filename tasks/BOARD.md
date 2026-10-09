@@ -18,7 +18,7 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 | EC-012 | Responsive connection progress | active | EC-005 alpha accepted | runtime worker / a1 | agent/EC-012-a1 | [task](EC-012.md) |
 | EC-013 | Reviewed audio-surface redesign | active | EC-012 contract | design/UI worker / a1 | agent/EC-013-a1 | [task](EC-013.md) |
-| EC-014 | Capture and routing feasibility | active | — | research worker / a1 | main, read-only | [task](EC-014.md) |
+| EC-014 | Capture and routing feasibility | done | — | research worker / a1 | main | [task](EC-014.md) |
 | EC-015 | Repository and handoff cleanup | active | alpha accepted | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Secure setup and app storage | active | alpha accepted | storage worker / a1 | agent/EC-016-a1 | [task](EC-016.md) |
 

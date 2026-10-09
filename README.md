@@ -12,6 +12,7 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 
 - [Development environment](docs/DEVELOPMENT.md)
 - [Library survey](docs/TECHNOLOGY.md)
+- [Capture and mixing feasibility](docs/CAPTURE.md)
 - [Agent coordination](docs/WORKFLOW.md)
 - [Quality gates](docs/QUALITY.md)
 

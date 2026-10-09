@@ -246,6 +246,41 @@ struct ConfigurationCheck {
     discovery: Discovery,
     reply: oneshot::Sender<Result<(), AppError>>,
     task: tokio::task::JoinHandle<()>,
+    control: ConfigurationControl,
+}
+
+#[derive(Clone, Default)]
+struct ConfigurationControl(Arc<Mutex<ConfigurationPhase>>);
+
+#[derive(Default)]
+enum ConfigurationPhase {
+    #[default]
+    Validating,
+    #[cfg(any(windows, test))]
+    Saving,
+    Cancelled,
+}
+
+impl ConfigurationControl {
+    #[cfg(any(windows, test))]
+    fn begin_save(&self) -> bool {
+        let mut phase = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*phase, ConfigurationPhase::Validating) {
+            *phase = ConfigurationPhase::Saving;
+            true
+        } else {
+            false
+        }
+    }
+    fn cancel_validation(&self) -> bool {
+        let mut phase = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(any(windows, test))]
+        if matches!(*phase, ConfigurationPhase::Saving) {
+            return false;
+        }
+        *phase = ConfigurationPhase::Cancelled;
+        true
+    }
 }
 
 fn generic_failure(code: &ErrorCode) -> bool {
@@ -336,8 +371,8 @@ impl Actor {
                 request = commands.recv(), if !self.shutting_down => match request {
                     Some(Request::Dispatch(command, reply)) => { let result = self.command(command); let _ = reply.send(result); }
                     Some(Request::ConfigureToken(token, reply)) => self.configure_token(token, reply),
-                    Some(Request::Shutdown(reply)) => { self.shutdown_waiters.push(reply); self.shutting_down = true; self.disconnect(); }
-                    None => { self.shutting_down = true; self.disconnect(); }
+                    Some(Request::Shutdown(reply)) => { self.shutdown_waiters.push(reply); self.begin_shutdown(); }
+                    None => self.begin_shutdown(),
                 },
                 Some(event) = events.recv() => self.event(event),
                 _ = tick.tick() => {
@@ -352,6 +387,7 @@ impl Actor {
                 }
             }
             if self.shutting_down
+                && self.configuration.is_none()
                 && (self.child.is_none()
                     || matches!(
                         self.snapshot.connection,
@@ -366,14 +402,26 @@ impl Actor {
                 for waiter in self.shutdown_waiters.drain(..) {
                     let _ = waiter.send(result.clone());
                 }
-                if let Some(configuration) = self.configuration.take() {
-                    configuration.task.abort();
-                    let _ = configuration.reply.send(Err(unavailable()));
-                }
                 // The supervisor still owns a kill-on-close job on incomplete cleanup.
                 break;
             }
         }
+    }
+    fn begin_shutdown(&mut self) {
+        self.shutting_down = true;
+        self.disconnect();
+        if self
+            .configuration
+            .as_ref()
+            .is_some_and(|check| check.control.cancel_validation())
+        {
+            let configuration = self.configuration.take().expect("cancelled validation");
+            configuration.task.abort();
+            let _ = configuration.reply.send(Err(unavailable()));
+        }
+        // Saving is committed under the same mutex as cancellation. A queued or
+        // running blocking save must report its actual result before shutdown
+        // can succeed; the shell separately owns its three-second Quit fallback.
     }
     fn refresh(&mut self) {
         self.retired = None;
@@ -566,14 +614,18 @@ impl Actor {
             let _ = reply.send(Err(Failure::Configuration.error()));
             return;
         }
-        self.start_configuration(reply, configure_bot_token(path, token));
+        self.start_configuration(reply, move |control| {
+            configure_bot_token(path, token, control)
+        });
     }
 
-    fn start_configuration(
+    fn start_configuration<Fut>(
         &mut self,
         reply: oneshot::Sender<Result<(), AppError>>,
-        operation: impl std::future::Future<Output = Result<(), AppError>> + Send + 'static,
-    ) {
+        operation: impl FnOnce(ConfigurationControl) -> Fut + Send + 'static,
+    ) where
+        Fut: std::future::Future<Output = Result<(), AppError>> + Send + 'static,
+    {
         if self.configuration_busy() {
             let _ = reply.send(Err(busy()));
             return;
@@ -591,8 +643,10 @@ impl Actor {
         self.snapshot.discovery = Discovery::Loading;
         self.publish();
         let events = self.events.clone();
+        let control = ConfigurationControl::default();
+        let task_control = control.clone();
         let task = tokio::spawn(async move {
-            let result = operation.await;
+            let result = operation(task_control).await;
             let _ = events.send(Event::Configured(epoch, result)).await;
         });
         self.configuration = Some(ConfigurationCheck {
@@ -601,6 +655,7 @@ impl Actor {
             discovery,
             reply,
             task,
+            control,
         });
     }
     fn configuration_busy(&self) -> bool {
@@ -761,7 +816,6 @@ impl Actor {
                     .configuration
                     .as_ref()
                     .is_none_or(|check| check.epoch != epoch)
-                    || self.shutting_down
                 {
                     return;
                 }
@@ -769,6 +823,10 @@ impl Actor {
                     .configuration
                     .take()
                     .expect("matched configuration epoch");
+                if self.shutting_down {
+                    let _ = configuration.reply.send(result);
+                    return;
+                }
                 if result.is_ok() {
                     self.refresh();
                 } else {
@@ -1164,21 +1222,18 @@ fn launch_with(
 fn supervise(
     mut process: OwnedProcess,
     generation: u32,
-    mut init: Init,
+    init: Init,
     events: mpsc::Sender<Event>,
     control: ChildControl,
 ) {
     {
-        let mut mail = control.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mail = control.0.0.lock().unwrap_or_else(|e| e.into_inner());
         if mail.stopped_at.is_some() {
             // Never initialize a worker created after Cancel. Its OS lifetime is
             // still supervised, using the original 750 ms stop deadline.
             drop(mail);
             supervise_exit(process, generation, events, control);
             return;
-        }
-        if let Some(output) = mail.output.take() {
-            init.output = output;
         }
     }
     let pipes = (
@@ -1195,48 +1250,7 @@ fn supervise(
     let writer_control = control.clone();
     let writer_events = events.clone();
     tokio::task::spawn_blocking(move || {
-        let result = (|| {
-            let mut sequence = 1;
-            protocol::write(
-                &mut stdin,
-                &Frame {
-                    version: protocol::VERSION,
-                    generation,
-                    sequence,
-                    body: Command::Init(init),
-                },
-            )?;
-            loop {
-                let (lock, wake) = &*writer_control.0;
-                let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
-                while mail.output.is_none() && mail.stopped_at.is_none() {
-                    mail = wake.wait(mail).unwrap_or_else(|e| e.into_inner());
-                }
-                let stop = mail.stopped_at.is_some();
-                let body = if stop {
-                    Command::Stop
-                } else {
-                    Command::Output {
-                        output: mail.output.take().expect("output exists"),
-                    }
-                };
-                drop(mail);
-                sequence += 1;
-                protocol::write(
-                    &mut stdin,
-                    &Frame {
-                        version: protocol::VERSION,
-                        generation,
-                        sequence,
-                        body,
-                    },
-                )?;
-                if stop {
-                    break;
-                }
-            }
-            Ok::<(), protocol::ProtocolError>(())
-        })();
+        let result = write_commands(&mut stdin, generation, init, &writer_control);
         if result.is_err() {
             let _ = writer_events.blocking_send(Event::ProtocolFailed(generation));
         }
@@ -1282,6 +1296,66 @@ fn supervise(
         }
     });
     supervise_exit(process, generation, events, control);
+}
+
+fn write_commands(
+    writer: &mut impl std::io::Write,
+    generation: u32,
+    mut init: Init,
+    control: &ChildControl,
+) -> Result<(), protocol::ProtocolError> {
+    let (lock, wake) = &*control.0;
+    {
+        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.stopped_at.is_some() {
+            return Ok(());
+        }
+        if let Some(output) = mail.output.take() {
+            init.output = output;
+        }
+        // Commit Init here, inside the executing writer, serialized with Stop.
+        // Release the mailbox before pipe I/O so an already committed write
+        // cannot prevent cancellation or the independent exit deadline.
+    }
+    let mut sequence = 1;
+    protocol::write(
+        writer,
+        &Frame {
+            version: protocol::VERSION,
+            generation,
+            sequence,
+            body: Command::Init(init),
+        },
+    )?;
+    loop {
+        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
+        while mail.output.is_none() && mail.stopped_at.is_none() {
+            mail = wake.wait(mail).unwrap_or_else(|e| e.into_inner());
+        }
+        let stop = mail.stopped_at.is_some();
+        let body = if stop {
+            Command::Stop
+        } else {
+            Command::Output {
+                output: mail.output.take().expect("output exists"),
+            }
+        };
+        drop(mail);
+        sequence += 1;
+        protocol::write(
+            writer,
+            &Frame {
+                version: protocol::VERSION,
+                generation,
+                sequence,
+                body,
+            },
+        )?;
+        if stop {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn supervise_exit(
@@ -1335,18 +1409,26 @@ async fn discover(_: &ControllerConfig) -> Result<Catalog, AppError> {
 }
 
 #[cfg(not(windows))]
-async fn configure_bot_token(_: PathBuf, _: String) -> Result<(), AppError> {
+async fn configure_bot_token(
+    _: PathBuf,
+    _: String,
+    _: ConfigurationControl,
+) -> Result<(), AppError> {
     Err(Failure::Configuration.error())
 }
 
 #[cfg(any(windows, test))]
 async fn validate_then_save(
+    control: ConfigurationControl,
     validation: impl std::future::Future<Output = Result<(), AppError>>,
     save: impl FnOnce() -> Result<(), AppError> + Send + 'static,
 ) -> Result<(), AppError> {
     tokio::time::timeout(Duration::from_secs(15), validation)
         .await
         .unwrap_or_else(|_| Err(Failure::Connection.error()))?;
+    if !control.begin_save() {
+        return Err(unavailable());
+    }
     // File encryption/write work cannot block the actor or its controls. Once
     // saving starts, await its actual result; a timeout must not restore old UI
     // state while an uncancelled blocking write is still changing the token.
@@ -1356,9 +1438,14 @@ async fn validate_then_save(
 }
 
 #[cfg(windows)]
-async fn configure_bot_token(path: PathBuf, token: String) -> Result<(), AppError> {
+async fn configure_bot_token(
+    path: PathBuf,
+    token: String,
+    control: ConfigurationControl,
+) -> Result<(), AppError> {
     let http = serenity::http::Http::new(&token);
     validate_then_save(
+        control,
         async move {
             let user = http.get_current_user().await.map_err(rest_error)?;
             if !user.bot {
@@ -1803,7 +1890,7 @@ mod tests {
         let (reply, result) = oneshot::channel();
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
-        a.start_configuration(reply, async move {
+        a.start_configuration(reply, move |_| async move {
             let _ = started.send(());
             let _ = release_rx.await;
             Err(Failure::Authentication.error())
@@ -1892,7 +1979,7 @@ mod tests {
             }
             let before = a.snapshot.clone();
             let (reply, result) = oneshot::channel();
-            a.start_configuration(reply, async {
+            a.start_configuration(reply, |_| async {
                 panic!("rejected configuration must not validate or save")
             });
             assert_eq!(result.await.unwrap().unwrap_err().code, ErrorCode::Busy);
@@ -1920,7 +2007,7 @@ mod tests {
         let old_epoch = a.catalog_epoch;
         let (reply, result) = oneshot::channel();
         let (release, release_rx) = oneshot::channel();
-        a.start_configuration(reply, async move {
+        a.start_configuration(reply, move |_| async move {
             let _ = release_rx.await;
             Ok(())
         });
@@ -1942,18 +2029,22 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         let saved = Arc::new(AtomicBool::new(false));
         let flag = saved.clone();
-        let result =
-            validate_then_save(async { Err(Failure::Authentication.error()) }, move || {
+        let result = validate_then_save(
+            ConfigurationControl::default(),
+            async { Err(Failure::Authentication.error()) },
+            move || {
                 flag.store(true, Ordering::SeqCst);
                 Ok(())
-            })
-            .await;
+            },
+        )
+        .await;
         assert_eq!(result.unwrap_err().code, ErrorCode::Authentication);
         assert!(!saved.load(Ordering::SeqCst));
         let validated = Arc::new(AtomicBool::new(false));
         let validation_flag = validated.clone();
         let flag = saved.clone();
         validate_then_save(
+            ConfigurationControl::default(),
             async move {
                 validation_flag.store(true, Ordering::SeqCst);
                 Ok(())
@@ -1967,16 +2058,20 @@ mod tests {
         .await
         .unwrap();
         assert!(saved.load(Ordering::SeqCst));
-        let error = validate_then_save(async { Ok(()) }, || Err(Failure::Configuration.error()))
-            .await
-            .unwrap_err();
+        let error = validate_then_save(ConfigurationControl::default(), async { Ok(()) }, || {
+            Err(Failure::Configuration.error())
+        })
+        .await
+        .unwrap_err();
         assert_eq!(error.code, ErrorCode::Configuration);
     }
     #[tokio::test(start_paused = true)]
     async fn stalled_bot_validation_times_out_without_touching_storage() {
-        let error = validate_then_save(std::future::pending(), || {
-            panic!("timed-out validation must not save")
-        })
+        let error = validate_then_save(
+            ConfigurationControl::default(),
+            std::future::pending(),
+            || panic!("timed-out validation must not save"),
+        )
         .await
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::ConnectionFailed);
@@ -2086,22 +2181,20 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn delayed_token_save_keeps_output_responsive_and_does_not_reply_before_storage_finishes()
-    {
+    async fn delayed_token_save_keeps_output_responsive_and_shutdown_waits_for_storage() {
         let mut a = actor();
         let (events, event_rx) = mpsc::channel(32);
         a.events = events;
         let (reply, mut result) = oneshot::channel();
         let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
-        a.start_configuration(
-            reply,
-            validate_then_save(async { Ok(()) }, move || {
+        a.start_configuration(reply, move |control| {
+            validate_then_save(control, async { Ok(()) }, move || {
                 let _ = started.send(());
                 release_rx.recv().unwrap();
                 Ok(())
-            }),
-        );
+            })
+        });
         let controller = running_actor_on(a, event_rx);
         started_rx.await.unwrap();
         tokio::time::timeout(
@@ -2117,13 +2210,158 @@ mod tests {
         );
         assert_eq!(controller.snapshot().bot.status, BotStatus::Checking);
         assert!(controller.snapshot().output.muted);
+        let (reply, mut shutdown) = oneshot::channel();
+        let mut snapshots = controller.subscribe();
+        let revision = controller.snapshot().revision;
+        controller
+            .commands
+            .send(Request::Shutdown(reply))
+            .await
+            .unwrap_or_else(|_| panic!("controller must accept shutdown"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while controller.snapshot().revision == revision {
+                snapshots.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("shutdown must be processed while save is blocked");
+        assert_eq!(
+            result.try_recv().unwrap_err(),
+            oneshot::error::TryRecvError::Empty
+        );
+        assert_eq!(
+            shutdown.try_recv().unwrap_err(),
+            oneshot::error::TryRecvError::Empty
+        );
         release.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(1), result)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        controller.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_aborts_validation_and_prevents_a_later_save() {
+        let mut a = actor();
+        let (events, event_rx) = mpsc::channel(32);
+        a.events = events;
+        let (reply, result) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        let (mut release, release_rx) = oneshot::channel();
+        a.start_configuration(reply, move |control| {
+            validate_then_save(
+                control,
+                async move {
+                    let _ = started.send(());
+                    let _ = release_rx.await;
+                    Ok(())
+                },
+                || panic!("cancelled validation must never reach storage"),
+            )
+        });
+        let controller = running_actor_on(a, event_rx);
+        started_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_millis(250), controller.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.await.unwrap().unwrap_err().code, ErrorCode::Internal);
+        tokio::time::timeout(Duration::from_millis(250), release.closed())
+            .await
+            .unwrap();
+        assert!(release.send(()).is_err());
+        let control = ConfigurationControl::default();
+        assert!(control.cancel_validation());
+        let error = validate_then_save(control, async { Ok(()) }, || {
+            panic!("late validation success must not commit a cancelled save")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Internal);
+    }
+    #[test]
+    fn queued_writer_rechecks_cancellation_and_latest_output_before_init_commit() {
+        struct StopAfterWrite {
+            bytes: Vec<u8>,
+            control: ChildControl,
+        }
+        impl std::io::Write for StopAfterWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                // Cancellation after commitment must also be able to take the
+                // mailbox lock while pipe I/O is in progress.
+                self.control.stop();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for cancelled in [true, false] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(1)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (started, started_rx) = oneshot::channel();
+                let (release, release_rx) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = release_rx.recv();
+                });
+                started_rx.await.unwrap();
+                let control = child();
+                let writer_control = control.clone();
+                let init = actor().initialization().unwrap();
+                let writer = tokio::task::spawn_blocking(move || {
+                    let mut sink = StopAfterWrite {
+                        bytes: Vec::new(),
+                        control: writer_control.clone(),
+                    };
+                    write_commands(&mut sink, 4, init, &writer_control).unwrap();
+                    sink.bytes
+                });
+                // The sole blocking thread is occupied: this writer is queued.
+                control.output(Output {
+                    muted: true,
+                    volume_percent: 37,
+                });
+                if cancelled {
+                    control.stop();
+                }
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                let bytes = writer.await.unwrap();
+                if cancelled {
+                    assert!(
+                        bytes.is_empty(),
+                        "queued Cancel must suppress Init entirely"
+                    );
+                } else {
+                    let mut reader = std::io::Cursor::new(bytes);
+                    let frame = protocol::read::<Command>(&mut reader).unwrap().unwrap();
+                    let Command::Init(init) = frame.body else {
+                        panic!("Init expected");
+                    };
+                    assert!(init.output.muted);
+                    assert_eq!(init.output.volume_percent, 37);
+                    assert!(matches!(
+                        protocol::read::<Command>(&mut reader)
+                            .unwrap()
+                            .unwrap()
+                            .body,
+                        Command::Stop
+                    ));
+                    assert!(protocol::read::<Command>(&mut reader).unwrap().is_none());
+                }
+            });
+        }
     }
     #[cfg(unix)]
     #[tokio::test]

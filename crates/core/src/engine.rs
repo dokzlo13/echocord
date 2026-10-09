@@ -322,7 +322,6 @@ pub async fn run_worker() -> Result<(), AppError> {
         }
         Ok(())
     });
-    let _ = statuses.send(Status::Connecting).await;
     let result = run_session(
         init,
         output_rx,
@@ -385,7 +384,11 @@ async fn run_session(
             atomic::{AtomicBool, AtomicU64},
         },
     };
-    let token = protocol::read_token(&init.token_file).map_err(|_| Failure::Configuration)?;
+    let token_file = init.token_file.clone();
+    let token = tokio::task::spawn_blocking(move || protocol::read_token(&token_file))
+        .await
+        .map_err(|_| Failure::Configuration)?
+        .map_err(|_| Failure::Configuration)?;
     let http = Arc::new(serenity::http::Http::new(&token));
     let guild = serenity::all::GuildId::new(
         protocol::discord_id(&init.server_id).ok_or(Failure::Protocol)?,
@@ -415,6 +418,19 @@ async fn run_session(
                 retry_limit: NonZeroU8::new(3),
             }),
     );
+    // Permission REST work belongs to preflight, before any gateway is opened.
+    // Both this wait and later gateway/join work race the independent Stop input.
+    let permissions = tokio::select! {
+        biased;
+        cause = cancelled(&mut stop_rx) => return match cause { StopCause::Failed(f) => Err(f), _ => Ok(()) },
+        result = permissions(&http, guild, channel) => result,
+    };
+    permissions?;
+    let _ = statuses
+        .send(Status::Connecting {
+            stage: ConnectStage::Gateway,
+        })
+        .await;
     let builder = Client::builder(
         &token,
         GatewayIntents::GUILDS | GatewayIntents::GUILD_VOICE_STATES,
@@ -445,7 +461,6 @@ async fn run_session(
                 }
                 ready_rx.changed().await.map_err(|_| Failure::Connection)?;
             }
-            permissions(&http, guild, channel).await?;
             signals
                 .armed
                 .store(true, std::sync::atomic::Ordering::Release);
@@ -457,6 +472,11 @@ async fn run_session(
                     signals.clone(),
                 );
             }
+            let _ = statuses
+                .send(Status::Connecting {
+                    stage: ConnectStage::Join,
+                })
+                .await;
             manager
                 .join(guild, channel)
                 .await
@@ -469,6 +489,11 @@ async fn run_session(
         if *work_stop_rx.borrow() != StopCause::Running {
             return Ok(());
         }
+        let _ = statuses
+            .send(Status::Connecting {
+                stage: ConnectStage::Capture,
+            })
+            .await;
         capture_loop(
             &init,
             http.clone(),

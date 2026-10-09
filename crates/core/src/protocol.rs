@@ -1,5 +1,5 @@
 //! Private, bounded backend protocol. Never log frames or parser errors.
-use crate::model::{AppError, Capture, ErrorCode, Output};
+use crate::model::{AppError, Capture, ConnectStage, ErrorCode, Output};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(any(windows, test))]
 use std::path::Path;
@@ -62,7 +62,7 @@ pub enum Command {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Status {
-    Connecting,
+    Connecting { stage: ConnectStage },
     Connected,
     Recovering,
     DeviceMissing,
@@ -317,6 +317,31 @@ mod tests {
         f.generation = 8;
         assert_eq!(v.accept(&f), Err(ProtocolError::Generation));
         assert!(v.accept(&frame(3)).is_ok());
+    }
+    #[test]
+    fn stage_events_are_bounded_and_reject_unknown_remote_payloads() {
+        let frame = Frame {
+            version: VERSION,
+            generation: 7,
+            sequence: 1,
+            body: Status::Connecting {
+                stage: ConnectStage::Join,
+            },
+        };
+        let encoded = encode(&frame).unwrap();
+        let decoded = read::<Status>(&mut Cursor::new(encoded)).unwrap().unwrap();
+        assert_eq!(decoded.body, frame.body);
+        for body in [
+            serde_json::json!({"type":"connecting", "stage":"private-remote-payload"}),
+            serde_json::json!({"type":"connecting", "stage":"join", "percent":50}),
+        ] {
+            let value =
+                serde_json::json!({"version":VERSION, "generation":7,"sequence":2,"body":body});
+            assert_eq!(
+                decode::<Status>(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
+                ProtocolError::Malformed
+            );
+        }
     }
     #[test]
     fn malformed_oversized_partial_and_unknown_are_redacted() {

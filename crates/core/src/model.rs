@@ -11,15 +11,20 @@ pub struct RecordingSource {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct VoiceChannel {
     pub id: String,
     pub name: String,
+    pub category_name: Option<String>,
+    pub position: u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct Server {
     pub id: String,
     pub name: String,
+    pub icon_url: Option<String>,
     pub channels: Vec<VoiceChannel>,
 }
 
@@ -95,11 +100,22 @@ impl std::fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
+/// Observed work currently in progress, never a percentage or estimated timer.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectStage {
+    Checking,
+    Preflight,
+    Gateway,
+    Join,
+    Capture,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(tag = "phase", rename_all = "kebab-case")]
 pub enum Connection {
     Disconnected,
-    Connecting,
+    Connecting { stage: ConnectStage },
     Connected,
     Recovering { attempt: u8, message: String },
     Disconnecting,
@@ -111,7 +127,7 @@ impl Connection {
     pub fn locks_route(&self) -> bool {
         matches!(
             self,
-            Self::Connecting
+            Self::Connecting { .. }
                 | Self::Connected
                 | Self::Recovering { .. }
                 | Self::Disconnecting
@@ -232,6 +248,7 @@ pub fn typescript_contract() -> String {
         Discovery::decl(&config),
         ErrorCode::decl(&config),
         AppError::decl(&config),
+        ConnectStage::decl(&config),
         Connection::decl(&config),
         CapturePhase::decl(&config),
         Capture::decl(&config),
@@ -280,5 +297,38 @@ mod tests {
         );
         assert!(Connection::Disconnecting.locks_route());
         assert!(!Connection::Disconnected.locks_route());
+    }
+
+    #[test]
+    fn connection_progress_and_rest_catalog_fields_have_explicit_wire_shapes() {
+        for (stage, name) in [
+            (ConnectStage::Checking, "checking"),
+            (ConnectStage::Preflight, "preflight"),
+            (ConnectStage::Gateway, "gateway"),
+            (ConnectStage::Join, "join"),
+            (ConnectStage::Capture, "capture"),
+        ] {
+            let connection = Connection::Connecting { stage };
+            assert!(connection.locks_route());
+            assert_eq!(
+                serde_json::to_value(connection).unwrap(),
+                serde_json::json!({"phase":"connecting", "stage":name})
+            );
+        }
+        let server = Server {
+            id: "1".into(),
+            name: "Server".into(),
+            icon_url: None,
+            channels: vec![VoiceChannel {
+                id: "2".into(),
+                name: "Voice".into(),
+                category_name: Some("Games".into()),
+                position: 3,
+            }],
+        };
+        let value = serde_json::to_value(server).unwrap();
+        assert!(value["iconUrl"].is_null());
+        assert_eq!(value["channels"][0]["categoryName"], "Games");
+        assert_eq!(value["channels"][0]["position"], 3);
     }
 }

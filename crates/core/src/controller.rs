@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     io::{BufReader, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Condvar, Mutex},
     time::Duration,
 };
@@ -48,7 +48,10 @@ enum Request {
 }
 enum Event {
     Catalog(u64, Result<Catalog, AppError>),
+    #[cfg(any(windows, test))]
+    Stage(u32, ConnectStage),
     Preflight(u32, Result<StartLimit, AppError>),
+    LaunchFailed(u32),
     Status(u32, Status),
     ProtocolFailed(u32),
     Exited(u32, bool),
@@ -224,6 +227,7 @@ struct Actor {
     catalog_epoch: u64,
     child: Option<ChildControl>,
     pending: bool,
+    preflight: Option<tokio::task::JoinHandle<()>>,
     next_launch: Option<Instant>,
     deadline: Option<Instant>,
     next_meter: Instant,
@@ -247,6 +251,7 @@ impl Actor {
             catalog_epoch: 0,
             child: None,
             pending: false,
+            preflight: None,
             next_launch: None,
             deadline: None,
             next_meter: Instant::now(),
@@ -261,11 +266,7 @@ impl Actor {
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
         self.snapshots.send_replace(self.snapshot.clone());
     }
-    async fn run(
-        mut self,
-        mut commands: mpsc::Receiver<Request>,
-        mut events: mpsc::Receiver<Event>,
-    ) {
+    async fn run(mut self, commands: mpsc::Receiver<Request>, events: mpsc::Receiver<Event>) {
         match load_preferences(&self.config) {
             Ok(prefs) => {
                 self.snapshot.selection = prefs.selection;
@@ -281,6 +282,13 @@ impl Actor {
             }
         }
         self.refresh();
+        self.run_requests(commands, events).await;
+    }
+    async fn run_requests(
+        mut self,
+        mut commands: mpsc::Receiver<Request>,
+        mut events: mpsc::Receiver<Event>,
+    ) {
         let mut tick = tokio::time::interval(Duration::from_millis(25));
         loop {
             tokio::select! {
@@ -462,20 +470,32 @@ impl Actor {
         self.pending = true;
         self.terminal_error = None;
         self.retired = None;
-        self.snapshot.connection = Connection::Connecting;
+        self.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Checking,
+        };
         self.snapshot.capture.phase = CapturePhase::Stopped;
         self.deadline = Some(Instant::now() + CONNECT_DEADLINE);
         self.publish();
         let generation = self.snapshot.session_id;
         let config = self.config.clone();
         let events = self.events.clone();
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(15), start_limit(&config))
+        self.start_preflight(generation, async move {
+            start_limit(&config, generation, &events).await
+        });
+        Ok(())
+    }
+    fn start_preflight(
+        &mut self,
+        generation: u32,
+        operation: impl std::future::Future<Output = Result<StartLimit, AppError>> + Send + 'static,
+    ) {
+        let events = self.events.clone();
+        self.preflight = Some(tokio::spawn(async move {
+            let result = tokio::time::timeout(Duration::from_secs(15), operation)
                 .await
                 .unwrap_or_else(|_| Err(Failure::Connection.error()));
             let _ = events.send(Event::Preflight(generation, result)).await;
-        });
-        Ok(())
+        }));
     }
     fn initialization(&self) -> Result<Init, AppError> {
         let selection = &self.snapshot.selection;
@@ -522,6 +542,9 @@ impl Actor {
     }
     fn disconnect(&mut self) {
         self.pending = false;
+        if let Some(preflight) = self.preflight.take() {
+            preflight.abort();
+        }
         self.deadline = None;
         if let Some(child) = &self.child {
             child.stop();
@@ -590,6 +613,12 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            #[cfg(any(windows, test))]
+            Event::Stage(generation, stage) => {
+                if generation == self.snapshot.session_id && self.pending && !self.shutting_down {
+                    self.connect_stage(stage);
+                }
+            }
             Event::Catalog(epoch, result) => {
                 if epoch != self.catalog_epoch || self.shutting_down {
                     return;
@@ -632,6 +661,7 @@ impl Actor {
                     return;
                 }
                 self.pending = false;
+                self.preflight = None;
                 let limit = match result {
                     Ok(limit) => limit,
                     Err(e) => {
@@ -663,19 +693,35 @@ impl Actor {
                             LAUNCH_COOLDOWN
                         },
                 );
-                match launch(
-                    &self.config.executable,
+                // Register ownership before process creation can block. Cancel can
+                // stop this mailbox even while the OS is still creating the child.
+                self.child = Some(launch(
+                    self.config.executable.clone(),
                     generation,
                     init,
                     self.events.clone(),
+                ));
+            }
+            Event::LaunchFailed(generation) => {
+                if generation != self.snapshot.session_id || self.child.is_none() {
+                    return;
+                }
+                // Creation failed: there is no process whose exit must be observed.
+                self.child = None;
+                if matches!(
+                    self.snapshot.connection,
+                    Connection::Disconnecting | Connection::CleanupIncomplete { .. }
                 ) {
-                    Ok(child) => {
-                        self.child = Some(child);
+                    let terminal = self.terminal_error.take();
+                    self.disconnect();
+                    if let Some(error) = terminal {
+                        self.fail(error);
                     }
-                    Err(_) => self.fail(error(
+                } else {
+                    self.fail(error(
                         ErrorCode::ConnectionFailed,
                         "The engine could not be started.",
-                    )),
+                    ));
                 }
             }
             Event::Status(generation, status) => {
@@ -693,7 +739,10 @@ impl Actor {
                     return;
                 }
                 match status {
-                    Status::Connecting => {}
+                    Status::Connecting { stage } => {
+                        self.connect_stage(stage);
+                        return;
+                    }
                     Status::Connected => {
                         self.snapshot.connection = Connection::Connected;
                         self.deadline = None;
@@ -795,6 +844,20 @@ impl Actor {
             }
         }
     }
+
+    fn connect_stage(&mut self, stage: ConnectStage) {
+        // A buffered stage cannot revive a cancelled/connected/recovering session
+        // or move progress backwards. Stage updates never extend the deadline.
+        if let Connection::Connecting { stage: current } = &mut self.snapshot.connection
+            && stage > *current
+        {
+            *current = stage;
+            if stage == ConnectStage::Capture {
+                self.snapshot.capture.phase = CapturePhase::Opening;
+            }
+            self.publish();
+        }
+    }
 }
 
 struct Mailbox {
@@ -805,6 +868,16 @@ struct Mailbox {
 #[derive(Clone)]
 struct ChildControl(Arc<(Mutex<Mailbox>, Condvar)>);
 impl ChildControl {
+    fn new() -> Self {
+        Self(Arc::new((
+            Mutex::new(Mailbox {
+                output: None,
+                stopped_at: None,
+                meter: None,
+            }),
+            Condvar::new(),
+        )))
+    }
     fn output(&self, output: Output) {
         let (lock, wake) = &*self.0;
         let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -849,7 +922,7 @@ struct OwnedProcess(std::process::Child);
 #[cfg(not(windows))]
 impl OwnedProcess {
     // Portable supervision implementation for offline regression tests.
-    fn spawn(executable: &Path, args: &[std::ffi::OsString]) -> std::io::Result<Self> {
+    fn spawn(executable: &std::path::Path, args: &[std::ffi::OsString]) -> std::io::Result<Self> {
         use std::process::{Command, Stdio};
         Command::new(executable)
             .args(args)
@@ -886,29 +959,68 @@ impl Drop for OwnedProcess {
 }
 
 fn launch(
-    executable: &Path,
+    executable: PathBuf,
     generation: u32,
     init: Init,
     events: mpsc::Sender<Event>,
-) -> std::io::Result<ChildControl> {
-    let mut process = OwnedProcess::spawn(executable, &["--engine-worker".into()])?;
-    let mut stdin = process
-        .take_stdin()
-        .ok_or_else(|| std::io::Error::other("Engine input unavailable"))?;
-    let stdout = process
-        .take_stdout()
-        .ok_or_else(|| std::io::Error::other("Engine output unavailable"))?;
-    let mut stderr = process
-        .take_stderr()
-        .ok_or_else(|| std::io::Error::other("Engine diagnostics unavailable"))?;
-    let control = ChildControl(Arc::new((
-        Mutex::new(Mailbox {
-            output: None,
-            stopped_at: None,
-            meter: None,
-        }),
-        Condvar::new(),
-    )));
+) -> ChildControl {
+    launch_with(generation, init, events, move || {
+        OwnedProcess::spawn(&executable, &["--engine-worker".into()])
+    })
+}
+
+fn launch_with(
+    generation: u32,
+    init: Init,
+    events: mpsc::Sender<Event>,
+    spawn: impl FnOnce() -> std::io::Result<OwnedProcess> + Send + 'static,
+) -> ChildControl {
+    let control = ChildControl::new();
+    let launch_control = control.clone();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || match spawn() {
+        Ok(process) => {
+            let _runtime = runtime.enter();
+            supervise(process, generation, init, events, launch_control);
+        }
+        Err(_) => {
+            let _ = events.blocking_send(Event::LaunchFailed(generation));
+        }
+    });
+    control
+}
+
+fn supervise(
+    mut process: OwnedProcess,
+    generation: u32,
+    mut init: Init,
+    events: mpsc::Sender<Event>,
+    control: ChildControl,
+) {
+    {
+        let mut mail = control.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        if mail.stopped_at.is_some() {
+            // Never initialize a worker created after Cancel. Its OS lifetime is
+            // still supervised, using the original 750 ms stop deadline.
+            drop(mail);
+            supervise_exit(process, generation, events, control);
+            return;
+        }
+        if let Some(output) = mail.output.take() {
+            init.output = output;
+        }
+    }
+    let pipes = (
+        process.take_stdin(),
+        process.take_stdout(),
+        process.take_stderr(),
+    );
+    let (Some(mut stdin), Some(stdout), Some(mut stderr)) = pipes else {
+        control.stop();
+        let _ = events.blocking_send(Event::ProtocolFailed(generation));
+        supervise_exit(process, generation, events, control);
+        return;
+    };
     let writer_control = control.clone();
     let writer_events = events.clone();
     tokio::task::spawn_blocking(move || {
@@ -998,7 +1110,15 @@ fn launch(
             }
         }
     });
-    let supervisor_control = control.clone();
+    supervise_exit(process, generation, events, control);
+}
+
+fn supervise_exit(
+    mut process: OwnedProcess,
+    generation: u32,
+    events: mpsc::Sender<Event>,
+    supervisor_control: ChildControl,
+) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(25));
         let mut terminated_at = None;
@@ -1033,7 +1153,6 @@ fn launch(
             }
         }
     });
-    Ok(control)
 }
 
 #[cfg(not(windows))]
@@ -1044,7 +1163,11 @@ async fn discover(_: &ControllerConfig) -> Result<Catalog, AppError> {
     ))
 }
 #[cfg(not(windows))]
-async fn start_limit(_: &ControllerConfig) -> Result<StartLimit, AppError> {
+async fn start_limit(
+    _: &ControllerConfig,
+    _: u32,
+    _: &mpsc::Sender<Event>,
+) -> Result<StartLimit, AppError> {
     Err(Failure::Configuration.error())
 }
 
@@ -1071,8 +1194,19 @@ pub(crate) fn rest_error(e: serenity::Error) -> AppError {
     }
 }
 #[cfg(windows)]
-async fn start_limit(config: &ControllerConfig) -> Result<StartLimit, AppError> {
-    let data = http(config)?
+async fn start_limit(
+    config: &ControllerConfig,
+    generation: u32,
+    events: &mpsc::Sender<Event>,
+) -> Result<StartLimit, AppError> {
+    let config = config.clone();
+    let http = tokio::task::spawn_blocking(move || http(&config))
+        .await
+        .map_err(|_| unavailable())??;
+    let _ = events
+        .send(Event::Stage(generation, ConnectStage::Preflight))
+        .await;
+    let data = http
         .get_bot_gateway()
         .await
         .map_err(rest_error)?
@@ -1101,20 +1235,27 @@ async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
             .map_err(rest_error)?;
         let complete = guilds.len() < 200;
         for guild in &guilds {
-            let channels = http
-                .get_channels(guild.id)
-                .await
-                .map_err(rest_error)?
+            let catalog = http.get_channels(guild.id).await.map_err(rest_error)?;
+            let categories: std::collections::HashMap<_, _> = catalog
+                .iter()
+                .filter(|c| c.kind == ChannelType::Category)
+                .map(|c| (c.id, c.name.clone()))
+                .collect();
+            let mut channels: Vec<_> = catalog
                 .into_iter()
                 .filter(|c| c.kind == ChannelType::Voice)
                 .map(|c| VoiceChannel {
                     id: c.id.to_string(),
                     name: c.name,
+                    category_name: c.parent_id.and_then(|id| categories.get(&id).cloned()),
+                    position: c.position,
                 })
                 .collect();
+            channels.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.id.cmp(&b.id)));
             servers.push(Server {
                 id: guild.id.to_string(),
                 name: guild.name.clone(),
+                icon_url: guild.icon_url(),
                 channels,
             });
         }
@@ -1171,9 +1312,12 @@ mod tests {
         actor.snapshot.servers.push(Server {
             id: "1".into(),
             name: "Server".into(),
+            icon_url: None,
             channels: vec![VoiceChannel {
                 id: "2".into(),
                 name: "Voice".into(),
+                category_name: None,
+                position: 0,
             }],
         });
         actor.snapshot.selection = Selection {
@@ -1186,10 +1330,250 @@ mod tests {
         actor.snapshot.session_id = 4;
         actor
     }
+    fn running_actor(mut actor: Actor) -> (Controller, mpsc::Sender<Event>) {
+        let (commands, receiver) = mpsc::channel(32);
+        let (events, event_rx) = mpsc::channel(32);
+        actor.events = events.clone();
+        let controller = Controller {
+            commands,
+            snapshots: actor.snapshots.subscribe(),
+        };
+        actor.publish();
+        tokio::spawn(actor.run_requests(receiver, event_rx));
+        (controller, events)
+    }
+    async fn responsive_output_and_cancel(controller: &Controller) {
+        // A blocked actor makes these acknowledgements time out, even though
+        // snapshot() itself can return the previous watch value immediately.
+        for command in [
+            ControlCommand::SetMuted { muted: true },
+            ControlCommand::SetVolume { percent: 37 },
+            ControlCommand::Disconnect,
+        ] {
+            tokio::time::timeout(Duration::from_millis(250), controller.dispatch(command))
+                .await
+                .expect("long operations must not block command acknowledgements")
+                .unwrap();
+        }
+        assert!(controller.snapshot().output.muted);
+        assert_eq!(controller.snapshot().output.volume_percent, 37);
+    }
+    #[tokio::test]
+    async fn delayed_preflight_keeps_commands_responsive_and_cancel_rejects_late_result() {
+        let mut a = actor();
+        a.pending = true;
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Checking,
+        };
+        let (started, start_rx) = oneshot::channel();
+        let (mut release, release_rx) = oneshot::channel();
+        a.start_preflight(4, async move {
+            let _ = started.send(());
+            let _ = release_rx.await;
+            Ok(StartLimit {
+                remaining: 10,
+                reset_after: Duration::from_secs(60),
+            })
+        });
+        let (controller, events) = running_actor(a);
+        start_rx.await.unwrap();
+        events
+            .send(Event::Stage(4, ConnectStage::Preflight))
+            .await
+            .unwrap();
+        let mut snapshots = controller.subscribe();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while controller.snapshot().connection
+                != (Connection::Connecting {
+                    stage: ConnectStage::Preflight,
+                })
+            {
+                snapshots.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        responsive_output_and_cancel(&controller).await;
+        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
+        // Aborting preflight drops its in-flight future, without waiting for REST.
+        tokio::time::timeout(Duration::from_millis(250), release.closed())
+            .await
+            .unwrap();
+        assert!(release.send(()).is_err());
+        events
+            .send(Event::Preflight(
+                4,
+                Ok(StartLimit {
+                    remaining: 10,
+                    reset_after: Duration::ZERO,
+                }),
+            ))
+            .await
+            .unwrap();
+        controller
+            .dispatch(ControlCommand::SetMuted { muted: true })
+            .await
+            .unwrap();
+        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
+        controller.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn delayed_join_keeps_commands_responsive_and_stays_locked_until_exit() {
+        let mut a = actor();
+        a.child = Some(child());
+        let child = a.child.as_ref().unwrap().clone();
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Join,
+        };
+        let (controller, events) = running_actor(a);
+        responsive_output_and_cancel(&controller).await;
+        assert!(child.stopped_at().is_some());
+        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
+        events
+            .send(Event::Status(
+                4,
+                Status::Connecting {
+                    stage: ConnectStage::Capture,
+                },
+            ))
+            .await
+            .unwrap();
+        events
+            .send(Event::Status(4, Status::Connected))
+            .await
+            .unwrap();
+        controller
+            .dispatch(ControlCommand::SetMuted { muted: true })
+            .await
+            .unwrap();
+        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
+        assert_eq!(
+            controller
+                .dispatch(ControlCommand::Connect)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        events.send(Event::Exited(4, true)).await.unwrap();
+        controller.shutdown().await.unwrap();
+        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delayed_process_creation_keeps_actor_responsive_and_owns_cancelled_late_child() {
+        let mut a = actor();
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Preflight,
+        };
+        let (events, mut event_rx) = mpsc::channel(32);
+        let (started, start_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (created, created_rx) = oneshot::channel();
+        let init = a.initialization().unwrap();
+        let control = launch_with(4, init, events, move || {
+            let _ = started.send(());
+            release_rx.recv().unwrap(); // Represents a blocked CreateProcessW.
+            let process = OwnedProcess::spawn(
+                std::path::Path::new("/usr/bin/python3"),
+                &[
+                    "-c".into(),
+                    // Ignore both stdin EOF and Stop; the parent must terminate it.
+                    "import time; time.sleep(30)".into(),
+                ],
+            )?;
+            let _ = created.send(());
+            Ok(process)
+        });
+        a.child = Some(control.clone());
+        let (controller, actor_events) = running_actor(a);
+        start_rx.await.unwrap();
+        responsive_output_and_cancel(&controller).await;
+        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
+        assert_eq!(
+            controller
+                .dispatch(ControlCommand::Connect)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        let stopped = control.stopped_at().unwrap();
+        // Ensure the original grace has expired *before* the late child exists.
+        tokio::time::sleep(STOP_GRACE + Duration::from_millis(25)).await;
+        assert_eq!(control.stopped_at(), Some(stopped));
+        release.send(()).unwrap();
+        created_rx.await.unwrap();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let event = event_rx.recv().await.unwrap();
+                let exited = matches!(event, Event::Exited(4, _));
+                actor_events.send(event).await.unwrap();
+                if exited {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("late child must use the original stop deadline and report real exit");
+        controller.shutdown().await.unwrap();
+        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
+    }
+    #[test]
+    fn stages_are_monotonic_generation_scoped_and_do_not_extend_connect_deadline() {
+        let mut a = actor();
+        a.pending = true;
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Checking,
+        };
+        a.deadline = Some(Instant::now() + CONNECT_DEADLINE);
+        let deadline = a.deadline;
+        a.event(Event::Stage(3, ConnectStage::Preflight));
+        assert_eq!(
+            a.snapshot.connection,
+            Connection::Connecting {
+                stage: ConnectStage::Checking
+            }
+        );
+        a.event(Event::Stage(4, ConnectStage::Preflight));
+        for stage in [
+            ConnectStage::Gateway,
+            ConnectStage::Join,
+            ConnectStage::Capture,
+        ] {
+            a.event(Event::Status(4, Status::Connecting { stage }));
+            assert_eq!(a.snapshot.connection, Connection::Connecting { stage });
+            assert_eq!(a.deadline, deadline);
+        }
+        assert_eq!(a.snapshot.capture.phase, CapturePhase::Opening);
+        a.event(Event::Status(
+            4,
+            Status::Connecting {
+                stage: ConnectStage::Gateway,
+            },
+        ));
+        assert_eq!(
+            a.snapshot.connection,
+            Connection::Connecting {
+                stage: ConnectStage::Capture
+            }
+        );
+        a.event(Event::Status(4, Status::Connected));
+        a.event(Event::Status(
+            4,
+            Status::Connecting {
+                stage: ConnectStage::Capture,
+            },
+        ));
+        assert_eq!(a.snapshot.connection, Connection::Connected);
+    }
     #[test]
     fn disconnect_during_join_or_recovery_requires_observed_exit() {
         for phase in [
-            Connection::Connecting,
+            Connection::Connecting {
+                stage: ConnectStage::Join,
+            },
             Connection::Connected,
             Connection::Recovering {
                 attempt: 1,
@@ -1218,7 +1602,9 @@ mod tests {
     fn stale_callbacks_never_change_current_session_or_cleanup() {
         let mut a = actor();
         a.child = Some(child());
-        a.snapshot.connection = Connection::Connecting;
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Join,
+        };
         let before = a.snapshot.clone();
         a.event(Event::Status(3, Status::Connected));
         a.event(Event::Exited(3, true));
@@ -1444,6 +1830,7 @@ mod tests {
         ));
         // Even a failed launch retains a parent-owned five-second cooldown.
         assert_eq!(a.connect().unwrap_err().code, ErrorCode::Busy);
+        a.event(Event::LaunchFailed(5));
         tokio::time::advance(Duration::from_secs(5)).await;
         assert!(a.connect().is_ok());
     }
@@ -1605,18 +1992,12 @@ mod tests {
             channel_id: "2".into(),
             output: ControlSnapshot::default().output,
         };
-        // WSL can briefly return ETXTBSY immediately after creating an executable.
-        let mut attempts = 0;
-        let child = loop {
-            match launch(&executable, 1, init.clone(), events.clone()) {
-                Ok(child) => break child,
-                Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
-                    attempts += 1;
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(e) => panic!("synthetic worker launch failed: {:?}", e.kind()),
-            }
-        };
+        let child = launch_with(1, init, events.clone(), move || {
+            OwnedProcess::spawn(
+                std::path::Path::new("/usr/bin/python3"),
+                &[executable.into_os_string()],
+            )
+        });
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if child.take_meter().is_some_and(|c| c.queued_frames == 127) {
@@ -1684,19 +2065,16 @@ mod tests {
         let (events, mut receiver) = mpsc::channel(32);
         let mut a = actor();
         let init = a.initialization().unwrap();
-        let mut attempts = 0;
-        let child = loop {
-            match launch(&executable, 4, init.clone(), events.clone()) {
-                Ok(child) => break child,
-                Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
-                    attempts += 1;
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(e) => panic!("synthetic worker launch failed: {:?}", e.kind()),
-            }
-        };
+        let child = launch_with(4, init, events.clone(), move || {
+            OwnedProcess::spawn(
+                std::path::Path::new("/usr/bin/python3"),
+                &[executable.into_os_string()],
+            )
+        });
         a.child = Some(child);
-        a.snapshot.connection = Connection::Connecting;
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Gateway,
+        };
         let mut connected = false;
         let mut eof = false;
         tokio::time::timeout(STOP_GRACE + EXIT_GRACE + Duration::from_secs(1), async {

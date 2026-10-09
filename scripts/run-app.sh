@@ -8,10 +8,13 @@ if [[ ! -f "$executable" ]]; then
   exit 1
 fi
 mkdir -p "$repo_root/.trash/app"
-arguments=(--data-dir "$(wslpath -w "$repo_root/.trash/app")")
-token_file="${ECHOCORD_TOKEN_FILE:-$repo_root/.trash/secrets/discord-token}"
-if [[ -f "$token_file" ]]; then
-  arguments+=(--token-file "$(wslpath -w "$(realpath "$token_file")")")
+arguments=()
+if [[ -n "${ECHOCORD_DATA_DIR:-}" ]]; then
+  mkdir -p "$ECHOCORD_DATA_DIR"
+  arguments+=(--data-dir "$(wslpath -w "$(realpath "$ECHOCORD_DATA_DIR")")")
+fi
+if [[ -n "${ECHOCORD_TOKEN_FILE:-}" ]]; then
+  arguments+=(--token-file "$(wslpath -w "$(realpath "$ECHOCORD_TOKEN_FILE")")")
 fi
 smoke_report=""
 if [[ "${1:-}" == --smoke ]]; then

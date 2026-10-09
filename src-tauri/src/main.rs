@@ -33,6 +33,11 @@ async fn dispatch(command: ControlCommand, state: State<'_, ShellState>) -> Resu
     state.controller.dispatch(command).await
 }
 
+#[tauri::command]
+async fn configure_bot(token: String, state: State<'_, ShellState>) -> Result<(), AppError> {
+    state.controller.configure_token(token).await
+}
+
 fn show_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -77,12 +82,14 @@ fn tray_action(app: &tauri::AppHandle, action: &str) {
 }
 
 fn parse_options() -> Result<(ControllerConfig, Option<PathBuf>), &'static str> {
+    let mut data_dir = None;
     let mut token_file = None;
     let mut settings_file = None;
     let mut smoke_report = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         let destination = match argument.to_str() {
+            Some("--data-dir") => &mut data_dir,
             Some("--token-file") => &mut token_file,
             Some("--settings-file") => &mut settings_file,
             Some("--smoke-report") => &mut smoke_report,
@@ -90,12 +97,17 @@ fn parse_options() -> Result<(ControllerConfig, Option<PathBuf>), &'static str> 
         };
         *destination = Some(PathBuf::from(args.next().ok_or("Missing option value")?));
     }
+    let data_dir = match data_dir {
+        Some(path) => path,
+        None => echocord_core::storage::default_data_dir()
+            .map_err(|_| "Cannot locate application data directory")?,
+    };
     Ok((
         ControllerConfig {
             executable: std::env::current_exe()
                 .map_err(|_| "Cannot locate application executable")?,
-            token_file,
-            settings_file,
+            token_file: Some(token_file.unwrap_or_else(|| data_dir.join("discord-token"))),
+            settings_file: Some(settings_file.unwrap_or_else(|| data_dir.join("preferences.json"))),
         },
         smoke_report,
     ))
@@ -122,7 +134,10 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(2);
     });
-    let expect_authenticated = configuration.token_file.is_some();
+    let expect_authenticated = configuration
+        .token_file
+        .as_ref()
+        .is_some_and(|p| p.is_file());
     let controller = tauri::async_runtime::block_on(async { Controller::spawn(configuration) });
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
@@ -136,7 +151,11 @@ fn main() {
             snapshot_requested: AtomicBool::new(false),
             expect_authenticated,
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, dispatch])
+        .invoke_handler(tauri::generate_handler![
+            get_snapshot,
+            dispatch,
+            configure_bot
+        ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();

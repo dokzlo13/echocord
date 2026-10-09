@@ -16,4 +16,10 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-010 | Session controller and Discord engine | done | EC-008 | runtime worker / a1 | main | [task](EC-010.md), 604e043; known findings resolved |
 | EC-011 | Production UI using reviewed direction | done | EC-007, EC-008 | UI worker / a1 | main | [task](EC-011.md), eaa2337; 42 browser tests and native smoke passed |
 
+| EC-012 | Responsive connection progress | active | EC-005 alpha accepted | runtime worker / a1 | agent/EC-012-a1 | [task](EC-012.md) |
+| EC-013 | Reviewed audio-surface redesign | active | EC-012 contract | design/UI worker / a1 | agent/EC-013-a1 | [task](EC-013.md) |
+| EC-014 | Capture and routing feasibility | active | — | research worker / a1 | main, read-only | [task](EC-014.md) |
+| EC-015 | Repository and handoff cleanup | active | alpha accepted | coordinator / a1 | main | [task](EC-015.md) |
+| EC-016 | Secure setup and app storage | ready | design decision | unassigned | — | Stretch / next iteration |
+
 Blocked here means an explicit task dependency, not a stalled runtime goal.

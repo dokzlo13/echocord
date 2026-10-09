@@ -49,7 +49,7 @@ Sources: [cargo-xwin](https://github.com/rust-cross/cargo-xwin), [Tauri Windows 
 
 ## Runtime storage
 
-A normal executable launch uses `ProjectDirs` local application data: `%LOCALAPPDATA%\Echocord\data` on Windows. The token is encrypted for the current Windows user with DPAPI; settings are ordinary JSON. The setup backend validates the token before saving and never joins voice; the redesigned setup form is still pending. Rust reads tokens; frontend snapshots contain no secret.
+A normal executable launch uses `ProjectDirs` local application data: `%LOCALAPPDATA%\Echocord\data` on Windows. The token is encrypted for the current Windows user with DPAPI; settings are ordinary JSON. In-app Test & Save validates the token before encrypted persistence and never joins voice. Rust reads tokens; frontend snapshots contain no secret.
 
 `make app-run` uses those defaults. Set `ECHOCORD_DATA_DIR` to an ignored WSL directory for isolated development storage. `ECHOCORD_TOKEN_FILE` explicitly overrides the encrypted credential destination. Plaintext credential files are not accepted. The executable also accepts `--data-dir`, `--token-file`, and `--settings-file`. Keep all private paths and fixtures outside Git. Tests and probes use explicit private directories and synthetic values.
 

@@ -22,7 +22,7 @@ Normal launches use platform-local application data. Development/test launches c
 
 ## UI and evolution
 
-The frontend receives snapshots and sends intentions; it owns no sample buffers or retry policy. Route drafts must remain visually distinct from the active route and take effect only through an explicit apply workflow. Closing the window keeps streaming in the tray; Quit closes process ownership.
+The frontend receives snapshots and sends intentions; it owns no sample buffers or retry policy. Its control store stays stable across meter-only observations; isolated telemetry consumers update DOM refs at bounded rates and pause for document/native hidden states. Actual input/post-gain levels remain native measurements; queue occupancy is not listener delay. Route drafts must remain visually distinct from the active route and take effect only through an explicit apply workflow. Closing the window keeps streaming in the tray; Quit closes process ownership.
 
 Future capture and shared-mix work is research, not implemented routing functionality. Keep recording capture as an adapter while establishing process/desktop capture isolation, sample-clock handling, and Discord destination constraints before extending the current single-source/single-destination model.
 

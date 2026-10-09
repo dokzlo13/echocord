@@ -16,13 +16,13 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-010 | Session controller and Discord engine | done | EC-008 | runtime worker / a1 | main | [task](EC-010.md), 604e043; known findings resolved |
 | EC-011 | Production UI using reviewed direction | done | EC-007, EC-008 | UI worker / a1 | main | [task](EC-011.md), eaa2337; 42 browser tests and native smoke passed |
 | EC-012 | Responsive connection progress | done | EC-005 | coordinator + runtime worker / a1 | main | [task](EC-012.md) |
-| EC-013 | Accepted Signal Bridge implementation | active | EC-012 | UI worker / a4 | agent/EC-013-a4 | [task](EC-013.md) |
+| EC-013 | Accepted Signal Bridge implementation | done | EC-012 | coordinator + UI worker / a4 | main | [task](EC-013.md) |
 | EC-014 | Capture and routing feasibility | done | — | research worker / a1 | main | [task](EC-014.md) |
 | EC-015 | Repository and handoff cleanup | done | EC-005 | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Protected storage and setup API | done | EC-005 | coordinator + storage worker / a1 | main | [task](EC-016.md) |
 | EC-017 | Process-capture and local-mute experiment | ready | EC-014 | unassigned; next iteration | — | [task](EC-017.md) |
-| EC-018 | Native post-gain meter | review | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
-| EC-019 | Isolated telemetry presentation | review | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
+| EC-018 | Native post-gain meter | done | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
+| EC-019 | Isolated telemetry presentation | done | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

@@ -9,11 +9,11 @@ make build
 make app-run
 ```
 
-Normal launches use local application data for preferences and the encrypted bot token. The backend setup command validates tokens before saving; its user-facing form awaits the reviewed UI implementation. Current development can provision the encrypted file locally. Credentials use current-user Windows DPAPI; they stay out of snapshots and Git. No voice connection starts automatically. Keep other applications using the same bot stopped during the test.
+Normal launches use local application data for preferences and the encrypted bot token. First-run bot setup accepts a token through Test & Save and validates it before encrypted persistence. Credentials use current-user Windows DPAPI; they stay out of snapshots and Git. No voice connection starts automatically. Keep other applications using the same bot stopped during the test.
 
 For isolated development runs, set `ECHOCORD_DATA_DIR` to an ignored local directory. An explicit `ECHOCORD_TOKEN_FILE` override selects a different encrypted credential destination; plaintext files are rejected. These overrides are optional, not part of ordinary setup.
 
-Route the music application's playback to VB-Cable's playback endpoint in Windows. In Echocord, select its recording endpoint, then a Discord server and voice channel, and press Connect. Listen through the regular Discord client. Test volume, Mute output, Disconnect, and another connection after the short connection-start cooldown. Closing the window keeps the session in the tray; Open restores it and Quit ends the application.
+Route the music application's playback to VB-Cable's playback endpoint in Windows. In Echocord, choose its recording endpoint and a Discord room in their drawers, apply the selection, and press Connect. During a session, route edits remain queued until Apply & reconnect. Listen through the regular Discord client. Test volume, Mute output, Disconnect, and another connection after the short connection-start cooldown. Closing the window keeps the session in the tray; Open restores it and Quit ends the application.
 
 ## Verification and remaining acceptance
 

@@ -18,4 +18,4 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 
 Use `make help` for build, check, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Status: the first Windows alpha passed a real audio/Discord user test; usability and setup improvements are in progress. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).
+Status: local Windows build with the accepted compact UI, encrypted in-app setup and isolated metering. The initial audio/Discord route passed user testing; longer-session acceptance remains open. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).

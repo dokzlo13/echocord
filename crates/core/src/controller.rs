@@ -44,10 +44,15 @@ pub struct Controller {
 
 enum Request {
     Dispatch(ControlCommand, oneshot::Sender<Result<(), AppError>>),
+    // Intentionally nonserialized and without Debug: only the shell's private
+    // configuration RPC may carry this short-lived secret into the actor.
+    ConfigureToken(String, oneshot::Sender<Result<(), AppError>>),
     Shutdown(oneshot::Sender<Result<(), AppError>>),
 }
 enum Event {
     Catalog(u64, Result<Catalog, AppError>),
+    Unconfigured(u64),
+    Configured(u64, Result<(), AppError>),
     #[cfg(any(windows, test))]
     Stage(u32, ConnectStage),
     Preflight(u32, Result<StartLimit, AppError>),
@@ -80,6 +85,16 @@ impl Controller {
         let (send, recv) = oneshot::channel();
         self.commands
             .send(Request::Dispatch(command, send))
+            .await
+            .map_err(|_| unavailable())?;
+        recv.await.map_err(|_| unavailable())?
+    }
+    /// Private configuration path, separate from the shared control-plane model.
+    /// Neither requests nor tokens may be logged or debug formatted by callers.
+    pub async fn configure_token(&self, token: String) -> Result<(), AppError> {
+        let (send, recv) = oneshot::channel();
+        self.commands
+            .send(Request::ConfigureToken(token, send))
             .await
             .map_err(|_| unavailable())?;
         recv.await.map_err(|_| unavailable())?
@@ -179,6 +194,12 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
     let suffix = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), suffix));
     let result = (|| {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -198,6 +219,16 @@ struct Catalog {
     servers: Vec<Server>,
     name: String,
 }
+
+fn missing_token(config: &ControllerConfig) -> bool {
+    config.token_file.as_ref().is_none_or(|path| {
+        std::fs::metadata(path).is_err_and(|error| missing_token_error(error.kind()))
+    })
+}
+
+fn missing_token_error(kind: std::io::ErrorKind) -> bool {
+    kind == std::io::ErrorKind::NotFound
+}
 struct StartLimit {
     remaining: u64,
     reset_after: Duration,
@@ -207,6 +238,14 @@ struct RetiredSession {
     generation: u32,
     catalog_epoch: u64,
     until: Instant,
+}
+
+struct ConfigurationCheck {
+    epoch: u64,
+    bot: BotProfile,
+    discovery: Discovery,
+    reply: oneshot::Sender<Result<(), AppError>>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 fn generic_failure(code: &ErrorCode) -> bool {
@@ -228,6 +267,7 @@ struct Actor {
     child: Option<ChildControl>,
     pending: bool,
     preflight: Option<tokio::task::JoinHandle<()>>,
+    configuration: Option<ConfigurationCheck>,
     next_launch: Option<Instant>,
     deadline: Option<Instant>,
     next_meter: Instant,
@@ -252,6 +292,7 @@ impl Actor {
             child: None,
             pending: false,
             preflight: None,
+            configuration: None,
             next_launch: None,
             deadline: None,
             next_meter: Instant::now(),
@@ -294,6 +335,7 @@ impl Actor {
             tokio::select! {
                 request = commands.recv(), if !self.shutting_down => match request {
                     Some(Request::Dispatch(command, reply)) => { let result = self.command(command); let _ = reply.send(result); }
+                    Some(Request::ConfigureToken(token, reply)) => self.configure_token(token, reply),
                     Some(Request::Shutdown(reply)) => { self.shutdown_waiters.push(reply); self.shutting_down = true; self.disconnect(); }
                     None => { self.shutting_down = true; self.disconnect(); }
                 },
@@ -324,6 +366,10 @@ impl Actor {
                 for waiter in self.shutdown_waiters.drain(..) {
                     let _ = waiter.send(result.clone());
                 }
+                if let Some(configuration) = self.configuration.take() {
+                    configuration.task.abort();
+                    let _ = configuration.reply.send(Err(unavailable()));
+                }
                 // The supervisor still owns a kill-on-close job on incomplete cleanup.
                 break;
             }
@@ -343,10 +389,24 @@ impl Actor {
         let config = self.config.clone();
         let events = self.events.clone();
         tokio::spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(30), discover(&config))
-                .await
-                .unwrap_or_else(|_| Err(Failure::Connection.error()));
-            let _ = events.send(Event::Catalog(epoch, result)).await;
+            let result = tokio::time::timeout(Duration::from_secs(30), async {
+                let check_config = config.clone();
+                if tokio::task::spawn_blocking(move || missing_token(&check_config))
+                    .await
+                    .map_err(|_| unavailable())?
+                {
+                    return Ok(None);
+                }
+                discover(&config).await.map(Some)
+            })
+            .await
+            .unwrap_or_else(|_| Err(Failure::Connection.error()));
+            let event = match result {
+                Ok(None) => Event::Unconfigured(epoch),
+                Ok(Some(catalog)) => Event::Catalog(epoch, Ok(catalog)),
+                Err(error) => Event::Catalog(epoch, Err(error)),
+            };
+            let _ = events.send(event).await;
         });
     }
     fn poll_deadline(&mut self) {
@@ -362,7 +422,7 @@ impl Actor {
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
             ControlCommand::RefreshCatalog | ControlCommand::RecheckConfiguration => {
-                if self.snapshot.connection.locks_route() {
+                if self.snapshot.connection.locks_route() || self.configuration.is_some() {
                     return Err(busy());
                 }
                 self.refresh();
@@ -483,6 +543,72 @@ impl Actor {
             start_limit(&config, generation, &events).await
         });
         Ok(())
+    }
+
+    fn configure_token(&mut self, token: String, reply: oneshot::Sender<Result<(), AppError>>) {
+        if self.configuration_busy() {
+            let _ = reply.send(Err(busy()));
+            return;
+        }
+        let Some(path) = self.config.token_file.clone() else {
+            let _ = reply.send(Err(Failure::Configuration.error()));
+            return;
+        };
+        if !separate_settings(&self.config) {
+            let _ = reply.send(Err(Failure::Configuration.error()));
+            return;
+        }
+        let token = token.trim().to_owned();
+        if token.is_empty()
+            || token.len() > 4096
+            || token.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            let _ = reply.send(Err(Failure::Configuration.error()));
+            return;
+        }
+        self.start_configuration(reply, configure_bot_token(path, token));
+    }
+
+    fn start_configuration(
+        &mut self,
+        reply: oneshot::Sender<Result<(), AppError>>,
+        operation: impl std::future::Future<Output = Result<(), AppError>> + Send + 'static,
+    ) {
+        if self.configuration_busy() {
+            let _ = reply.send(Err(busy()));
+            return;
+        }
+        self.retired = None;
+        self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
+        let epoch = self.catalog_epoch;
+        let bot = self.snapshot.bot.clone();
+        let discovery = self.snapshot.discovery.clone();
+        self.snapshot.bot = BotProfile {
+            status: BotStatus::Checking,
+            name: None,
+            message: None,
+        };
+        self.snapshot.discovery = Discovery::Loading;
+        self.publish();
+        let events = self.events.clone();
+        let task = tokio::spawn(async move {
+            let result = operation.await;
+            let _ = events.send(Event::Configured(epoch, result)).await;
+        });
+        self.configuration = Some(ConfigurationCheck {
+            epoch,
+            bot,
+            discovery,
+            reply,
+            task,
+        });
+    }
+    fn configuration_busy(&self) -> bool {
+        self.child.is_some()
+            || self.pending
+            || self.snapshot.connection.locks_route()
+            || self.configuration.is_some()
+            || self.shutting_down
     }
     fn start_preflight(
         &mut self,
@@ -613,6 +739,51 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::Unconfigured(epoch) => {
+                if epoch != self.catalog_epoch || self.shutting_down {
+                    return;
+                }
+                self.snapshot.bot = BotProfile {
+                    status: BotStatus::Unconfigured,
+                    name: None,
+                    message: None,
+                };
+                self.snapshot.discovery = match &self.preferences_error {
+                    Some(error) => Discovery::Error {
+                        message: error.message.clone(),
+                    },
+                    None => Discovery::Idle,
+                };
+                self.publish();
+            }
+            Event::Configured(epoch, result) => {
+                if self
+                    .configuration
+                    .as_ref()
+                    .is_none_or(|check| check.epoch != epoch)
+                    || self.shutting_down
+                {
+                    return;
+                }
+                let configuration = self
+                    .configuration
+                    .take()
+                    .expect("matched configuration epoch");
+                if result.is_ok() {
+                    self.refresh();
+                } else {
+                    self.snapshot.bot = configuration.bot;
+                    self.snapshot.discovery = configuration.discovery;
+                    if matches!(self.snapshot.discovery, Discovery::Loading) {
+                        // The previous discovery was invalidated while testing;
+                        // restart it against the unchanged, previously saved token.
+                        self.refresh();
+                    } else {
+                        self.publish();
+                    }
+                }
+                let _ = configuration.reply.send(result);
+            }
             #[cfg(any(windows, test))]
             Event::Stage(generation, stage) => {
                 if generation == self.snapshot.session_id && self.pending && !self.shutting_down {
@@ -1162,6 +1333,45 @@ async fn discover(_: &ControllerConfig) -> Result<Catalog, AppError> {
         "Recording and Discord are supported on Windows.",
     ))
 }
+
+#[cfg(not(windows))]
+async fn configure_bot_token(_: PathBuf, _: String) -> Result<(), AppError> {
+    Err(Failure::Configuration.error())
+}
+
+#[cfg(any(windows, test))]
+async fn validate_then_save(
+    validation: impl std::future::Future<Output = Result<(), AppError>>,
+    save: impl FnOnce() -> Result<(), AppError> + Send + 'static,
+) -> Result<(), AppError> {
+    tokio::time::timeout(Duration::from_secs(15), validation)
+        .await
+        .unwrap_or_else(|_| Err(Failure::Connection.error()))?;
+    // File encryption/write work cannot block the actor or its controls. Once
+    // saving starts, await its actual result; a timeout must not restore old UI
+    // state while an uncancelled blocking write is still changing the token.
+    tokio::task::spawn_blocking(save)
+        .await
+        .map_err(|_| unavailable())?
+}
+
+#[cfg(windows)]
+async fn configure_bot_token(path: PathBuf, token: String) -> Result<(), AppError> {
+    let http = serenity::http::Http::new(&token);
+    validate_then_save(
+        async move {
+            let user = http.get_current_user().await.map_err(rest_error)?;
+            if !user.bot {
+                return Err(Failure::Authentication.error());
+            }
+            Ok(())
+        },
+        move || {
+            crate::storage::save_token(&path, &token).map_err(|_| Failure::Configuration.error())
+        },
+    )
+    .await
+}
 #[cfg(not(windows))]
 async fn start_limit(
     _: &ControllerConfig,
@@ -1219,8 +1429,12 @@ async fn start_limit(
 #[cfg(windows)]
 async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
     use serenity::{http::GuildPagination, model::channel::ChannelType};
-    let sources = crate::audio::enumerate_sources()?;
-    let http = http(config)?;
+    let config = config.clone();
+    let (sources, http) = tokio::task::spawn_blocking(move || {
+        Ok::<_, AppError>((crate::audio::enumerate_sources()?, http(&config)?))
+    })
+    .await
+    .map_err(|_| unavailable())??;
     let user = http.get_current_user().await.map_err(rest_error)?;
     if !user.bot {
         return Err(Failure::Authentication.error());
@@ -1331,16 +1545,19 @@ mod tests {
         actor
     }
     fn running_actor(mut actor: Actor) -> (Controller, mpsc::Sender<Event>) {
-        let (commands, receiver) = mpsc::channel(32);
         let (events, event_rx) = mpsc::channel(32);
         actor.events = events.clone();
+        (running_actor_on(actor, event_rx), events)
+    }
+    fn running_actor_on(mut actor: Actor, event_rx: mpsc::Receiver<Event>) -> Controller {
+        let (commands, receiver) = mpsc::channel(32);
         let controller = Controller {
             commands,
             snapshots: actor.snapshots.subscribe(),
         };
         actor.publish();
         tokio::spawn(actor.run_requests(receiver, event_rx));
-        (controller, events)
+        controller
     }
     async fn responsive_output_and_cancel(controller: &Controller) {
         // A blocked actor makes these acknowledgements time out, even though
@@ -1361,6 +1578,8 @@ mod tests {
     #[tokio::test]
     async fn delayed_preflight_keeps_commands_responsive_and_cancel_rejects_late_result() {
         let mut a = actor();
+        let (events, event_rx) = mpsc::channel(32);
+        a.events = events.clone();
         a.pending = true;
         a.snapshot.connection = Connection::Connecting {
             stage: ConnectStage::Checking,
@@ -1375,7 +1594,7 @@ mod tests {
                 reset_after: Duration::from_secs(60),
             })
         });
-        let (controller, events) = running_actor(a);
+        let controller = running_actor_on(a, event_rx);
         start_rx.await.unwrap();
         events
             .send(Event::Stage(4, ConnectStage::Preflight))
@@ -1567,6 +1786,393 @@ mod tests {
             },
         ));
         assert_eq!(a.snapshot.connection, Connection::Connected);
+    }
+    #[tokio::test]
+    async fn private_token_check_is_serialized_responsive_and_restores_previous_configuration() {
+        let mut a = actor();
+        let (events, event_rx) = mpsc::channel(32);
+        a.events = events.clone();
+        a.snapshot.bot.name = Some("Previously saved bot".into());
+        let previous = a.snapshot.bot.clone();
+        let stale_epoch = a.catalog_epoch;
+        let stale_catalog = Catalog {
+            sources: a.snapshot.sources.clone(),
+            servers: a.snapshot.servers.clone(),
+            name: "Stale bot".into(),
+        };
+        let (reply, result) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        a.start_configuration(reply, async move {
+            let _ = started.send(());
+            let _ = release_rx.await;
+            Err(Failure::Authentication.error())
+        });
+        let controller = running_actor_on(a, event_rx);
+        started_rx.await.unwrap();
+        assert_eq!(controller.snapshot().bot.status, BotStatus::Checking);
+        assert_eq!(controller.snapshot().discovery, Discovery::Loading);
+        events
+            .send(Event::Catalog(stale_epoch, Ok(stale_catalog)))
+            .await
+            .unwrap();
+        for command in [
+            ControlCommand::SetMuted { muted: true },
+            ControlCommand::SetVolume { percent: 42 },
+        ] {
+            tokio::time::timeout(Duration::from_millis(250), controller.dispatch(command))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(controller.snapshot().bot.status, BotStatus::Checking);
+        assert!(controller.snapshot().output.muted);
+        assert_eq!(controller.snapshot().output.volume_percent, 42);
+        assert_eq!(
+            controller
+                .configure_token("synthetic-private-token".into())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        assert_eq!(
+            controller
+                .dispatch(ControlCommand::RefreshCatalog)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Busy
+        );
+        assert!(controller.dispatch(ControlCommand::Connect).await.is_err());
+        assert!(
+            !serde_json::to_string(&controller.snapshot())
+                .unwrap()
+                .contains("synthetic-private-token")
+        );
+        release.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), result)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::Authentication
+        );
+        assert_eq!(controller.snapshot().bot, previous);
+        assert_eq!(controller.snapshot().discovery, Discovery::Ready);
+        controller.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn configuration_rejects_active_pending_and_cleanup_sessions_without_running_operation() {
+        for (connection, pending, has_child) in [
+            (Connection::Disconnected, true, false),
+            (
+                Connection::Connecting {
+                    stage: ConnectStage::Join,
+                },
+                false,
+                true,
+            ),
+            (Connection::Connected, false, true),
+            (
+                Connection::CleanupIncomplete {
+                    message: "Pending exit".into(),
+                },
+                false,
+                true,
+            ),
+        ] {
+            let mut a = actor();
+            a.snapshot.connection = connection;
+            a.pending = pending;
+            if has_child {
+                a.child = Some(child());
+            }
+            let before = a.snapshot.clone();
+            let (reply, result) = oneshot::channel();
+            a.start_configuration(reply, async {
+                panic!("rejected configuration must not validate or save")
+            });
+            assert_eq!(result.await.unwrap().unwrap_err().code, ErrorCode::Busy);
+            assert_eq!(a.snapshot, before);
+            assert!(a.configuration.is_none());
+        }
+    }
+    #[tokio::test]
+    async fn malformed_private_token_requests_do_not_replace_saved_configuration() {
+        let a = actor();
+        let previous = a.snapshot.bot.clone();
+        let (controller, _) = running_actor(a);
+        for token in [String::new(), "invalid token".into(), "x".repeat(4097)] {
+            assert_eq!(
+                controller.configure_token(token).await.unwrap_err().code,
+                ErrorCode::Configuration
+            );
+            assert_eq!(controller.snapshot().bot, previous);
+        }
+        controller.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn configuration_refreshes_only_after_successful_persistence() {
+        let mut a = actor();
+        let old_epoch = a.catalog_epoch;
+        let (reply, result) = oneshot::channel();
+        let (release, release_rx) = oneshot::channel();
+        a.start_configuration(reply, async move {
+            let _ = release_rx.await;
+            Ok(())
+        });
+        let validation_epoch = a.catalog_epoch;
+        assert_ne!(validation_epoch, old_epoch);
+        a.event(Event::Configured(old_epoch, Ok(())));
+        assert!(a.configuration.is_some());
+        assert_eq!(a.snapshot.bot.status, BotStatus::Checking);
+        a.event(Event::Configured(validation_epoch, Ok(())));
+        result.await.unwrap().unwrap();
+        assert!(a.configuration.is_none());
+        assert_ne!(a.catalog_epoch, validation_epoch);
+        assert_eq!(a.snapshot.bot.status, BotStatus::Checking);
+        assert_eq!(a.snapshot.discovery, Discovery::Loading);
+        let _ = release.send(());
+    }
+    #[tokio::test]
+    async fn failed_validation_never_calls_storage_and_success_waits_for_actual_save() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let saved = Arc::new(AtomicBool::new(false));
+        let flag = saved.clone();
+        let result =
+            validate_then_save(async { Err(Failure::Authentication.error()) }, move || {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::Authentication);
+        assert!(!saved.load(Ordering::SeqCst));
+        let validated = Arc::new(AtomicBool::new(false));
+        let validation_flag = validated.clone();
+        let flag = saved.clone();
+        validate_then_save(
+            async move {
+                validation_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            move || {
+                assert!(validated.load(Ordering::SeqCst));
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert!(saved.load(Ordering::SeqCst));
+        let error = validate_then_save(async { Ok(()) }, || Err(Failure::Configuration.error()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Configuration);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn stalled_bot_validation_times_out_without_touching_storage() {
+        let error = validate_then_save(std::future::pending(), || {
+            panic!("timed-out validation must not save")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::ConnectionFailed);
+    }
+    #[tokio::test]
+    async fn missing_default_token_starts_unconfigured_without_an_error_or_a_token_file() {
+        let config = config();
+        let path = config.token_file.clone().unwrap();
+        let controller = Controller::spawn(config);
+        let mut snapshots = controller.subscribe();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = controller.snapshot();
+                if snapshot.revision > 0
+                    && snapshot.bot.status == BotStatus::Unconfigured
+                    && snapshot.discovery == Discovery::Idle
+                {
+                    break;
+                }
+                snapshots.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(controller.snapshot().bot.message.is_none());
+        assert!(!path.exists());
+        controller.shutdown().await.unwrap();
+    }
+    #[test]
+    fn only_not_found_is_classified_as_missing_configuration() {
+        assert!(missing_token_error(std::io::ErrorKind::NotFound));
+        assert!(!missing_token_error(std::io::ErrorKind::PermissionDenied));
+        assert!(!missing_token_error(std::io::ErrorKind::InvalidData));
+        let directory =
+            std::env::temp_dir().join(format!("echocord-config-presence-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut config = config();
+        let token_path = directory.join("token");
+        config.token_file = Some(token_path.clone());
+        assert!(missing_token(&config));
+        std::fs::write(&token_path, b"malformed envelope").unwrap();
+        assert!(!missing_token(&config));
+        config.token_file = Some(directory.clone());
+        assert!(!missing_token(&config));
+        std::fs::remove_dir_all(directory).unwrap();
+        let mut a = actor();
+        a.event(Event::Catalog(
+            a.catalog_epoch,
+            Err(Failure::Configuration.error()),
+        ));
+        assert_eq!(a.snapshot.bot.status, BotStatus::Error);
+    }
+    #[tokio::test]
+    async fn first_output_change_creates_only_the_preferences_parent_directory() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-first-settings-{}", std::process::id()));
+        assert!(!directory.exists());
+        let mut config = config();
+        let settings = directory.join("new-profile/preferences.json");
+        config.settings_file = Some(settings.clone());
+        let token_file = config.token_file.clone().unwrap();
+        let controller = Controller::spawn(config.clone());
+        controller
+            .dispatch(ControlCommand::SetMuted { muted: true })
+            .await
+            .unwrap();
+        assert!(settings.is_file());
+        assert!(!token_file.exists());
+        assert!(load_preferences(&config).unwrap().output.unwrap().muted);
+        controller.shutdown().await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[tokio::test]
+    async fn private_token_configuration_rejects_the_preferences_file_before_checking_or_saving() {
+        let mut a = actor();
+        a.config.settings_file = a.config.token_file.clone();
+        let previous = a.snapshot.clone();
+        let (reply, result) = oneshot::channel();
+        a.configure_token("synthetic-private-token".into(), reply);
+        assert_eq!(
+            result.await.unwrap().unwrap_err().code,
+            ErrorCode::Configuration
+        );
+        assert_eq!(a.snapshot, previous);
+        assert!(a.configuration.is_none());
+        #[cfg(unix)]
+        {
+            let directory =
+                std::env::temp_dir().join(format!("echocord-config-alias-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let settings = directory.join("preferences.json");
+            let token = directory.join("token-alias");
+            std::fs::write(&settings, b"unchanged preferences").unwrap();
+            std::os::unix::fs::symlink(&settings, &token).unwrap();
+            a.config.settings_file = Some(settings.clone());
+            a.config.token_file = Some(token);
+            let (reply, result) = oneshot::channel();
+            a.configure_token("synthetic-private-token".into(), reply);
+            assert_eq!(
+                result.await.unwrap().unwrap_err().code,
+                ErrorCode::Configuration
+            );
+            assert_eq!(a.snapshot, previous);
+            assert!(a.configuration.is_none());
+            assert_eq!(std::fs::read(&settings).unwrap(), b"unchanged preferences");
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn delayed_token_save_keeps_output_responsive_and_does_not_reply_before_storage_finishes()
+    {
+        let mut a = actor();
+        let (events, event_rx) = mpsc::channel(32);
+        a.events = events;
+        let (reply, mut result) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        a.start_configuration(
+            reply,
+            validate_then_save(async { Ok(()) }, move || {
+                let _ = started.send(());
+                release_rx.recv().unwrap();
+                Ok(())
+            }),
+        );
+        let controller = running_actor_on(a, event_rx);
+        started_rx.await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            controller.dispatch(ControlCommand::SetMuted { muted: true }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            result.try_recv().unwrap_err(),
+            oneshot::error::TryRecvError::Empty
+        );
+        assert_eq!(controller.snapshot().bot.status, BotStatus::Checking);
+        assert!(controller.snapshot().output.muted);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), result)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        controller.shutdown().await.unwrap();
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_worker_initialization_uses_output_changes_made_during_process_creation() {
+        let mut a = actor();
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Preflight,
+        };
+        let (events, event_rx) = mpsc::channel(32);
+        a.events = events.clone();
+        let (started, started_rx) = oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let init = a.initialization().unwrap();
+        a.child = Some(launch_with(4, init, events, move || {
+            let _ = started.send(());
+            release_rx.recv().unwrap();
+            // The only emitted stage proves the *initial* frame already had the
+            // latest output controls; no real capture or network is involved.
+            let script = "import sys,json\nf=json.loads(sys.stdin.readline())\nassert f['body']['output']=={'muted':True,'volumePercent':37}\nprint(json.dumps({'version':1,'generation':4,'sequence':1,'body':{'type':'connecting','stage':'join'}}),flush=True)\nfor line in sys.stdin:\n if json.loads(line)['body']['type']=='stop': break\n";
+            OwnedProcess::spawn(
+                std::path::Path::new("/usr/bin/python3"),
+                &["-c".into(), script.into()],
+            )
+        }));
+        let controller = running_actor_on(a, event_rx);
+        started_rx.await.unwrap();
+        controller
+            .dispatch(ControlCommand::SetMuted { muted: true })
+            .await
+            .unwrap();
+        controller
+            .dispatch(ControlCommand::SetVolume { percent: 37 })
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        let mut snapshots = controller.subscribe();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while controller.snapshot().connection
+                != (Connection::Connecting {
+                    stage: ConnectStage::Join,
+                })
+            {
+                snapshots.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("late Init must carry the most recent output controls");
+        controller.shutdown().await.unwrap();
+        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
     }
     #[test]
     fn disconnect_during_join_or_recovery_requires_observed_exit() {

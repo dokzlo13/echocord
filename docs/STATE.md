@@ -10,6 +10,6 @@ Post-implementation user testing confirms the updated app and live meters work. 
 
 Session scope is complete. Workers and accepted branches/worktrees are cleaned up, main is linear, and redundant agent-generated private artifacts were removed. Original notes, credentials, settings, launcher and a concise evidence/design-reference set remain ignored. Read private LOCAL.md if present for local runtime details.
 
-Next work stays deferred: EC-017 process-tree capture and independent local-playback suppression, then EC-020 one shared mix and destination fan-out. CAPTURE.md records feasibility and Discord constraints. No new capture type, mixer, virtual driver or multi-destination functionality is shipped.
+Next-session order is explicit in BOARD: first a bounded EC-021 usability pass, then EC-017 better driver-free app capture as the next major feature, followed by EC-020 one shared mix and destination fan-out. Avoid another broad redesign before capture. EC-017 proceeds from an isolation/local-suppression experiment through reviewed source selection to a usable integrated capture path. CAPTURE.md records feasibility and Discord constraints. No new capture type, mixer, virtual driver or multi-destination functionality is shipped.
 
 Use make build/check/app-run. Normal Windows launches use encrypted per-user local app data; DEVELOPMENT.md documents isolated overrides. Source/builds/dependencies stay in WSL. Resume from tasks/BOARD.md without relying on old chat threads or running agents.

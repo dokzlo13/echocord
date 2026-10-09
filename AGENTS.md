@@ -1,6 +1,6 @@
 # Working on Echocord
 
-Start with `docs/STATE.md`, `tasks/BOARD.md`, and your assigned task. Read `docs/BRIEF.md` before changing product behavior. If `.trash/LOCAL.md` exists, read it for private local context without copying its contents into tracked files. User corrections override older documents; reconcile the documents when decisions change. Keep accepted requirements separate from proposals and measured results.
+Start with `docs/STATE.md`, `tasks/BOARD.md`, and your assigned task. Read `docs/BRIEF.md` before changing product behavior. If `.trash/LOCAL.md` exists, read it for private local context without copying its contents into tracked files. Owner-authored inputs belong in ignored `.trash/owner/`, indexed by `.trash/LOCAL.md`; preserve them verbatim and keep agent-generated material outside that folder. User corrections override older documents; reconcile the documents when decisions change. Keep accepted requirements separate from proposals and measured results.
 
 ## Product and environment
 

@@ -17,7 +17,7 @@ use tokio::{
 };
 
 const LAUNCH_COOLDOWN: Duration = Duration::from_secs(5);
-const STOP_GRACE: Duration = Duration::from_secs(3);
+const STOP_GRACE: Duration = Duration::from_millis(750);
 const EXIT_GRACE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(40);

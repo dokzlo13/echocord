@@ -2,7 +2,7 @@
 
 use echocord_core::{
     controller::{Controller, ControllerConfig},
-    model::{AppError, Connection, ControlCommand, ControlSnapshot},
+    model::{AppError, BotStatus, Connection, ControlCommand, ControlSnapshot, Discovery},
 };
 use std::{
     path::PathBuf,
@@ -19,6 +19,7 @@ struct ShellState {
     controller: Controller,
     exiting: AtomicBool,
     snapshot_requested: AtomicBool,
+    expect_authenticated: bool,
 }
 
 #[tauri::command]
@@ -121,12 +122,19 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(2);
     });
+    let expect_authenticated = configuration.token_file.is_some();
     let controller = tauri::async_runtime::block_on(async { Controller::spawn(configuration) });
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _directory| {
+                show_window(app);
+            },
+        ))
         .manage(ShellState {
             controller,
             exiting: AtomicBool::new(false),
             snapshot_requested: AtomicBool::new(false),
+            expect_authenticated,
         })
         .invoke_handler(tauri::generate_handler![get_snapshot, dispatch])
         .on_window_event(|window, event| {
@@ -236,6 +244,20 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
         .load(Ordering::SeqCst)
     {
         return false;
+    }
+    if app.state::<ShellState>().expect_authenticated {
+        let mut authenticated = false;
+        for _ in 0..150 {
+            let snapshot = app.state::<ShellState>().controller.snapshot();
+            if snapshot.bot.status == BotStatus::Ready && snapshot.discovery == Discovery::Ready {
+                authenticated = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !authenticated {
+            return false;
+        }
     }
     let Some(window) = app.get_webview_window("main") else {
         return false;

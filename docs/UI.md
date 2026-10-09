@@ -1,8 +1,8 @@
 # Desktop control UI
 
-The production UI lives in `ui/` and follows the adopted [UI direction](UI-DIRECTION.md) and [architecture decisions](REVIEW.md). The initial production surface passed native and browser checks, but was rejected visually in user review. It is being redesigned; the obsolete mock was removed from the working tree.
+The production UI lives in `ui/`. Its initial surface passed native and browser checks but was rejected visually in user review. The first replacement concepts were also rejected. Independent design work is exploring a compact source-to-output surface with contextual selection panels; no replacement visual direction is approved yet. The details below describe the current alpha, not the target design. The obsolete standalone mock was removed from the working tree.
 
-## Accepted layout and state behavior
+## Current alpha layout and state behavior
 
 Use a compact, left-aligned route form above a persistent session-control area. The default client is 480×600 logical pixels, with 420×540 as the supported minimum. Recording device and pre-output meter precede server/channel and concise configuration/discovery status. The route area scrolls independently; connection, Discord volume, and Mute output remain visible. Bot settings stay readable during a session. Routing help is available on demand rather than occupying the main controls.
 
@@ -28,6 +28,7 @@ The settings modal starts focus on its always-enabled Close control through Mant
 `ui/src/generated.ts` is coordinator-owned and generated from Rust. It is typechecked with the frontend, excluded from Biome formatting/lint, and unchanged by this worker. There is no competing TypeScript wire model.
 
 - `get_snapshot` takes no arguments and returns generated `ControlSnapshot`.
+- `configure_bot` takes `{ token: string }`, validates and stores the secret in Rust, and returns no credential data. Its user-facing setup form is pending the new design.
 - `dispatch` takes `{ command: ControlCommand }`, resolves void on acceptance, and rejects with generated `AppError`.
 - `echocord://snapshot` carries generated `ControlSnapshot`.
 

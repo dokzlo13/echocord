@@ -1,5 +1,6 @@
 # First-build interface direction
 
+Historical first-alpha direction. The owner rejected this visual surface after real use; current redesign status is in STATE.md and EC-013. Keep the research/provenance as evidence, not as approval for new UI implementation.
 The pinned frontend-design and playwright-cli skills were evaluated on the existing fixture UI before production UI assignment. Both were usable with project constraints. The browser skill ran through the locked Playwright 1.64.0 runtime using isolated Chromium; no alpha/global CLI or personal browser profile was required. CLI evaluation needed an explicit bundled-Chromium configuration and a short private temporary path for browser IPC sockets. Screenshots and keyboard evidence remain under ignored `.trash/`.
 
 ## Adopted layout and tokens

@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+directories = "=6.0.0"
 ts-rs = "=12.0.1"
 rtrb = "=0.4.0"
 symphonia-core = "=0.5.5"
@@ -18,7 +19,7 @@ opus2 = { version = "=0.4.0", features = ["bundled"] }
 songbird = { version = "=0.6.0", default-features = false, features = ["driver", "gateway", "serenity", "rustls", "tungstenite"] }
 serenity = { version = "=0.12.5", default-features = false, features = ["client", "gateway", "model", "http", "rustls_backend", "voice"] }
 symphonia = { version = "=0.5.5", default-features = false, features = ["pcm"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Pipes"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Pipes"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

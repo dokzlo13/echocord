@@ -12,4 +12,4 @@ Use plain Git task records with one coordinator and separate WSL worktrees for i
 
 The generic Windows executable builds entirely in WSL with the pinned Rust/MSVC target and runs on the Windows host. Formatting and Clippy pass for that probe. No Windows development packages were installed. This does not prove the audio or Tauri dependency graph.
 
-No working audio stream, Tauri UI, live-call test, or active CI yet. EC-002 dependency probe and EC-004 UI design are ready and can proceed independently. EC-007 selects real vetted upstream skills after EC-002; no synthetic skill is required to start a mock UI design.
+No working audio stream, Tauri UI, live-call test, or active CI yet. EC-002 dependency probe and EC-004 UI design are active in separate scopes; see the board and task briefs for ownership. EC-007 selects real vetted upstream skills after EC-002; no synthetic skill is required to start a mock UI design.

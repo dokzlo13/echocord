@@ -16,7 +16,7 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-010 | Session controller and Discord engine | done | EC-008 | runtime worker / a1 | main | [task](EC-010.md), 604e043; known findings resolved |
 | EC-011 | Production UI using reviewed direction | done | EC-007, EC-008 | UI worker / a1 | main | [task](EC-011.md), eaa2337; 42 browser tests and native smoke passed |
 | EC-012 | Responsive connection progress | done | EC-005 | coordinator + runtime worker / a1 | main | [task](EC-012.md) |
-| EC-013 | Reviewed audio-surface redesign | active | EC-012 | design lead / a3; refinement | main | [task](EC-013.md) |
+| EC-013 | Reviewed audio-surface redesign | review | EC-012 | design lead / a3; refined owner review | main | [task](EC-013.md) |
 | EC-014 | Capture and routing feasibility | done | — | research worker / a1 | main | [task](EC-014.md) |
 | EC-015 | Repository and handoff cleanup | done | EC-005 | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Protected storage and setup API | done | EC-005 | coordinator + storage worker / a1 | main | [task](EC-016.md) |

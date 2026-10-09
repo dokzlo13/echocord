@@ -229,10 +229,9 @@ fn main() {
             let mut snapshots = app.state::<ShellState>().controller.subscribe();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                let mut last_tray = None;
                 loop {
                     let snapshot = snapshots.borrow_and_update().clone();
-                    let _ = mute.set_checked(snapshot.output.muted);
-                    let _ = disconnect.set_enabled(snapshot.connection.locks_route());
                     let label = match &snapshot.connection {
                         Connection::Connected if snapshot.output.muted => "connected, muted",
                         Connection::Connected => "connected",
@@ -244,7 +243,17 @@ fn main() {
                         }
                         Connection::Disconnected => "disconnected",
                     };
-                    let _ = tray.set_tooltip(Some(format!("Echocord — {label}")));
+                    let tray_state = (
+                        snapshot.output.muted,
+                        snapshot.connection.locks_route(),
+                        label,
+                    );
+                    if last_tray != Some(tray_state) {
+                        let _ = mute.set_checked(tray_state.0);
+                        let _ = disconnect.set_enabled(tray_state.1);
+                        let _ = tray.set_tooltip(Some(format!("Echocord — {label}")));
+                        last_tray = Some(tray_state);
+                    }
                     let _ = handle.emit("echocord://snapshot", &snapshot);
                     if snapshots.changed().await.is_err() {
                         break;

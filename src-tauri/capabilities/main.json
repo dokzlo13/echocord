@@ -1,6 +1,6 @@
 {
   "identifier": "main-events",
-  "description": "Subscribe to sanitized controller snapshots in the main window.",
+  "description": "Subscribe to sanitized controller snapshots and presentation visibility in the main window.",
   "windows": ["main"],
   "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

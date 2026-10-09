@@ -3,7 +3,7 @@
 //! Wrap `CaptureSession::input` in `songbird::input::RawAdapter::new(input, 48_000, 2)`.
 //! Reads never report temporary EOF or WouldBlock. Silence uses the same real-time
 //! budget as captured audio, including when a buffering reader repeatedly refills.
-//! A slow consumer cannot accumulate pacing credit. This bounds source read-ahead;
+//! A slow consumer cannot accumulate unbounded pacing credit. This bounds source read-ahead;
 //! already returned bytes in the decoder/mixer remain outside this queue's control.
 
 use crate::model::{AppError, Capture, CapturePhase, RecordingSource};
@@ -26,6 +26,7 @@ pub const CHANNELS: u32 = 2;
 const FRAME_BYTES: usize = 8;
 const QUANTUM_FRAMES: usize = 240; // 5 ms; also the maximum per-read allocation-free output.
 const QUANTUM_NS: u64 = 5_000_000;
+const MAX_CATCH_UP_NS: u64 = QUANTUM_NS; // At most two newly granted quanta without waiting.
 const QUEUE_FRAMES: usize = 1_920; // 40 ms of complete stereo frames.
 const MAX_AGE_NS: u64 = 40_000_000;
 const WAIT_SLICE_NS: u64 = 2_000_000;
@@ -94,6 +95,13 @@ impl CaptureControl {
                 Err(actual) => old = actual,
             }
         }
+    }
+
+    /// Number of nonterminal native underrun/overrun/discontinuity notifications.
+    /// This is an event count; the backend has not supplied a lost-frame count.
+    /// Kept separate from the shared UI/TypeScript snapshot and dropped frames.
+    pub fn xrun_events(&self) -> u64 {
+        self.owner.shared.xruns.load(Ordering::Relaxed)
     }
 
     /// Pre-volume peak input level, independent of mute. Counts are stereo frames
@@ -184,22 +192,38 @@ struct Shared {
     popped: AtomicU64,
     dropped: AtomicU64,
     underrun: AtomicU64,
+    xruns: AtomicU64,
     clock: Arc<dyn Clock>,
 }
 
 impl Shared {
     #[cfg(any(windows, test))]
     fn fail(&self, failure: u8) {
-        // A late error callback cannot resurrect a stopped session or replace
-        // the first failure. Opening can race the first native error callback.
-        for active in [RUNNING, OPENING] {
-            if self
-                .status
-                .compare_exchange(active, failure, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
+        self.fail_observed(failure, |_| {});
+    }
+
+    #[cfg(any(windows, test))]
+    fn fail_observed(&self, failure: u8, mut observed: impl FnMut(u8)) {
+        // Retry against the actual active state if Opening promotes to Running.
+        // Stop and the first failure are terminal and must never be overwritten.
+        // The no-op observer in production optimizes away; tests use it to
+        // inject a promotion/stop/failure between observation and the CAS.
+        let _ = self
+            .status
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                if matches!(active, RUNNING | OPENING) {
+                    observed(active);
+                    Some(failure)
+                } else {
+                    None
+                }
+            });
+    }
+
+    #[cfg(any(windows, test))]
+    fn record_xrun(&self) {
+        if matches!(self.status.load(Ordering::Acquire), RUNNING | OPENING) {
+            self.xruns.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -243,7 +267,7 @@ struct Reader {
     pending: [u8; FRAME_BYTES],
     pending_pos: usize,
     frames_left: usize,
-    next_quantum_ns: u64,
+    next_quantum_ns: Option<u64>,
     position: u64,
 }
 
@@ -270,14 +294,21 @@ impl Reader {
                     return self.read(shared, buf);
                 }
                 let now = shared.clock.now();
-                if now >= self.next_quantum_ns {
-                    self.next_quantum_ns = now.saturating_add(QUANTUM_NS);
+                let deadline = self.next_quantum_ns.unwrap_or(now);
+                if now >= deadline {
+                    // Anchor normal cadence to the previous deadline so small
+                    // wakeup oversleeps do not reduce the effective sample rate.
+                    // Reset after a larger stall instead of banking old credit.
+                    let anchor = if now - deadline <= MAX_CATCH_UP_NS {
+                        deadline
+                    } else {
+                        now
+                    };
+                    self.next_quantum_ns = Some(anchor.saturating_add(QUANTUM_NS));
                     self.frames_left = QUANTUM_FRAMES;
                     break;
                 }
-                shared
-                    .clock
-                    .wait((self.next_quantum_ns - now).min(WAIT_SLICE_NS));
+                shared.clock.wait((deadline - now).min(WAIT_SLICE_NS));
             }
         }
         let limit = buf.len().min(QUANTUM_FRAMES * FRAME_BYTES);
@@ -467,6 +498,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
         popped: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
         underrun: AtomicU64::new(0),
+        xruns: AtomicU64::new(0),
         clock,
     });
     let owner = Arc::new(Owner {
@@ -487,7 +519,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
                     pending: [0; FRAME_BYTES],
                     pending_pos: FRAME_BYTES,
                     frames_left: 0,
-                    next_quantum_ns: 0,
+                    next_quantum_ns: None,
                     position: 0,
                 }),
                 owner: owner.clone(),
@@ -685,18 +717,25 @@ mod windows {
         device.build_input_stream::<T, _, _>(
             config.config(),
             move |data, _| writer.write(data, channels, |sample| sample.to_sample::<f32>()),
-            move |failure| {
-                let status = match failure.kind() {
-                    cpal::ErrorKind::DeviceNotAvailable => MISSING,
-                    cpal::ErrorKind::PermissionDenied => DENIED,
-                    cpal::ErrorKind::DeviceChanged => ROUTE_CHANGED,
-                    _ => FAILED,
-                };
-                // No logging, string formatting, locks, allocation, UI, or I/O.
-                shared.fail(status);
-            },
+            move |failure| report_error(&shared, failure.kind()),
             None,
         )
+    }
+
+    pub(super) fn report_error(shared: &Shared, kind: cpal::ErrorKind) {
+        // No logging, string formatting, locks, allocation, UI, or I/O.
+        // WASAPI reports discontinuity and continues handing off capture data.
+        if kind == cpal::ErrorKind::Xrun {
+            shared.record_xrun();
+            return;
+        }
+        let status = match kind {
+            cpal::ErrorKind::DeviceNotAvailable => MISSING,
+            cpal::ErrorKind::PermissionDenied => DENIED,
+            cpal::ErrorKind::DeviceChanged => ROUTE_CHANGED,
+            _ => FAILED,
+        };
+        shared.fail(status);
     }
 }
 
@@ -710,6 +749,7 @@ mod tests {
     struct ManualClock {
         ns: AtomicU64,
         waits: AtomicU64,
+        oversleep_ns: AtomicU64,
         // A deterministic cancellation injected exactly when a reader waits.
         cancel_on_wait: Mutex<Option<Weak<Shared>>>,
         fail_on_now: Mutex<Option<Weak<Shared>>>,
@@ -732,7 +772,10 @@ mod tests {
         fn wait(&self, ns: u64) {
             assert!(ns <= WAIT_SLICE_NS);
             self.waits.fetch_add(1, Ordering::Relaxed);
-            self.ns.fetch_add(ns, Ordering::Relaxed);
+            self.ns.fetch_add(
+                ns + self.oversleep_ns.load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
             if let Some(shared) = self
                 .cancel_on_wait
                 .lock()
@@ -865,6 +908,74 @@ mod tests {
         assert_eq!(clock.now(), 10_000_000_000);
         frames(&mut session.input, QUANTUM_FRAMES);
         assert_eq!(clock.now(), 10_005_000_000);
+    }
+
+    #[test]
+    fn wakeup_oversleep_does_not_accumulate_deadline_drift() {
+        let (_, mut session, clock) = setup();
+        let oversleep = 200_000;
+        clock.oversleep_ns.store(oversleep, Ordering::Relaxed);
+        for quantum in 0..2_000 {
+            frames(&mut session.input, QUANTUM_FRAMES);
+            let deadline = quantum * QUANTUM_NS;
+            assert!(clock.now() >= deadline);
+            assert!(clock.now() <= deadline + oversleep);
+        }
+    }
+
+    #[test]
+    fn symphonia_packet_cadence_stays_anchored_under_wakeup_oversleep() {
+        let (_, session, clock) = setup();
+        clock.oversleep_ns.store(200_000, Ordering::Relaxed);
+        let mut source = MediaSourceStream::new(Box::new(session.input), Default::default());
+        for packet in 0..100 {
+            assert_eq!(
+                source.read_boxed_slice(960 * FRAME_BYTES).unwrap().len(),
+                960 * FRAME_BYTES
+            );
+            let deadline = packet * 20_000_000 + 15_000_000;
+            assert!(clock.now() >= deadline);
+            assert!(clock.now() <= deadline + 200_000);
+            assert!(source.unread_buffer_len() <= QUANTUM_FRAMES * FRAME_BYTES);
+        }
+    }
+
+    #[test]
+    fn catchup_grants_only_two_quanta_before_waiting() {
+        let (_, mut session, clock) = setup();
+        frames(&mut session.input, QUANTUM_FRAMES);
+        clock
+            .ns
+            .store(QUANTUM_NS + MAX_CATCH_UP_NS, Ordering::Relaxed);
+        let mut oversized = [0; 32_768];
+        for _ in 0..2 {
+            assert_eq!(
+                session.input.read(&mut oversized).unwrap(),
+                QUANTUM_FRAMES * FRAME_BYTES
+            );
+            assert_eq!(clock.now(), 2 * QUANTUM_NS);
+            assert_eq!(clock.waits.load(Ordering::Relaxed), 0);
+        }
+        assert_eq!(
+            session.input.read(&mut oversized).unwrap(),
+            QUANTUM_FRAMES * FRAME_BYTES
+        );
+        assert_eq!(clock.now(), 3 * QUANTUM_NS);
+        assert!(clock.waits.load(Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn larger_stall_resets_credit_and_cancellation_still_interrupts_wait() {
+        let (_, mut session, clock) = setup();
+        frames(&mut session.input, QUANTUM_FRAMES);
+        let stalled = QUANTUM_NS + MAX_CATCH_UP_NS + 1;
+        clock.ns.store(stalled, Ordering::Relaxed);
+        frames(&mut session.input, QUANTUM_FRAMES);
+        assert_eq!(clock.now(), stalled);
+        *clock.cancel_on_wait.lock().unwrap() = Some(Arc::downgrade(&session.control.owner.shared));
+        assert_eq!(session.input.read(&mut [0; 1]).unwrap(), 0);
+        assert_eq!(clock.now(), stalled + WAIT_SLICE_NS);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Stopped);
     }
 
     #[test]
@@ -1109,6 +1220,93 @@ mod tests {
             assert_eq!(session.control.snapshot().queued_frames, 0);
             assert_eq!(session.control.snapshot().level_dbfs, None);
         }
+    }
+
+    #[test]
+    fn xrun_counts_events_and_accepts_subsequent_input() {
+        let (mut writer, mut session, _) = setup();
+        for active in [OPENING, RUNNING] {
+            writer.shared.status.store(active, Ordering::Release);
+            writer.shared.record_xrun();
+            assert_eq!(writer.shared.status.load(Ordering::Acquire), active);
+        }
+        assert_eq!(session.control.xrun_events(), 2);
+        feed(&mut writer, 2, 0.125, -0.25);
+        assert_eq!(frames(&mut session.input, 2), vec![[0.125, -0.25]; 2]);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Running);
+        assert_eq!(session.control.snapshot().dropped_frames, 0);
+        session.control.stop();
+        writer.shared.record_xrun();
+        assert_eq!(session.control.xrun_events(), 2);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Stopped);
+    }
+
+    #[test]
+    fn opening_failure_retries_when_startup_promotes_between_observation_and_cas() {
+        let (writer, mut session, _) = setup();
+        writer.shared.status.store(OPENING, Ordering::Release);
+        let mut observations = Vec::new();
+        writer.shared.fail_observed(MISSING, |observed| {
+            observations.push(observed);
+            if observed == OPENING {
+                writer
+                    .shared
+                    .status
+                    .compare_exchange(OPENING, RUNNING, Ordering::AcqRel, Ordering::Acquire)
+                    .unwrap();
+            }
+        });
+        assert_eq!(observations, [OPENING, RUNNING]);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Missing);
+        assert_eq!(
+            session.input.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn failure_retry_preserves_concurrent_stop_or_first_terminal_failure() {
+        for terminal in [STOPPED, DENIED] {
+            let (writer, session, _) = setup();
+            writer.shared.status.store(OPENING, Ordering::Release);
+            writer.shared.fail_observed(MISSING, |observed| {
+                assert_eq!(observed, OPENING);
+                writer
+                    .shared
+                    .status
+                    .compare_exchange(OPENING, terminal, Ordering::AcqRel, Ordering::Acquire)
+                    .unwrap();
+            });
+            assert_eq!(writer.shared.status.load(Ordering::Acquire), terminal);
+            writer.shared.fail(FAILED);
+            assert_eq!(writer.shared.status.load(Ordering::Acquire), terminal);
+            assert_eq!(
+                session.control.snapshot().phase,
+                if terminal == STOPPED {
+                    CapturePhase::Stopped
+                } else {
+                    CapturePhase::Error
+                }
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_callback_xrun_is_nonterminal_but_device_loss_is_terminal() {
+        let (mut writer, mut session, _) = setup();
+        windows::report_error(&writer.shared, cpal::ErrorKind::Xrun);
+        assert_eq!(session.control.xrun_events(), 1);
+        feed(&mut writer, 2, 0.25, -0.5);
+        assert_eq!(frames(&mut session.input, 2), vec![[0.25, -0.5]; 2]);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Running);
+        assert_eq!(session.control.snapshot().dropped_frames, 0);
+        windows::report_error(&writer.shared, cpal::ErrorKind::DeviceNotAvailable);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Missing);
+        assert_eq!(
+            session.input.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
 
     #[test]

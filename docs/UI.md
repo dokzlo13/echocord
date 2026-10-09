@@ -1,76 +1,52 @@
-# Draft control UI study — EC-004
+# Desktop control UI
 
-Draft checkpoint for architecture/UI advisory review. The design and control contract are not approved for real app integration. Further UI implementation is stopped pending the requested advisory review and research into UI design and vetted upstream skills. Existing browser checks are evidence for discussion, not final visual acceptance.
+The production UI lives in `ui/` and follows the adopted [UI direction](UI-DIRECTION.md) and [architecture decisions](REVIEW.md). The older `prototypes/control-ui/` remains historical EC-004 draft material; its hand-written contract and ready-only mock are superseded. EC-011 is pending integration and independent native review.
 
-## Accepted scope
+## Accepted layout and state behavior
 
-One explicitly selected Windows recording device, one Discord bot voice channel, volume, mute, connect/disconnect, and bot setup. Rust owns samples and recovery; the frontend only controls and observes the session. No local monitoring, playback controls, mixing, or routing matrix. Source, dependencies, and prototype execution stay in WSL. Real credentials never belong in this prototype or its frontend state.
+Use a compact, left-aligned route form above a persistent session-control area. The default client is 480×600 logical pixels, with 420×540 as the supported minimum. Recording device and pre-output meter precede server/channel and concise configuration/discovery status. The route area scrolls independently; connection, Discord volume, and Mute output remain visible. Bot settings stay readable during a session. Routing help is available on demand rather than occupying the main controls.
 
-`prototypes/control-ui/` is an isolated React + TypeScript + Mantine + CSS Modules study with its own pinned manifest and lockfile. A persistent notice says **Mock adapter · no audio or Discord connection**. Device/server/channel names and input levels are fixtures. Bot setup offers fixed demo profiles with no text, password, token, or credential input. Demo settings live only in memory and reset on reload. No real Discord or audio APIs are called.
+The reviewed token plan uses window `#181818`, surface `#242424`, text `#F4F4F4`, secondary `#BDBDBD`, border `#737373`, and action/focus `#72CBD3`. Accent buttons use dark text. Typography uses locally available Segoe UI Variable, Segoe UI, then system fallbacks, with 14/20 body, 12/16 secondary, and 16/22 semibold title/status. No remote fonts or added UI framework. The design review removed repeated headings, tagline, and tutorial panels to preserve the compact route form and persistent controls. CSS Modules contain the limited custom layout and interaction styling; Mantine supplies controls and the modal.
 
-## Design proposal for integration review
+The frontend does not start capture or connect automatically. Initial backend connection is disconnected and capture stopped. Remembered selections are shown only as supplied by the backend; absent or unavailable selections remain explicit. No source or destination is silently substituted. Choosing another server explicitly clears its channel.
 
-One dark theme, a compact source/destination panel, and one session panel with a prominent connection action, volume, mute, and delivery text. Bot setup is a focus-trapped modal. Demo-only controls remain collapsed under the main utility. There is no navigation shell, dashboard, or browser hosting requirement.
-
-Input level is pre-volume and pre-mute, and is distinct from connection/delivery. A visible level while disconnected does not mean audio is being sent. Silence is valid; it never triggers recovery. A connected session at zero volume says **Volume is zero**; mute says **Muted** while the input meter remains visible. Missing device is unavailable input, not silence. Delivery text describes adapter state, never listener audibility or measured latency.
-
-| Visible state | Connection/capture meaning | Actions and intent |
-| --- | --- | --- |
-| Disconnected | No session; simulated input may show activity | Choose one source and destination; connect explicitly |
-| Connecting | User-started join pending | Disconnect cancels join; mute and volume remain available |
-| Streaming | Demo connection established | Disconnect, adjust volume, mute |
-| Muted | Connected with output mute set | Unmute; input activity stays independent |
-| Recovering | Same session interrupted | Preserve route, volume, and mute; disconnect cancels retry |
-| Device missing | Selected recording source unavailable | Wait for that exact device while active; after disconnect, explicitly choose another source |
-| Connection error | Permission denial or terminal failure | Show cause and setup action; require user action to rejoin |
-
-Route selection is locked while connecting, connected, or recovering. Changing servers while stopped clears the channel; the user must explicitly choose the next channel. Bot configuration cannot change during a session. A fixed demo bot is ready on fresh launch, but the session always starts disconnected.
-
-Mock connection/recovery timers are cosmetic (1.2 seconds to connect; 1.8 seconds for the simulated network interruption). Screenshot previews hold their state indefinitely. Device-return simulation waits for explicit return of the same fixture. These timings and held fixtures do not implement, measure, or approve production retry/backoff/exhaustion or device-return grace limits.
-
-## Proposed TypeScript contract — not final Rust bindings
-
-The proposal lives in `prototypes/control-ui/src/contract.ts`. It must be reconciled with the Rust owner before choosing binding generation or declaring IPC type safety. The mock-only controls and bot demo profiles are deliberately outside the product command union.
-
-| Shape | Meaning |
+| Independent state | Display and interaction |
 | --- | --- |
-| `ControlSnapshot` | Immutable cached snapshot with monotonically increasing `revision`; source/server catalogs, selected IDs, sanitized bot status, connection, capture, output |
-| `Connection` | Discriminated union: `disconnected`, `connecting`, `connected`, `recovering` with reason/attempt, `error` with typed code/message |
-| `capture` | Separate `ready`/`missing-device` health and nullable scalar `levelDbfs`; no sample buffers |
-| `output` | Independent `volumePercent` (0–100) and `muted`; preserved across recovery/disconnect |
-| `ControlAdapter` | Cached `getSnapshot`, `subscribe` returning unsubscribe, asynchronous `dispatch` returning `CommandResult` |
-| `CommandResult` | Command acceptance or rejected-control message; acceptance is not completed connection/delivery |
+| Connection | Disconnected, Connecting, Connected, Recovering, Disconnecting, Cleanup incomplete, or Connection failed |
+| Capture | Capture stopped, Opening input, Input running, Device missing, or Input failed; scalar level is shown only for running capture |
+| Output | Output enabled, Muted, or Volume is zero; this is control state, not evidence of sending or listener audibility |
+| Configuration/discovery | Backend-loaded bot identity/status; configuration checking/errors, catalog loading/errors/empty states, and refresh/recheck actions |
 
-Product command proposal:
+Mute never replaces Connected. Input level is pre-volume/pre-mute; changing volume or mute does not alter the meter. Silence remains valid input. The stable button is always named **Mute output**, with `aria-pressed` reflecting the authoritative mute state. Significant connection/capture/output changes have a polite status announcement; meter samples are not live announcements. Volume offers percentage text and keyboard arrows.
 
-```ts
-type ControlCommand =
-  | { type: 'select-source'; sourceId: string }
-  | { type: 'select-destination'; serverId: string; channelId: string | null }
-  | { type: 'connect' }
-  | { type: 'disconnect' }
-  | { type: 'set-volume'; percent: number }
-  | { type: 'set-muted'; muted: boolean };
-```
+Routes and configuration changes are locked during connecting/connected/recovering/disconnecting/cleanup-incomplete. Disconnect remains available during a pending join or recovery. Disconnecting cannot Connect. Cleanup incomplete offers Retry disconnect and prevents a new connection; the shell owns explicit Quit from the tray. Connection, capture, configuration, discovery, and rejected-control errors show cause and next actions independently.
 
-Commands reject invalid IDs, a channel in another server, unavailable devices, active-session route changes, unconfigured bots, and out-of-range/non-finite volume. Disconnect invalidates pending mock joins/retries. Connection events remain distinct from control errors. The frontend uses React's `useSyncExternalStore` subscription and derives display/delivery from these independent fields.
+The settings modal starts focus on its always-enabled Close control through Mantine's default focus trap, even when Recheck configuration and Refresh servers are disabled. Escape restores focus to Bot settings. There are no token, path, text, or password fields. After backend-only configuration changes, Recheck configuration and Refresh servers invoke the agreed commands.
 
-Before live integration: agree identifier/serialization conventions, an initial snapshot plus ordered event subscription with stale-event handling, command error codes and correlation, terminal removal/permission behavior, authoritative retry exhaustion/device grace, and snapshot ownership after reconnect. This prototype has no cross-process races and does not validate these issues. Real bot authorization and OS-backed credential handling require a separately designed Rust-owned interface; no token field is proposed here.
+## Native adapter and generated model
 
-## Validation and limits
+`ui/src/generated.ts` is coordinator-owned and generated from Rust. It is typechecked with the frontend, excluded from Biome formatting/lint, and unchanged by this worker. There is no competing TypeScript wire model.
 
-Strict TypeScript covers source, test code, and configuration. Biome checks formatting, imports, and recommended lint/accessibility rules. Production Vite build and Playwright Chromium checks exercise route selection/locking, separate input/delivery, mute/volume, silence, cancellation during join/recovery, same-device return, permission errors without automatic rejoin, fixed bot setup, fresh-launch behavior, subscriptions, invalid commands, keyboard order/focus/modal escape, and absence of outbound service requests/runtime errors.
+- `get_snapshot` takes no arguments and returns generated `ControlSnapshot`.
+- `dispatch` takes `{ command: ControlCommand }`, resolves void on acceptance, and rejects with generated `AppError`.
+- `echocord://snapshot` carries generated `ControlSnapshot`.
 
-Screenshots cover all seven states at 720×760 CSS pixels, compact layouts at 640×720 (DPR 1.25), 480×640 (DPR 1.5), and 360×640 (DPR 2), plus bot setup and 200% CSS zoom. Tests assert no horizontal overflow and reachable controls; small viewports use vertical scrolling. Device-scale factors change raster density, while viewport reduction and CSS zoom exercise layout constraints. They do **not** prove actual Windows display scaling, WebView2, Tauri tray/window behavior, audio isolation, recovery timing, or Discord delivery. Raw evidence stays in ignored `.trash/`; task evidence records the sanitized result. No stable screenshot baselines or latency claims are used.
+The adapter awaits listener registration before the initial snapshot read. Cached immutable view state works with React `useSyncExternalStore`; snapshots with older/equal revisions are ignored. Lifecycle generations reject callbacks and command errors from disposed listeners or earlier mounts. If listener setup finishes after disposal, its returned listener is immediately removed. Retrying status loading replaces the previous subscription. No `ui_ready` or other shell API is introduced.
 
-Independent parent review and a Windows desktop smoke remain before final acceptance. Integration must remove or clearly fence demo tools and replace fixtures without exposing secrets or pushing samples through frontend IPC.
+Dispatch acceptance does not invent connection, capture, or output completion. Pending commands are indicated separately; failures surface without changing authoritative values. The Rust `AppError` contract supplies sanitized user messages. Unexpected transport exceptions are replaced with a generic status-loading action, without showing raw parser excerpts or private paths.
 
-## Sources consulted
+Volume uses a 120 ms trailing coalescer and at most one value queued behind an in-flight request. The slider shows the pending draft until a snapshot confirms it; rejection restores the backend value. Meter events cannot erase a newer slider intent. Mute and Disconnect bypass the volume queue. Disconnect/disposal cancel unsent volume changes. Rust still validates all commands and owns session cancellation, retry budgets, process-exit confirmation, saved preferences, and real configuration.
 
-Official documentation and Context7 queries informed the implementation; no third-party skills or UI templates were imported. Dependencies are pinned in the prototype manifest/lockfile. Upstream skill vetting remains EC-007.
+## Explicit fixture mode
 
-- [Mantine with Vite](https://mantine.dev/guides/vite/): package stylesheet and provider setup.
-- [Mantine Modal](https://mantine.dev/core/modal/): modal labels, focus trapping, Escape, and focus return.
-- [Mantine Slider](https://mantine.dev/core/slider/) and [NativeSelect](https://mantine.dev/core/native-select/): thumb labels, keyboard arrows, and input labels.
-- [React useSyncExternalStore](https://react.dev/reference/react/useSyncExternalStore): stable immutable snapshots and subscription cleanup; consulted through Context7.
-- [Playwright configuration](https://playwright.dev/docs/test-configuration), [clock](https://playwright.dev/docs/clock), and [emulation](https://playwright.dev/docs/emulation): browser checks, controlled timers, viewport and device-scale testing.
+`npm run dev` selects Vite's development `fixture` mode. Only `DEV && MODE === 'fixture'` dynamically imports the fixture transport. Its notice and state picker are visible, and it has no credential/service/audio APIs. Production `npm run build` emits the native adapter to `ui/dist` and excludes the fixture transport. A query parameter or missing native host cannot activate fixture fallback in production. Opening the production bundle in a browser reports that the desktop app is required.
+
+Fixtures cover stopped/disconnected, first run, loading, empty devices/servers/channels, unavailable saved routes, invalid configuration, discovery failure, connecting, connected/muted, recovery, missing device, capture-open failure, connection failure, disconnecting, incomplete cleanup, rejected commands, and unavailable backend. They verify presentation and native API consumption, not Rust recovery or audible delivery.
+
+## Validation and remaining gates
+
+See [task evidence](../tasks/EC-011.md) for commands and measured results. Automated checks include strict TypeScript, Biome, production build, adapter lifecycle/revision/volume races, browser route/readiness/error behavior, keyboard/modal focus, calculated contrast, supported-size persistent-control assertions, DPR/zoom layouts, and a production-bundle test through the actual Tauri JavaScript SDK with an emulated host. The latter verifies API names, payloads, event handling, and no silent production fallback; it is not a native smoke.
+
+Screenshots and CLI review use isolated Chromium and the pinned Playwright runtime, with all raw evidence under ignored `.trash/`. Browser viewport/DPR/CSS zoom checks do not establish actual Windows display/text scaling, Segoe rendering, Narrator, WebView2, tray behavior, process cleanup, capture, Discord delivery, or latency. The coordinator integrates the native shell/runtime and runs Windows/live checks. This worker does not modify Cargo, Makefile, shell, or generated bindings.
+
+Applied skills are the pinned [frontend-design](../.agents/skills/frontend-design/SKILL.md) and [playwright-cli](../.agents/skills/playwright-cli/SKILL.md), under the applicability/privacy rules in [SOURCES](../.agents/SOURCES.md). Official [Tauri command API](https://v2.tauri.app/reference/javascript/api/namespacecore/) and [event API](https://v2.tauri.app/reference/javascript/api/namespaceevent/), Mantine modal/slider guidance, and Context7 queries informed the implementation. No new or placeholder skills were created.

@@ -1,0 +1,39 @@
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  min-width: 280px;
+  background: #181818;
+  color: #f4f4f4;
+  font-size: 14px;
+  line-height: 20px;
+}
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role="slider"]:focus-visible {
+  outline: 2px solid #72cbd3;
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: Respect reduced motion over component animation styles. */
+    animation-duration: 0.01ms !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Respect reduced motion over component transition styles. */
+    transition-duration: 0.01ms !important;
+  }
+}

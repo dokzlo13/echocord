@@ -1,7 +1,7 @@
 //! Private, bounded backend protocol. Never log frames or parser errors.
 use crate::model::{AppError, Capture, ConnectStage, ErrorCode, Output};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::path::Path;
 use std::{
     fmt,
@@ -12,8 +12,6 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub const VERSION: u8 = 1;
 pub const MAX_LINE_BYTES: usize = 8192;
-#[cfg(any(windows, test))]
-const MAX_TOKEN_BYTES: u64 = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -260,29 +258,9 @@ pub fn discord_id(value: &str) -> Option<u64> {
     value.parse::<u64>().ok().filter(|id| *id != 0)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 pub(crate) fn read_token(path: &Path) -> Result<String, AppError> {
-    use std::io::Read;
-    let file = std::fs::File::open(path).map_err(|_| Failure::Configuration.error())?;
-    let mut bytes = Vec::new();
-    file.take(MAX_TOKEN_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| Failure::Configuration.error())?;
-    if crate::storage::is_encrypted(&bytes) {
-        return crate::storage::load_token(path);
-    }
-    if bytes.len() as u64 > MAX_TOKEN_BYTES {
-        return Err(Failure::Configuration.error());
-    }
-    let text = String::from_utf8(bytes).map_err(|_| Failure::Configuration.error())?;
-    let token = text.trim();
-    if token.is_empty()
-        || token.chars().any(char::is_whitespace)
-        || token.chars().any(char::is_control)
-    {
-        return Err(Failure::Configuration.error());
-    }
-    Ok(token.into())
+    crate::storage::load_token(path)
 }
 
 /// Capture adapters may have diagnostic strings; only bounded measurements cross the pipe.
@@ -402,15 +380,23 @@ mod tests {
         assert!(discord_id("+1").is_none());
         assert!(discord_id("0").is_none());
     }
+    #[cfg(windows)]
     #[test]
-    fn token_reader_bounds_synthetic_files_and_redacts_failures() {
+    fn token_reader_requires_encryption_and_redacts_failures() {
         let path =
             std::env::temp_dir().join(format!("echocord-token-synthetic-{}", std::process::id()));
-        std::fs::write(&path, "synthetic-token\n").unwrap();
+        for invalid in [
+            b"synthetic-token".as_slice(),
+            b"ECHOCORD-TOKEN",
+            b"ECHOCORD-TOKEN\0",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            let failure = read_token(&path).unwrap_err();
+            assert!(!failure.message.contains(path.to_str().unwrap()));
+            assert!(!failure.message.contains("synthetic-token"));
+        }
+        crate::storage::save_token(&path, "synthetic-token").unwrap();
         assert_eq!(read_token(&path).unwrap(), "synthetic-token");
-        std::fs::write(&path, vec![b'x'; MAX_TOKEN_BYTES as usize + 1]).unwrap();
-        let failure = read_token(&path).unwrap_err();
-        assert!(!failure.message.contains(path.to_str().unwrap()));
         std::fs::remove_file(path).unwrap();
     }
 }

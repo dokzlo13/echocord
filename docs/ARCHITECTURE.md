@@ -18,7 +18,7 @@ The shell executable also runs in `--engine-worker` mode, before initializing an
 
 ## Settings and credentials
 
-Normal launches use platform-local application data. Development/test launches can explicitly override the data directory or individual paths. New tokens use current-user Windows DPAPI in a bounded versioned envelope with atomic replacement. Legacy explicit development credential files remain readable. Corrupt encrypted data never falls back to plaintext. Configuration validates the bot before saving and is serialized against Connect. No automatic voice connection follows setup or launch.
+Normal launches use platform-local application data. Development/test launches can explicitly override the data directory or individual paths. New tokens use current-user Windows DPAPI in a bounded versioned envelope with atomic replacement. Every runtime credential path requires encrypted data; plaintext and malformed envelopes are rejected. Configuration validates the bot before saving and is serialized against Connect. No automatic voice connection follows setup or launch.
 
 ## UI and evolution
 

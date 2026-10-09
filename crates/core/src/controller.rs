@@ -995,6 +995,12 @@ impl Actor {
                             attempt: 1,
                             message: "Waiting for the selected recording source.".into(),
                         };
+                        // The pipe reader coalesces samples separately from
+                        // status events. Discard an earlier running sample so
+                        // the next meter tick cannot undo the missing state.
+                        if let Some(child) = &self.child {
+                            child.take_meter();
+                        }
                         self.snapshot.capture.phase = CapturePhase::Missing;
                         self.snapshot.capture.level_dbfs = None;
                         self.snapshot.capture.output_level_dbfs = None;
@@ -2569,10 +2575,12 @@ mod tests {
         a.snapshot.capture.phase = CapturePhase::Running;
         a.snapshot.capture.level_dbfs = Some(-6.0);
         a.snapshot.capture.output_level_dbfs = Some(-12.0);
+        a.child.as_ref().unwrap().meter(a.snapshot.capture.clone());
         a.event(Event::Status(4, Status::DeviceMissing));
         assert_eq!(a.snapshot.capture.phase, CapturePhase::Missing);
         assert_eq!(a.snapshot.capture.level_dbfs, None);
         assert_eq!(a.snapshot.capture.output_level_dbfs, None);
+        assert!(a.child.as_ref().unwrap().take_meter().is_none());
     }
 
     #[test]

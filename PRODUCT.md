@@ -32,4 +32,4 @@ Settings and onboarding should support ordinary desktop users, with platform-sta
 
 ## Open decisions
 
-Process capture/local suppression and multi-output constraints require feasibility evidence. Full mixing, a virtual driver, other receivers, and public distribution are later work. The current redesign must preserve working audio behavior.
+Research supports a bounded Windows process-capture experiment; independent local suppression still needs measurement. One Discord bot can target only one voice channel per server at a time. Full mixing, a virtual driver, other receivers, and public distribution are later work. The current redesign must preserve working audio behavior. Its first concepts were rejected; explore source-to-output controls with contextual selection panels, then review rendered alternatives before implementation.

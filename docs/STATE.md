@@ -1,6 +1,6 @@
 # Current state
 
-Updated 2026-10-09. Current milestone: EC-001 validation complete; Git checkpoint pending.
+Updated 2026-10-09. EC-001 complete, integrated in 777ada2. Next milestone: prove the full Windows dependency stack from WSL.
 
 Read BRIEF for product scope, TECHNOLOGY for library findings, DEVELOPMENT for build setup, WORKFLOW for coordination, and tasks/BOARD.md for scheduling. Personal context, where present, is under ignored `.trash/` and is not part of this public project record.
 
@@ -12,4 +12,4 @@ Use plain Git task records with one coordinator and separate WSL worktrees for i
 
 The generic Windows executable builds entirely in WSL with the pinned Rust/MSVC target and runs on the Windows host. Formatting and Clippy pass for that probe. No Windows development packages were installed. This does not prove the audio or Tauri dependency graph.
 
-No working audio stream, Tauri UI, live-call test, or active CI yet. Next: EC-002 dependency probe and EC-004 UI design can proceed independently after the foundation checkpoint. EC-007 selects real vetted upstream skills after EC-002; no synthetic skill is required to start a mock UI design.
+No working audio stream, Tauri UI, live-call test, or active CI yet. EC-002 dependency probe and EC-004 UI design are ready and can proceed independently. EC-007 selects real vetted upstream skills after EC-002; no synthetic skill is required to start a mock UI design.

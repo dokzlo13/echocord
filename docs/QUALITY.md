@@ -8,7 +8,7 @@ Documentation validation is separate from future application gates. Do not add g
 
 ## Current executable gates
 
-`make check` runs production core formatting/Clippy/tests, generated-contract drift checks, UI lint/type/build/browser checks, and Windows application Clippy. `make app-smoke` rebuilds and verifies the native UI without joining voice. `make engine-smoke` checks actual worker startup with synthetic empty credentials. Isolated dependency and historical draft checks remain separate. Live delivery and five-hour stability require the explicit acceptance steps below.
+`make check` runs production core formatting/Clippy/tests, generated-contract drift checks, UI lint/type/build/browser checks, and Windows application Clippy. `make app-smoke` rebuilds and verifies the native UI without joining voice. `make engine-smoke` checks actual worker startup with synthetic empty credentials. Retired dependency probes and draft prototypes are no longer active gates. Live delivery and five-hour stability require the explicit acceptance steps below.
 
 ## Planned automated gates
 

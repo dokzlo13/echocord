@@ -8,7 +8,7 @@ if [[ ! -f "$executable" ]]; then
   exit 1
 fi
 mkdir -p "$repo_root/.trash/app"
-arguments=(--settings-file "$(wslpath -w "$repo_root/.trash/app/preferences.json")")
+arguments=(--data-dir "$(wslpath -w "$repo_root/.trash/app")")
 token_file="${ECHOCORD_TOKEN_FILE:-$repo_root/.trash/secrets/discord-token}"
 if [[ -f "$token_file" ]]; then
   arguments+=(--token-file "$(wslpath -w "$(realpath "$token_file")")")

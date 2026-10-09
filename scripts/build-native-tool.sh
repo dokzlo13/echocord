@@ -3,8 +3,8 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 case "${1:-}" in
-  process-probe|capture-probe|engine-probe) tool="$1" ;;
-  *) echo 'Usage: bash scripts/build-native-tool.sh process-probe|capture-probe|engine-probe' >&2; exit 2 ;;
+  process-probe|capture-probe|engine-probe|storage-probe) tool="$1" ;;
+  *) echo 'Usage: bash scripts/build-native-tool.sh process-probe|capture-probe|engine-probe|storage-probe' >&2; exit 2 ;;
 esac
 if (( $# != 1 )); then exit 2; fi
 export PATH="$repo_root/.tools/bin:$HOME/.local/bin:$PATH"

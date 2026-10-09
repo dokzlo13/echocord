@@ -1,35 +1,31 @@
-# Candidate first-build architecture
+# Current architecture
 
-Status: initial proposal, superseded where noted by the adopted [advisory decisions](REVIEW.md). In particular, an owned engine process is the cancellation boundary, and Rust model types now generate the frontend contract. Keep this document as the rationale for the small code boundaries, not a second source of implementation decisions.
+Echocord is a Windows recording-device to Discord utility. Rust owns capture, audio transport, recovery and credentials. A Tauri shell owns the window/tray lifecycle; React renders a control surface. Source, dependencies and builds stay in WSL. The initial alternatives and review rationale are in [REVIEW.md](REVIEW.md); this document describes implemented boundaries.
 
-## First testable outcome
+## Control and process ownership
 
-A Windows desktop utility selects a recording endpoint and Discord server/channel, connects only on explicit action, sends captured audio with volume/mute, closes to a tray icon, and quits cleanly. It should handle ordinary disconnects without changing the selected source or destination. The first user test establishes practical behavior; it does not certify a five-hour release gate.
+`crates/core/src/controller.rs` serializes commands and publishes snapshots. Selections and output preferences are ordinary local settings. Discovery authenticates the bot and fetches accessible rooms without joining voice. Only explicit Connect starts a session. Generation identifiers discard stale async results; requested Disconnect cancels pending startup and waits for observed process exit.
 
-## Candidate code boundaries
+The shell executable also runs in `--engine-worker` mode, before initializing any WebView. The parent launches and owns that child through a Windows job with kill-on-close behavior. Bounded typed JSON flows over stdin/stdout; PCM never crosses this pipe or frontend IPC. Launch and pipe work are outside the controller event loop, so slow process creation does not block commands or snapshots. Cancelled startup cannot send Init to a late child. Graceful stop has a short allowance, followed by forced termination and an explicit exit-confirmation deadline. Unconfirmed cleanup remains visible and blocks another session.
 
-Keep the probes as reproducible diagnostics. Put production Rust audio, control state, and Discord integration behind a small library surface with Windows-specific capture isolated by target configuration. A Tauri shell owns commands, tray lifecycle, settings, and snapshot delivery. React renders typed state and dispatches commands. Avoid one crate per module or a general routing/plugin framework.
+`model.rs` generates the committed TypeScript contract through `export-bindings`. The shell provides snapshot/command IPC and a separate credential-configuration command. Tokens are absent from snapshots and shared commands. Connection stages report observed checking, preflight, gateway, voice join and capture progress; they are not time estimates.
 
-One Rust representation should generate the TypeScript command/snapshot types. Compare a small type-generation tool with schema-based validation before implementation. Tests should exercise serialized names and union variants, not rely on hand-maintained lookalike types. The current prototype contract is input to this decision.
+## Audio path
 
-## Audio and connection candidates
+`audio.rs` opens only the selected Windows recording endpoint through CPAL. The current adapter requires supported 48 kHz mono or stereo input, duplicates mono, and produces stereo f32 PCM. It never falls back to a default microphone. A bounded preallocated queue separates capture callbacks from the paced reader. Callbacks convert samples and update atomic telemetry without network/UI work, logging or allocation. Stale-frame dropping bounds local queue age; paced silence prevents unlimited decoder read-ahead.
 
-CPAL opens only the explicitly chosen recording device. Prefer a supported 48 kHz configuration, otherwise preserve the actual rate and convert deliberately. A bounded preallocated queue separates capture callbacks from blocking/async work. Keep allocation, locks, networking, and UI serialization out of the callback where feasible.
+`engine.rs` owns Serenity/Songbird and feeds their raw PCM adapter. Songbird handles Opus and encrypted voice transport. Volume/mute apply inside Rust; metering is before volume/mute and cannot establish listener delivery. Silence is valid input. Capture failure and connection health remain separate. Permission rejection/removal are terminal; bounded gateway/device recovery preserves the original route and output state. No local monitor is opened.
 
-Songbird consumes raw PCM and owns Opus/DAVE transmission. Probe its read-ahead, EOF, starvation, and cancellation behavior before selecting the live adapter. Naively returning unlimited silence from a Read implementation can permit unlimited read-ahead; blocking indefinitely can prevent cancellation. Queue age, under/overruns, and clock mismatch need explicit policy. A finite memory bound alone does not guarantee low latency.
+## Settings and credentials
 
-Connection state and capture health are distinct. Explicit disconnect/quit invalidates pending attempts. Minimal retries preserve selections, volume, and mute. Device loss must not select a microphone or another endpoint. Bot removal and permission rejection should not trigger repeated rejoin attempts. The shared-control owner must serialize conflicting commands and prevent stale async completions from restoring a disconnected session.
+Normal launches use platform-local application data. Development/test launches can explicitly override the data directory or individual paths. New tokens use current-user Windows DPAPI in a bounded versioned envelope with atomic replacement. Legacy explicit development credential files remain readable. Corrupt encrypted data never falls back to plaintext. Configuration validates the bot before saving and is serialized against Connect. No automatic voice connection follows setup or launch.
 
-The prototype can reject source/destination changes while connected, requiring disconnect before reconfiguration. Automatic startup connection is outside initial scope. Decide whether input metering needs capture while disconnected; do not silently open a recording stream merely to populate a device list.
+## UI and evolution
 
-## Credentials and first-run behavior
+The frontend receives snapshots and sends intentions; it owns no sample buffers or retry policy. Route drafts must remain visually distinct from the active route and take effect only through an explicit apply workflow. Closing the window keeps streaming in the tray; Quit closes process ownership.
 
-Backend-only local token loading, redacted errors/logs, and no token in frontend snapshots or Git. A private development credential file is acceptable for the first local build; generic end-user credential configuration and OS-backed persistence are separate decisions. Entering secrets in chat is unnecessary.
+Future capture and shared-mix work is research, not implemented routing functionality. Keep recording capture as an adapter while establishing process/desktop capture isolation, sample-clock handling, and Discord destination constraints before extending the current single-source/single-destination model.
 
-Read-only bot metadata discovery and voice joining should be separate operations. Joining and transmitting are explicit UI actions. Avoid silently replacing another client's active use of the same bot. First-run state should clearly show missing credentials, loading/discovery failure, or unavailable source instead of pretending the app is ready.
+## Evidence boundary
 
-## Validation before user handoff
-
-Require Windows cross-build plus native startup/closure, typed frontend checks, meaningful state/cancellation tests, and deterministic PCM adapter tests. Verify a local captured stream without logging audio or device identities to Git. Exercise bot metadata authentication privately without automatically joining a call. Report what still needs the user's real-call test, especially delivery, latency, and long-session behavior.
-
-Review questions: smallest maintainable code layout; live PCM pacing/cancellation; where to bound retries versus library auto-reconnect; single-source IPC types; secure configuration UX; and the minimum credible validation before a first user test. UI/skill research should influence implementation before this proposal is adopted.
+Portable tests cover state, protocol, ownership and PCM logic. Cross-compilation checks Windows adapters; native probes cover selected runtime behaviors. User testing confirms the initial audible route, perceived low delay and tray operation. Numeric end-to-end latency, comprehensive recovery and five-hour stability remain open in [QUALITY.md](QUALITY.md) and EC-006.

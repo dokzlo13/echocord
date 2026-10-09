@@ -19,7 +19,7 @@ The combined Windows executable cross-builds in WSL. Production Rust/TypeScript 
 
 Explicitly selected native capture passed real-callback, paced-read, mute/draining, stop, and same-device reopen checks. The measured source was silent; this does not prove audible stereo delivery. Process supervision passed blocked-pipe, ignored-Stop, and parent-failure scenarios.
 
-The real-call test still needs to establish music delivery, isolation, practical listener delay, participant-change/DAVE behavior, and reconnect experience. Five-hour stability, clean-machine packaging, installer/signing, and comprehensive native accessibility remain later work. The current executable uses Visual C++ runtime and WebView2 already available on the development host.
+User testing confirmed music delivery, very good perceived latency, and tray behavior. Formal isolation checks, measured listener delay, participant-change/DAVE behavior, and recovery acceptance remain open. Five-hour stability, clean-machine packaging, installer/signing, and comprehensive native accessibility remain later work. The current executable uses Visual C++ runtime and WebView2 already available on the development host.
 
 Capture deliberately requires a supported 48 kHz configuration. Unsupported/missing devices produce an error, never a default-microphone fallback. Recovery is bounded and preserves the selected route. Disconnect waits for observed engine exit; Quit also closes Windows job ownership.
 

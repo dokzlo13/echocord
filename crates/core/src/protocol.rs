@@ -268,6 +268,9 @@ pub(crate) fn read_token(path: &Path) -> Result<String, AppError> {
     file.take(MAX_TOKEN_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Failure::Configuration.error())?;
+    if crate::storage::is_encrypted(&bytes) {
+        return crate::storage::load_token(path);
+    }
     if bytes.len() as u64 > MAX_TOKEN_BYTES {
         return Err(Failure::Configuration.error());
     }

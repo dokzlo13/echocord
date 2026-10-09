@@ -6,3 +6,4 @@ pub mod model;
 #[cfg(windows)]
 pub mod process;
 pub mod protocol;
+pub mod storage;

@@ -184,7 +184,7 @@ fn main() {
                     let label = match &snapshot.connection {
                         Connection::Connected if snapshot.output.muted => "connected, muted",
                         Connection::Connected => "connected",
-                        Connection::Connecting => "connecting",
+                        Connection::Connecting { .. } => "connecting",
                         Connection::Recovering { .. } => "reconnecting",
                         Connection::Disconnecting => "disconnecting",
                         Connection::Error { .. } | Connection::CleanupIncomplete { .. } => {

@@ -24,5 +24,6 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-018 | Native post-gain meter | done | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
 | EC-019 | Isolated telemetry presentation | done | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
+| EC-021 | Picker clarity, queued changes and meter motion | ready | EC-013, EC-018, EC-019 | unassigned; follow-up | — | [task](EC-021.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

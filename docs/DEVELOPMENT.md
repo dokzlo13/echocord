@@ -40,9 +40,9 @@ make check
 | `make ui-build` | Typecheck and build the mock UI |
 | `make ui-check` / `make ui-test` | Full UI gate or browser tests alone |
 
-`make check` does not open a Windows window or connect to Discord. Native runtime checks are separate. Browser tests use fixtures, not credentials or real audio. Build scripts keep SDK/cache files and artifacts in WSL; run commands use host interop. The original toolchain-only probe remains available with `bash scripts/probe-windows.sh --run`.
+`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. Browser tests use fixtures. Source, caches, and build artifacts remain in WSL. Historical draft targets use `prototype-*`; dependency checks use `check-probes`.
 
-The audio probe covers CPAL enumeration, native Opus encode/decode, Songbird PCM preparation, and offline DAVE key generation. The desktop probe covers embedded frontend execution, IPC, and native window lifecycle. They are separate executables; combined product integration, capture, live Discord, latency, and clean-machine packaging remain later checks. See each probe README for features, results, and limitations.
+The isolated probes remain useful diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; live Discord and listener latency remain part of the [first real-call test](FIRST-TEST.md).
 
 cargo-xwin documents cross-compilation and WSL execution, including CMake/Ninja support. Tauri documents a cross-compilation route but cautions that it is less tested than native builds. This project investigates that route to keep development in WSL. Start with an executable; NSIS packaging can follow, and MSI packaging is not a prerequisite.
 

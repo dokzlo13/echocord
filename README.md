@@ -17,4 +17,4 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 
 Use `make help` for build, check, native-probe, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Status: Windows audio/Tauri dependency probes pass; a mocked UI draft is under advisory review. No working streaming application yet.
+Status: first local Windows build, ready for controlled user testing. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).

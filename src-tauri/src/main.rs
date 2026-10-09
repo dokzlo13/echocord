@@ -217,11 +217,11 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("Cannot initialize Echocord window");
     app.run(|app, event| {
-        if let RunEvent::ExitRequested { api, .. } = event {
-            if !app.state::<ShellState>().exiting.load(Ordering::SeqCst) {
-                api.prevent_exit();
-                request_quit(app);
-            }
+        if let RunEvent::ExitRequested { api, .. } = event
+            && !app.state::<ShellState>().exiting.load(Ordering::SeqCst)
+        {
+            api.prevent_exit();
+            request_quit(app);
         }
     });
 }

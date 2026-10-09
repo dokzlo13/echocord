@@ -2,7 +2,7 @@
 # Use the pinned project browser tooling with all session artifacts kept private.
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-runtime="$repo_root/prototypes/control-ui/node_modules/playwright/cli.js"
+runtime="$repo_root/ui/node_modules/playwright/cli.js"
 if [[ ! -f "$runtime" ]]; then
   echo 'Install the pinned UI dependencies with make ui-install first.' >&2
   exit 1

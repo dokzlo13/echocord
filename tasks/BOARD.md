@@ -6,14 +6,14 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | --- | --- | --- | --- | --- | --- | --- |
 | EC-001 | Preserve discovery and establish WSL workflow | done | — | coordinator / a1 | main | [task](EC-001.md), integration 777ada2 |
 | EC-002 | Prove complete Windows dependency build from WSL | done | EC-001 | coordinator + desktop worker / a1 | main | [task](EC-002.md), eb23ad1 + d35714b |
-| EC-003 | Live PCM and Windows capture slice | active | EC-002, EC-008 | audio worker / a1 | agent/EC-003-a1 | [task](EC-003.md) |
-| EC-004 | Design UI states and typed control contract | review | EC-001 | UI worker / a1, draft checkpoint | agent/EC-004-a1 | [task](EC-004.md); implementation awaits EC-007/008 |
-| EC-005 | Integrate minimal desktop app and recovery | blocked | EC-003, EC-004 | unassigned | — | [task](EC-005.md) |
+| EC-003 | Live PCM and Windows capture slice | done | EC-002, EC-008 | audio worker / a1 | main | [task](EC-003.md), 0583aec; native capture passed |
+| EC-004 | Design UI states and typed control contract | done | EC-001 | UI worker / a1 | main | Superseded by reviewed direction and EC-011 implementation |
+| EC-005 | Integrate minimal desktop app and recovery | review | EC-003, EC-004, EC-009, EC-010, EC-011 | coordinator / a1 | main | [first user test](../docs/FIRST-TEST.md) ready; real-call feedback pending |
 | EC-006 | Validate failures and five-hour session | blocked | EC-005 | unassigned | — | [task](EC-006.md) |
 | EC-007 | Select vetted upstream skills and docs | done | EC-002 | research workers / a1 | main | [sources](../.agents/SOURCES.md), [evaluation](../docs/UI-DIRECTION.md) |
 | EC-008 | Advisory architecture and UI direction review | done | EC-002 | advisory reviewer / a1 | main | [decisions](../docs/REVIEW.md) |
-| EC-009 | Windows engine-process ownership | active | EC-008 | process worker / a1 | agent/EC-009-a1 | [task](EC-009.md) |
-| EC-010 | Session controller and Discord engine | active | EC-008 | runtime worker / a1 | agent/EC-010-a1 | [task](EC-010.md) |
-| EC-011 | Production UI using reviewed direction | active | EC-007, EC-008 | UI worker / a1 | agent/EC-011-a1 | [task](EC-011.md) |
+| EC-009 | Windows engine-process ownership | done | EC-008 | process worker / a1 | main | [task](EC-009.md), f2a1f82; independent review passed |
+| EC-010 | Session controller and Discord engine | done | EC-008 | runtime worker / a1 | main | [task](EC-010.md), 604e043; known findings resolved |
+| EC-011 | Production UI using reviewed direction | done | EC-007, EC-008 | UI worker / a1 | main | [task](EC-011.md), eaa2337; 42 browser tests and native smoke passed |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

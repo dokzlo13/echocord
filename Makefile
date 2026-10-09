@@ -4,8 +4,9 @@ SHELL := /bin/bash
 
 .PHONY: help setup-wsl build check check-audio check-desktop probe-audio probe-desktop \
         run-audio run-desktop smoke-windows ui-install ui-browser-install ui-dev ui-build ui-check ui-test \
-        bindings bindings-check core-check app-install app-build app-run app-smoke app-check
-.NOTPARALLEL: build check smoke-windows
+        bindings bindings-check core-check app-install app-build app-run app-smoke app-check \
+        check-probes build-probes prototype-install prototype-dev prototype-check engine-smoke
+.NOTPARALLEL: build check smoke-windows build-probes check-probes
 
 help: ## Show supported development commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -17,9 +18,13 @@ setup-wsl: ## Install pinned user-level WSL build tools (requires rustup and uv)
 	uv tool install ninja==1.13.2
 	python3 scripts/prepare-opus.py
 
-build: probe-audio probe-desktop ui-build ## Build both Windows probes and the UI prototype
+build: app-build ## Build the Windows application
 
-check: check-audio check-desktop ui-check ## Run Rust and UI checks, without opening Windows UI
+check: app-check ## Run production Rust and UI checks without opening Windows UI
+
+build-probes: probe-audio probe-desktop ## Build the isolated dependency probes
+
+check-probes: check-audio check-desktop ## Check the isolated dependency probes
 
 probe-audio: ## Cross-build the offline audio probe in WSL
 	bash scripts/probe-audio.sh
@@ -41,23 +46,22 @@ run-desktop: ## Build and run the self-closing Windows Tauri lifecycle probe
 
 smoke-windows: run-audio run-desktop ## Run both native Windows probes explicitly
 
-ui-install: ## Install the UI prototype's locked npm dependencies in WSL
-	npm --prefix prototypes/control-ui ci --no-audit --no-fund
+ui-install: app-install ## Install the production UI's locked dependencies
 
 ui-browser-install: ## Install the UI tests' Chromium browser in WSL
-	cd prototypes/control-ui && npx --no-install playwright install chromium
+	cd ui && npx --no-install playwright install chromium
 
 ui-dev: ## Start the mocked UI preview on localhost
-	npm --prefix prototypes/control-ui run dev
+	npm --prefix ui run dev
 
-ui-build: ## Typecheck and build the mocked UI prototype
-	npm --prefix prototypes/control-ui run build
+ui-build: ## Typecheck and build the production UI
+	npm --prefix ui run build
 
 ui-check: ## Run UI lint, typecheck, build, and behavior tests
-	npm --prefix prototypes/control-ui run check
+	npm --prefix ui run check
 
-ui-test: ## Run the UI prototype's browser tests
-	npm --prefix prototypes/control-ui test
+ui-test: ## Run production UI tests with fixture adapters
+	npm --prefix ui test
 
 bindings: ## Regenerate TypeScript control types from Rust
 	cargo run --locked -p echocord-core --bin export-bindings -- ui/src/generated.ts
@@ -80,9 +84,22 @@ app-build: ## Build the real Windows application from WSL
 app-run: ## Run the built app with private local configuration; starts disconnected
 	bash scripts/run-app.sh
 
-app-smoke: ## Run native UI/IPC/tray lifecycle checks, without connecting voice
+app-smoke: app-build ## Build and run native UI/IPC/tray checks, without connecting voice
 	bash scripts/run-app.sh --smoke
 
 app-check: core-check ## Check production UI and Windows Rust integration
 	npm --prefix ui run check
 	bash scripts/build-app.sh --check
+
+prototype-install: ## Install the historical draft's dependencies
+	npm --prefix prototypes/control-ui ci --no-audit --no-fund
+
+prototype-dev: ## Preview the historical draft (not the application UI)
+	npm --prefix prototypes/control-ui run dev
+
+prototype-check: ## Check the historical fixture prototype
+	npm --prefix prototypes/control-ui run check
+
+engine-smoke: app-build ## Verify actual GUI engine mode rejects empty credentials before capture
+	bash scripts/build-native-tool.sh engine-probe
+	target/x86_64-pc-windows-msvc/release/engine-probe.exe "$$(wslpath -w "$$PWD/target/x86_64-pc-windows-msvc/release/echocord.exe")" "$$(wslpath -w "$$PWD/.trash/app/engine-probe")"

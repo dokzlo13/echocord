@@ -23,4 +23,4 @@ The real-call test still needs to establish music delivery, isolation, practical
 
 Capture deliberately requires a supported 48 kHz configuration. Unsupported/missing devices produce an error, never a default-microphone fallback. Recovery is bounded and preserves the selected route. Disconnect waits for observed engine exit; Quit also closes Windows job ownership.
 
-`make check` checks production code. `make app-smoke` rebuilds and tests native UI without joining voice. `make engine-smoke` exercises the actual worker with synthetic empty credentials. `make ui-dev` is explicitly a fixture preview. Historical prototype and dependency checks use separate `prototype-*` and `check-probes` targets.
+`make check` checks production code. `make app-smoke` rebuilds and tests native UI without joining voice. `make engine-smoke` exercises the actual worker with synthetic empty credentials. `make ui-dev` is explicitly a fixture preview. Obsolete standalone experiments have been retired; production regression tools remain.

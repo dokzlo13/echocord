@@ -3,3 +3,5 @@
 *.ico binary
 # Unified diffs use a single space for empty context lines.
 *.patch whitespace=-blank-at-eol
+# Preserve pinned third-party guidance verbatim, including upstream whitespace.
+.agents/skills/impeccable/** -whitespace

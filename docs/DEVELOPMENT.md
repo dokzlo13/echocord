@@ -31,16 +31,15 @@ make check
 
 | Command | Purpose |
 | --- | --- |
-| `make probe-audio` / `make probe-desktop` | Cross-build isolated Windows audio or Tauri probe |
-| `make check-audio` / `make check-desktop` | Rust formatting and Windows Clippy; audio also checks dependency-cache integrity |
-| `make run-audio` | Run offline codec/crypto/device enumeration; no recording or Discord connection |
-| `make run-desktop` | Run the self-closing Windows shell and verify native/frontend telemetry |
-| `make smoke-windows` | Explicitly run both native probes |
-| `make ui-dev` | Preview mocked controls on localhost |
-| `make ui-build` | Typecheck and build the mock UI |
-| `make ui-check` / `make ui-test` | Full UI gate or browser tests alone |
+| `make build` | Build the Windows app in WSL |
+| `make check` | Production Rust, bindings, frontend, and Windows checks |
+| `make app-run` | Run the built app, initially disconnected |
+| `make app-smoke` | Build and verify native UI/tray/IPC without voice joining |
+| `make engine-smoke` | Exercise owned worker startup with synthetic credentials |
+| `make ui-dev` | Local fixture preview for development |
+| `make bindings` | Regenerate the TypeScript control contract |
 
-`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. Browser tests use fixtures. Source, caches, and build artifacts remain in WSL. Historical draft targets use `prototype-*`; dependency checks use `check-probes`.
+`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. Browser tests use fixtures. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
 
 The isolated probes remain useful diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; live Discord and listener latency remain part of the [first real-call test](FIRST-TEST.md).
 

@@ -36,3 +36,9 @@ No media player, browser embedding, sound pad, playlist manager, custom decoder 
 3. Prove VB-Cable capture → Discord with bounded buffering and diagnostics.
 4. Add the minimal UI, persistence, tray behavior, and recovery.
 5. Failure-injection tests and a real five-hour session; revise provisional budgets using evidence.
+
+## Post-alpha priorities
+
+User testing confirms the core live flow, perceived latency, and tray operation. The next iteration emphasizes a deliberately designed compact audio surface, responsive and visible connection progress, fast grouped room navigation, and production-facing settings/copy. Pending route edits must remain distinct from the active route and require explicit apply. Secure in-app bot setup and standard per-user app data replace dependence on development-only setup.
+
+Research before implementation: process/desktop capture while retaining recording inputs; optional virtual endpoints; suppression of local playback without suppressing the stream; multiple sources into one common mix and multiple destinations. No per-source/per-destination routing matrix or advanced DSP is required. Same-server Discord restrictions and local-mute semantics must be established before promising these features.

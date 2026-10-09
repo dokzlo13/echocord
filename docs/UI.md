@@ -1,6 +1,6 @@
 # Desktop control UI
 
-The production UI lives in `ui/` and follows the adopted [UI direction](UI-DIRECTION.md) and [architecture decisions](REVIEW.md). The older `prototypes/control-ui/` remains historical EC-004 draft material; its hand-written contract and ready-only mock are superseded. EC-011 is pending integration and independent native review.
+The production UI lives in `ui/` and follows the adopted [UI direction](UI-DIRECTION.md) and [architecture decisions](REVIEW.md). The initial production surface passed native and browser checks, but was rejected visually in user review. It is being redesigned; the obsolete mock was removed from the working tree.
 
 ## Accepted layout and state behavior
 

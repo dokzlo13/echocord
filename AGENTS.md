@@ -17,6 +17,10 @@ One coordinator owns `tasks/BOARD.md` and integration. Each worker gets a task I
 
 Checkpoint task evidence and next actions in Git before handoff. A chat summary or running agent is not durable project state. After interruption, inspect worktrees and running processes before retrying or reassigning work.
 
+Finish with a clean working tree and linear `main` history: integrate scoped worker commits without merge commits, remove accepted worker branches/worktrees after verification, and remove rejected or permanently frozen work when the owner concludes the session. Preserve private/user artifacts under `.trash/` before worktree removal; never discard an active worker or unidentified changes. Retire obsolete prototypes and duplicate commands after production replacements are verified; Git history preserves the experiment.
+
+Before handoff, reconcile STATE, the board, current architecture/design, commands, and next actions with the actual code. Distinguish user-confirmed behavior from automated measurements and unfinished acceptance. Every substantial feature set needs a design → review → implementation seam.
+
 ## Validation and design
 
 Read `docs/QUALITY.md` for applicable gates. Report checks actually run and limitations. Mark tasks done only after integration and relevant checks; Linux checks do not prove Windows audio behavior.
@@ -24,3 +28,5 @@ Read `docs/QUALITY.md` for applicable gates. Report checks actually run and limi
 Use only researched existing skills after the stack is validated. Record source, pinned revision, license, maintenance/adoption evidence, and applicability before importing a skill. Do not generate placeholder skills or copy third-party material without checking its license. UI acceptance belongs in `docs/QUALITY.md` until suitable skills are selected. Keep this file short; task-specific detail belongs in the task or relevant document.
 
 For UI work, read the vetted `.agents/skills/frontend-design/SKILL.md`; for browser review/testing, read `.agents/skills/playwright-cli/SKILL.md`. Pins, licenses, applicability limits, and private artifact handling are in `.agents/SOURCES.md`. Project desktop/privacy requirements take precedence over generic skill advice.
+
+For redesigns, also read the pinned `.agents/skills/impeccable/SKILL.md` and its applicable references. Preserve useful upstream skill content verbatim with license/attribution. Delegation prompts must explicitly name the skills and require workers to open them manually; do not assume sub-agent skill discovery.

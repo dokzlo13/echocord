@@ -41,3 +41,9 @@ AGENTS.md holds shared rules. CLAUDE.md imports it using `@AGENTS.md`; no duplic
 Research existing skills after the dependency stack is validated. Prefer maintained upstream skills with credible adoption/review signals and actual desktop-UI relevance. Stars alone are insufficient evidence. Record source URL, revision, license, inspection findings, and evaluation results. Import only selected, license-compatible resources into a shared skills folder with thin harness entry points where needed. Until then, use project quality criteria and official documentation; do not manufacture replacement skills or empty skill folders.
 
 Sources: [Codex instructions](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [Codex subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents), [Codex skills](https://learn.chatgpt.com/docs/build-skills), [Claude memory](https://code.claude.com/docs/en/memory), [Claude skills](https://code.claude.com/docs/en/skills).
+
+## Completion and session transition
+
+Keep main linear: integrate scoped worker commits by cherry-pick/rebase, never merge worker topology into main. After acceptance, verify no unique intended changes remain, preserve private evidence outside the worktree, then remove its worktree and branch. At owner-confirmed session closure, remove rejected/frozen branches as well. Do not remove active or unidentified work. Generated build caches may be discarded; personal .trash files may not.
+
+Before handoff, reconcile current STATE, board, architecture/design, build commands, and deferred acceptance with actual code and user feedback. Retire superseded prototypes, duplicate lockfiles, and obsolete command aliases. Keep production regression tools whose behavior is still needed. Closed task records are historical evidence; current DEVELOPMENT is the command authority. Explicitly include skill paths and manual-read requirements in worker prompts.

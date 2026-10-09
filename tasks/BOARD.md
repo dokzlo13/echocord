@@ -6,7 +6,7 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | --- | --- | --- | --- | --- | --- | --- |
 | EC-001 | Preserve discovery and establish WSL workflow | done | — | coordinator / a1 | main | [task](EC-001.md), integration 777ada2 |
 | EC-002 | Prove complete Windows dependency build from WSL | done | EC-001 | coordinator + desktop worker / a1 | main | [task](EC-002.md), eb23ad1 + d35714b |
-| EC-003 | Prove isolated capture to Discord | blocked | EC-002 | unassigned | — | [task](EC-003.md) |
+| EC-003 | Prove isolated capture to Discord | blocked | EC-002, EC-008 | unassigned | — | [task](EC-003.md) |
 | EC-004 | Design UI states and typed control contract | review | EC-001 | UI worker / a1, draft checkpoint | agent/EC-004-a1 | [task](EC-004.md); implementation awaits EC-007/008 |
 | EC-005 | Integrate minimal desktop app and recovery | blocked | EC-003, EC-004 | unassigned | — | [task](EC-005.md) |
 | EC-006 | Validate failures and five-hour session | blocked | EC-005 | unassigned | — | [task](EC-006.md) |

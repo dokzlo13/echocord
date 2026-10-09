@@ -10,9 +10,10 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-004 | Design UI states and typed control contract | review | EC-001 | UI worker / a1, draft checkpoint | agent/EC-004-a1 | [task](EC-004.md); implementation awaits EC-007/008 |
 | EC-005 | Integrate minimal desktop app and recovery | blocked | EC-003, EC-004 | unassigned | — | [task](EC-005.md) |
 | EC-006 | Validate failures and five-hour session | blocked | EC-005 | unassigned | — | [task](EC-006.md) |
-| EC-007 | Select vetted upstream skills and docs | active | EC-002 | research workers / a1 | main, research only | [task](EC-007.md) |
+| EC-007 | Select vetted upstream skills and docs | done | EC-002 | research workers / a1 | main | [sources](../.agents/SOURCES.md), [evaluation](../docs/UI-DIRECTION.md) |
 | EC-008 | Advisory architecture and UI direction review | done | EC-002 | advisory reviewer / a1 | main | [decisions](../docs/REVIEW.md) |
 | EC-009 | Windows engine-process ownership | active | EC-008 | process worker / a1 | agent/EC-009-a1 | [task](EC-009.md) |
 | EC-010 | Session controller and Discord engine | active | EC-008 | runtime worker / a1 | agent/EC-010-a1 | [task](EC-010.md) |
+| EC-011 | Production UI using reviewed direction | active | EC-007, EC-008 | UI worker / a1 | agent/EC-011-a1 | [task](EC-011.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

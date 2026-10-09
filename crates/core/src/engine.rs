@@ -12,8 +12,10 @@ use tokio::{
 const INIT_DEADLINE: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const JOIN_DEADLINE: Duration = Duration::from_secs(35);
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(35);
+#[cfg(any(windows, test))]
+const GATEWAY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(windows)]
 const DEVICE_GRACE: Duration = Duration::from_secs(30);
 
@@ -65,6 +67,136 @@ impl NetworkRecovery {
     fn active(self) -> bool {
         self.gateway || self.guild
     }
+}
+
+#[cfg(any(windows, test))]
+struct MonitorTask(tokio::task::JoinHandle<()>);
+#[cfg(any(windows, test))]
+impl Drop for MonitorTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(any(windows, test))]
+struct PermissionMonitor {
+    updates: watch::Receiver<Option<Result<(), Failure>>>,
+    _task: MonitorTask,
+}
+#[cfg(any(windows, test))]
+impl PermissionMonitor {
+    fn spawn<F, Fut>(
+        mut check: F,
+        period: Duration,
+        stops: watch::Sender<StopCause>,
+        mut stop_rx: watch::Receiver<StopCause>,
+    ) -> Self
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), Failure>> + Send + 'static,
+    {
+        let (updates, receiver) = watch::channel(None);
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(period);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await; // Initial permissions were checked before join.
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancelled(&mut stop_rx) => break,
+                    _ = tick.tick() => {},
+                }
+                let result = tokio::select! {
+                    biased;
+                    _ = cancelled(&mut stop_rx) => break,
+                    result = check() => result,
+                };
+                if let Err(failure) = result
+                    && failure != Failure::Connection
+                {
+                    stop(&stops, StopCause::Failed(failure));
+                }
+                updates.send_replace(Some(result));
+            }
+        });
+        Self {
+            updates: receiver,
+            _task: MonitorTask(task),
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+enum LiveControl {
+    Output(Output),
+    Permission(Result<(), Failure>),
+    Closed,
+}
+
+/// Retains the in-flight HTTP task when output wins the selection.
+#[cfg(any(windows, test))]
+async fn next_live_control(
+    output: &mut watch::Receiver<Output>,
+    permissions: &mut PermissionMonitor,
+) -> LiveControl {
+    tokio::select! {
+        changed = output.changed() => match changed {
+            Ok(()) => LiveControl::Output(output.borrow_and_update().clone()),
+            Err(_) => LiveControl::Closed,
+        },
+        changed = permissions.updates.changed() => match changed {
+            Ok(()) => permissions.updates.borrow_and_update().as_ref().copied().map_or(LiveControl::Closed, LiveControl::Permission),
+            Err(_) => LiveControl::Permission(Err(Failure::Connection)),
+        },
+    }
+}
+
+/// Public runner snapshots, not REST success or stage callbacks, own this deadline.
+#[cfg(any(windows, test))]
+fn monitor_gateway<F, Fut>(
+    mut snapshot: F,
+    health: watch::Sender<NetworkRecovery>,
+    stops: watch::Sender<StopCause>,
+    mut stop_rx: watch::Receiver<StopCause>,
+) -> MonitorTask
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Option<bool>> + Send + 'static,
+{
+    MonitorTask(tokio::spawn(async move {
+        let mut recovery = RecoveryWindow::new(RECOVERY_DEADLINE);
+        let mut tick = tokio::time::interval(GATEWAY_POLL_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancelled(&mut stop_rx) => break,
+                _ = tick.tick() => {},
+            }
+            let connected = tokio::select! {
+                biased;
+                _ = cancelled(&mut stop_rx) => break,
+                result = tokio::time::timeout(GATEWAY_POLL_INTERVAL, snapshot()) => result.ok().flatten() == Some(true),
+            };
+            if connected {
+                recovery.reset();
+            } else {
+                recovery.begin();
+            }
+            health.send_if_modified(|health| {
+                if health.gateway == !connected {
+                    false
+                } else {
+                    health.gateway = !connected;
+                    true
+                }
+            });
+            if recovery.expired() {
+                stop(&stops, StopCause::Failed(Failure::Connection));
+                break;
+            }
+        }
+    }))
 }
 
 fn stop(sender: &watch::Sender<StopCause>, cause: StopCause) {
@@ -254,7 +386,7 @@ async fn run_session(
         },
     };
     let token = protocol::read_token(&init.token_file).map_err(|_| Failure::Configuration)?;
-    let http = serenity::http::Http::new(&token);
+    let http = Arc::new(serenity::http::Http::new(&token));
     let guild = serenity::all::GuildId::new(
         protocol::discord_id(&init.server_id).ok_or(Failure::Protocol)?,
     );
@@ -339,7 +471,8 @@ async fn run_session(
         }
         capture_loop(
             &init,
-            &http,
+            http.clone(),
+            shard_manager.clone(),
             call,
             signals.clone(),
             output,
@@ -491,9 +624,10 @@ impl serenity::client::EventHandler for Signals {
         event: serenity::gateway::ShardStageUpdateEvent,
     ) {
         if *self.ready.borrow() {
-            self.recovering.send_modify(|health| {
-                health.gateway = event.new != serenity::gateway::ConnectionStage::Connected
-            });
+            // Disconnection is an early hint; only a current runner snapshot clears it.
+            if event.new != serenity::gateway::ConnectionStage::Connected {
+                self.recovering.send_modify(|health| health.gateway = true);
+            }
         }
     }
 }
@@ -521,7 +655,8 @@ impl Drop for CaptureGuard {
 #[allow(clippy::too_many_arguments)]
 async fn capture_loop(
     init: &Init,
-    http: &serenity::http::Http,
+    http: std::sync::Arc<serenity::http::Http>,
+    shard_manager: std::sync::Arc<serenity::gateway::ShardManager>,
     call: std::sync::Arc<tokio::sync::Mutex<songbird::Call>>,
     signals: Signals,
     mut output: watch::Receiver<Output>,
@@ -537,15 +672,51 @@ async fn capture_loop(
     let mut permission_missing = false;
     let mut next_device_try = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
-    let mut permission_tick = tokio::time::interval(Duration::from_secs(5));
-    permission_tick.tick().await;
+    let guild = signals.guild;
+    let channel = signals.channel;
+    let mut permission_monitor = PermissionMonitor::spawn(
+        move || {
+            let http = http.clone();
+            async move { permissions(&http, guild, channel).await }
+        },
+        Duration::from_secs(5),
+        stops.clone(),
+        stop_rx.clone(),
+    );
+    let _gateway_monitor = monitor_gateway(
+        move || {
+            let shard_manager = shard_manager.clone();
+            async move {
+                shard_manager
+                    .runners
+                    .lock()
+                    .await
+                    .get(&serenity::all::ShardId(0))
+                    .map(|runner| runner.stage == serenity::gateway::ConnectionStage::Connected)
+            }
+        },
+        signals.recovering.clone(),
+        stops.clone(),
+        stop_rx.clone(),
+    );
     loop {
         tokio::select! {
             biased;
             cause = cancelled(&mut stop_rx) => return match cause { StopCause::Failed(f) => Err(f), _ => Ok(()) },
-            changed = output.changed() => {
-                if changed.is_err() { return Ok(()); }
-                if let Some(capture) = &capture { let output = output.borrow_and_update(); capture.0.set_output(output.volume_percent, output.muted); }
+            control = next_live_control(&mut output, &mut permission_monitor) => {
+                match control {
+                    LiveControl::Closed => return Ok(()),
+                    LiveControl::Output(output) => {
+                        if let Some(capture) = &capture { capture.0.set_output(output.volume_percent, output.muted); }
+                    }
+                    LiveControl::Permission(Ok(())) => {
+                        permission_missing = false;
+                        let gateway_recovering = recovery.borrow().active();
+                        if !gateway_recovering && recovering.reset() && capture.is_some() && !missing.active() { let _ = statuses.send(Status::Connected).await; }
+                    }
+                    LiveControl::Permission(Err(Failure::Connection)) => { permission_missing = true; if recovering.begin() { let _ = statuses.send(Status::Recovering).await; } }
+                    LiveControl::Permission(Err(f)) => { stop(&stops, StopCause::Failed(f)); return Err(f); }
+                }
             }
             changed = recovery.changed() => {
                 if changed.is_err() { return Err(Failure::Connection); }
@@ -555,17 +726,6 @@ async fn capture_loop(
                 } else if !permission_missing {
                     recovering.reset();
                     if capture.is_some() && !missing.active() { let _ = statuses.send(Status::Connected).await; }
-                }
-            }
-            _ = permission_tick.tick() => {
-                match permissions(http, signals.guild, signals.channel).await {
-                    Ok(()) => {
-                        permission_missing = false;
-                        let gateway_recovering = recovery.borrow().active();
-                        if !gateway_recovering && recovering.reset() && capture.is_some() && !missing.active() { let _ = statuses.send(Status::Connected).await; }
-                    },
-                    Err(Failure::Connection) => { permission_missing = true; if recovering.begin() { let _ = statuses.send(Status::Recovering).await; } }
-                    Err(f) => { stop(&stops, StopCause::Failed(f)); return Err(f); }
                 }
             }
             _ = tick.tick() => {
@@ -695,5 +855,127 @@ mod tests {
         assert!(!health.active());
         health.gateway = true;
         assert!(health.active());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn stalled_permission_request_does_not_delay_applied_mute_or_volume() {
+        let (stops, stop_rx) = watch::channel(StopCause::Running);
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (response, response_rx) = tokio::sync::oneshot::channel();
+        let mut request = Some((started, response_rx));
+        let mut permissions = PermissionMonitor::spawn(
+            move || {
+                let (started, response) = request.take().expect("only one in-flight request");
+                async move {
+                    let _ = started.send(());
+                    response.await.unwrap_or(Err(Failure::Connection))
+                }
+            },
+            Duration::from_secs(5),
+            stops,
+            stop_rx,
+        );
+        let initial = Output {
+            volume_percent: 100,
+            muted: false,
+        };
+        let (outputs, mut output_rx) = watch::channel(initial.clone());
+        let mut applied = initial;
+        assert_eq!(applied, *outputs.borrow());
+        started_rx.await.unwrap();
+        for next in [
+            Output {
+                volume_percent: 40,
+                muted: true,
+            },
+            Output {
+                volume_percent: 0,
+                muted: false,
+            },
+        ] {
+            outputs.send_replace(next.clone());
+            let before = tokio::time::Instant::now();
+            match tokio::time::timeout(
+                Duration::from_millis(50),
+                next_live_control(&mut output_rx, &mut permissions),
+            )
+            .await
+            .unwrap()
+            {
+                LiveControl::Output(output) => applied = output,
+                _ => panic!("output must apply while the request is stalled"),
+            }
+            assert_eq!(applied, next);
+            assert!(tokio::time::Instant::now() < before + Duration::from_millis(50));
+            assert!(permissions.updates.borrow().is_none());
+        }
+        response.send(Ok(())).unwrap();
+        assert!(matches!(
+            next_live_control(&mut output_rx, &mut permissions).await,
+            LiveControl::Permission(Ok(()))
+        ));
+        drop(outputs);
+        assert!(matches!(
+            next_live_control(&mut output_rx, &mut permissions).await,
+            LiveControl::Closed
+        ));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn missing_runner_exhausts_gateway_deadline_despite_healthy_rest() {
+        for runner in [None, Some(false)] {
+            let (stops, stop_rx) = watch::channel(StopCause::Running);
+            let (health, health_rx) = watch::channel(NetworkRecovery::default());
+            let _gateway = monitor_gateway(
+                move || async move { runner },
+                health,
+                stops.clone(),
+                stop_rx.clone(),
+            );
+            let permissions = PermissionMonitor::spawn(
+                || async { Ok(()) },
+                Duration::from_secs(5),
+                stops,
+                stop_rx.clone(),
+            );
+            tokio::task::yield_now().await;
+            assert!(health_rx.borrow().gateway);
+            for _ in 0..6 {
+                tokio::time::advance(Duration::from_secs(5)).await;
+                tokio::task::yield_now().await;
+                assert_eq!(*permissions.updates.borrow(), Some(Ok(())));
+                assert!(matches!(*stop_rx.borrow(), StopCause::Running));
+                assert!(health_rx.borrow().gateway);
+            }
+            tokio::time::advance(RECOVERY_DEADLINE - Duration::from_secs(30)).await;
+            tokio::task::yield_now().await;
+            assert!(matches!(
+                *stop_rx.borrow(),
+                StopCause::Failed(Failure::Connection)
+            ));
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn permission_monitor_cancels_stalled_http_when_stop_arrives() {
+        let (stops, stop_rx) = watch::channel(StopCause::Running);
+        let (started, started_rx) = tokio::sync::oneshot::channel();
+        let (response, response_rx) = tokio::sync::oneshot::channel::<Result<(), Failure>>();
+        let mut request = Some((started, response_rx));
+        let monitor = PermissionMonitor::spawn(
+            move || {
+                let (started, response) = request.take().unwrap();
+                async move {
+                    let _ = started.send(());
+                    response.await.unwrap_or(Err(Failure::Permission))
+                }
+            },
+            Duration::from_secs(5),
+            stops.clone(),
+            stop_rx.clone(),
+        );
+        started_rx.await.unwrap();
+        stop(&stops, StopCause::Requested);
+        tokio::task::yield_now().await;
+        assert!(response.send(Err(Failure::Authentication)).is_err());
+        assert!(matches!(*stop_rx.borrow(), StopCause::Requested));
+        assert!(monitor.updates.borrow().is_none());
     }
 }

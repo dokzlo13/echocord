@@ -21,6 +21,7 @@ const STOP_GRACE: Duration = Duration::from_millis(750);
 const EXIT_GRACE: Duration = Duration::from_secs(3);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
 const RECOVERY_DEADLINE: Duration = Duration::from_secs(40);
+const DIAGNOSTIC_GRACE: Duration = Duration::from_secs(1);
 const MAX_SETTINGS_BYTES: u64 = 65536;
 
 #[derive(Clone)]
@@ -199,6 +200,22 @@ struct StartLimit {
     reset_after: Duration,
 }
 
+struct RetiredSession {
+    generation: u32,
+    catalog_epoch: u64,
+    until: Instant,
+}
+
+fn generic_failure(code: &ErrorCode) -> bool {
+    matches!(code, ErrorCode::Internal | ErrorCode::ConnectionFailed)
+}
+fn specific_failure(code: Failure) -> bool {
+    matches!(
+        code,
+        Failure::Configuration | Failure::Authentication | Failure::Permission | Failure::Capture
+    )
+}
+
 struct Actor {
     config: ControllerConfig,
     snapshot: ControlSnapshot,
@@ -211,6 +228,7 @@ struct Actor {
     deadline: Option<Instant>,
     next_meter: Instant,
     terminal_error: Option<AppError>,
+    retired: Option<RetiredSession>,
     preferences_error: Option<AppError>,
     shutting_down: bool,
     shutdown_waiters: Vec<oneshot::Sender<Result<(), AppError>>>,
@@ -233,6 +251,7 @@ impl Actor {
             deadline: None,
             next_meter: Instant::now(),
             terminal_error: None,
+            retired: None,
             preferences_error: None,
             shutting_down: false,
             shutdown_waiters: Vec::new(),
@@ -303,6 +322,7 @@ impl Actor {
         }
     }
     fn refresh(&mut self) {
+        self.retired = None;
         self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
         let epoch = self.catalog_epoch;
         self.snapshot.discovery = Discovery::Loading;
@@ -405,6 +425,7 @@ impl Actor {
             ControlCommand::Connect => return self.connect(),
             ControlCommand::Disconnect => {
                 self.terminal_error = None;
+                self.retired = None;
                 self.disconnect();
                 return Ok(());
             }
@@ -440,6 +461,7 @@ impl Actor {
             .ok_or_else(unavailable)?;
         self.pending = true;
         self.terminal_error = None;
+        self.retired = None;
         self.snapshot.connection = Connection::Connecting;
         self.snapshot.capture.phase = CapturePhase::Stopped;
         self.deadline = Some(Instant::now() + CONNECT_DEADLINE);
@@ -525,6 +547,43 @@ impl Actor {
             self.snapshot.connection = Connection::Error {
                 code: error.code,
                 message: error.message,
+            };
+            self.publish();
+        }
+    }
+    fn terminal_status(&mut self, generation: u32, code: Failure) {
+        if generation != self.snapshot.session_id || self.shutting_down {
+            return;
+        }
+        let e = code.error();
+        if self.child.is_some() {
+            if matches!(
+                self.snapshot.connection,
+                Connection::Disconnecting | Connection::CleanupIncomplete { .. }
+            ) {
+                // User Stop wins. During failure cleanup only refine a generic cause.
+                if specific_failure(code)
+                    && self
+                        .terminal_error
+                        .as_ref()
+                        .is_some_and(|current| generic_failure(&current.code))
+                {
+                    self.terminal_error = Some(e);
+                }
+            } else {
+                self.fail(e);
+            }
+        } else if specific_failure(code)
+            && self.retired.as_ref().is_some_and(|retired| {
+                retired.generation == generation
+                    && retired.catalog_epoch == self.catalog_epoch
+                    && Instant::now() <= retired.until
+            })
+            && matches!(&self.snapshot.connection, Connection::Error { code, .. } if generic_failure(code))
+        {
+            self.snapshot.connection = Connection::Error {
+                code: e.code,
+                message: e.message,
             };
             self.publish();
         }
@@ -620,6 +679,10 @@ impl Actor {
                 }
             }
             Event::Status(generation, status) => {
+                if let Status::Failed { code } = status {
+                    self.terminal_status(generation, code);
+                    return;
+                }
                 if generation != self.snapshot.session_id
                     || self.child.is_none()
                     || matches!(
@@ -658,10 +721,7 @@ impl Actor {
                     Status::Meter { capture } => {
                         self.snapshot.capture = protocol::clean_capture(capture)
                     }
-                    Status::Failed { code } => {
-                        self.fail(code.error());
-                        return;
-                    }
+                    Status::Failed { .. } => unreachable!("terminal status handled above"),
                     Status::Stopped => {
                         self.fail(Failure::Connection.error());
                         return;
@@ -688,6 +748,15 @@ impl Actor {
                     self.snapshot.connection,
                     Connection::Disconnecting | Connection::CleanupIncomplete { .. }
                 );
+                self.retired = if !stopping || self.terminal_error.is_some() {
+                    Some(RetiredSession {
+                        generation,
+                        catalog_epoch: self.catalog_epoch,
+                        until: Instant::now() + DIAGNOSTIC_GRACE,
+                    })
+                } else {
+                    None
+                };
                 self.child = None;
                 self.deadline = None;
                 self.snapshot.capture = ControlSnapshot::default().capture;
@@ -906,7 +975,12 @@ fn launch(
                         break;
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    if reader_control.stopped_at().is_none() {
+                        let _ = reader_events.blocking_send(Event::ProtocolFailed(generation));
+                    }
+                    break;
+                }
                 _ => {
                     let _ = reader_events.blocking_send(Event::ProtocolFailed(generation));
                     break;
@@ -1219,6 +1293,129 @@ mod tests {
         assert!(a.child.is_none());
         assert!(!a.pending);
     }
+    #[test]
+    fn specific_terminal_cause_survives_either_exit_status_order() {
+        for (failure, expected) in [
+            (Failure::Capture, ErrorCode::CaptureFailed),
+            (Failure::Permission, ErrorCode::PermissionDenied),
+            (Failure::Authentication, ErrorCode::Authentication),
+        ] {
+            for exit_first in [false, true] {
+                let mut a = actor();
+                a.child = Some(child());
+                a.snapshot.connection = Connection::Connected;
+                if exit_first {
+                    a.event(Event::Exited(4, false));
+                }
+                a.event(Event::Status(4, Status::Failed { code: failure }));
+                if !exit_first {
+                    assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
+                    a.event(Event::Exited(4, false));
+                }
+                assert!(
+                    matches!(&a.snapshot.connection, Connection::Error { code, .. } if *code == expected)
+                );
+                let before = a.snapshot.clone();
+                a.event(Event::Status(4, Status::Connected));
+                a.event(Event::Status(4, Status::Recovering));
+                a.event(Event::Status(4, Status::Stopped));
+                assert_eq!(a.snapshot, before);
+                assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
+                assert!(a.child.is_none());
+                assert!(!a.pending);
+            }
+        }
+    }
+    #[test]
+    fn buffered_specific_failure_refines_generic_protocol_cleanup() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.event(Event::ProtocolFailed(4));
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Capture,
+            },
+        ));
+        a.event(Event::Exited(4, false));
+        assert!(matches!(
+            a.snapshot.connection,
+            Connection::Error {
+                code: ErrorCode::CaptureFailed,
+                ..
+            }
+        ));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn retired_failure_window_is_bounded_and_cannot_fault_fresh_configuration_or_session() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.event(Event::Exited(4, false));
+        tokio::time::advance(DIAGNOSTIC_GRACE + Duration::from_millis(1)).await;
+        let before = a.snapshot.clone();
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Authentication,
+            },
+        ));
+        assert_eq!(a.snapshot, before);
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.event(Event::Exited(4, false));
+        a.refresh();
+        let catalog = Catalog {
+            sources: a.snapshot.sources.clone(),
+            servers: a.snapshot.servers.clone(),
+            name: "Rechecked Bot".into(),
+        };
+        a.event(Event::Catalog(a.catalog_epoch, Ok(catalog)));
+        let rechecked = a.snapshot.clone();
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Authentication,
+            },
+        ));
+        assert_eq!(a.snapshot, rechecked);
+        a.connect().unwrap();
+        let next = a.snapshot.clone();
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Authentication,
+            },
+        ));
+        a.event(Event::Status(4, Status::Connected));
+        assert_eq!(a.snapshot, next);
+        assert_eq!(a.snapshot.session_id, 5);
+        assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
+    }
+    #[test]
+    fn requested_disconnect_rejects_failure_before_and_after_exit() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.command(ControlCommand::Disconnect).unwrap();
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Authentication,
+            },
+        ));
+        a.event(Event::Exited(4, false));
+        a.event(Event::Status(
+            4,
+            Status::Failed {
+                code: Failure::Permission,
+            },
+        ));
+        assert!(matches!(a.snapshot.connection, Connection::Disconnected));
+        assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
+    }
     #[tokio::test(start_paused = true)]
     async fn cooldown_and_gateway_limits_survive_worker_exit() {
         let mut a = actor();
@@ -1463,5 +1660,76 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
         result.expect("termination must be independent of pipe writes");
         assert!(blocked, "the regression must actually block a stdin write");
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unsolicited_stdout_eof_stops_live_child_but_does_not_prove_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory =
+            std::env::temp_dir().join(format!("echocord-stdout-eof-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("worker.py");
+        let frame = Frame {
+            version: protocol::VERSION,
+            generation: 4,
+            sequence: 1,
+            body: Status::Connected,
+        };
+        let fixture = serde_json::to_string(&frame).unwrap();
+        let script = format!(
+            "#!/usr/bin/python3\nimport os,time,sys\nsys.stdin.readline()\nos.write(1,({fixture:?}+'\\n').encode())\nos.close(1)\nwhile True: time.sleep(1)\n"
+        );
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (events, mut receiver) = mpsc::channel(32);
+        let mut a = actor();
+        let init = a.initialization().unwrap();
+        let mut attempts = 0;
+        let child = loop {
+            match launch(&executable, 4, init.clone(), events.clone()) {
+                Ok(child) => break child,
+                Err(e) if e.raw_os_error() == Some(26) && attempts < 10 => {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(e) => panic!("synthetic worker launch failed: {:?}", e.kind()),
+            }
+        };
+        a.child = Some(child);
+        a.snapshot.connection = Connection::Connecting;
+        let mut connected = false;
+        let mut eof = false;
+        tokio::time::timeout(STOP_GRACE + EXIT_GRACE + Duration::from_secs(1), async {
+            while let Some(event) = receiver.recv().await {
+                let exited = matches!(event, Event::Exited(4, _));
+                if matches!(event, Event::Status(4, Status::Connected)) {
+                    connected = true;
+                }
+                if matches!(event, Event::ProtocolFailed(4)) {
+                    eof = true;
+                }
+                a.event(event);
+                if eof && !exited {
+                    assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
+                    assert!(a.child.is_some());
+                }
+                if exited {
+                    assert!(connected && eof);
+                    assert!(a.child.is_none());
+                    assert!(matches!(
+                        a.snapshot.connection,
+                        Connection::Error {
+                            code: ErrorCode::Internal,
+                            ..
+                        }
+                    ));
+                    return;
+                }
+            }
+            panic!("exit receipt missing");
+        })
+        .await
+        .expect("stdout EOF must initiate bounded stop of a live worker");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

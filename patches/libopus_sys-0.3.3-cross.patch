@@ -1,0 +1,50 @@
+--- a/build.rs
++++ b/build.rs
+@@ -121,7 +121,7 @@
+     println!("cargo:rustc-link-search=native={}/lib", opus_build_dir);
+ 
+     // On Unix-like systems, static libopus may require libm
+-    if is_static && (cfg!(unix) || cfg!(target_env = "gnu")) {
++    if is_static && env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("unix") {
+         println!("cargo:rustc-link-lib=m");
+     }
+ }
+--- a/opus/CMakeLists.txt
++++ b/opus/CMakeLists.txt
+@@ -484,20 +484,20 @@
+         add_sources_group(opus lpcnet ${dnn_sources_sse4_1})
+       endif()
+       target_compile_definitions(opus PRIVATE OPUS_X86_MAY_HAVE_SSE4_1)
+-      if(NOT MSVC)
++      if(NOT MSVC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+         set_source_files_properties(${celt_sources_sse4_1} ${silk_sources_sse4_1} ${dnn_sources_sse4_1} PROPERTIES COMPILE_FLAGS -msse4.1)
+       endif()
+ 
+       if(OPUS_FIXED_POINT)
+         add_sources_group(opus silk ${silk_sources_fixed_sse4_1})
+-        if(NOT MSVC)
++        if(NOT MSVC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+           set_source_files_properties(${silk_sources_fixed_sse4_1} PROPERTIES COMPILE_FLAGS -msse4.1)
+         endif()
+       endif()
+     endif()
+     if(OPUS_X86_PRESUME_SSE4_1)
+       target_compile_definitions(opus PRIVATE OPUS_X86_PRESUME_SSE4_1)
+-      if(NOT MSVC)
++      if(NOT MSVC OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+         target_compile_options(opus PRIVATE -msse4.1)
+       endif()
+     endif()
+--- a/opus/silk/x86/NSQ_del_dec_avx2.c
++++ b/opus/silk/x86/NSQ_del_dec_avx2.c
+@@ -70,8 +70,8 @@
+            psEncC->nStatesDelayedDecision == 4;
+ }
+ 
+-/* Intrinsics not defined on MSVC */
+-#ifdef _MSC_VER
++/* Clang provides these builtins even when targeting the MSVC ABI. */
++#if defined(_MSC_VER) && !defined(__clang__)
+ #include <Intsafe.h>
+ static inline int __builtin_sadd_overflow(opus_int32 a, opus_int32 b, opus_int32* res)
+ {

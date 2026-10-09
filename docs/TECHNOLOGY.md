@@ -1,6 +1,6 @@
 # Initial technology survey
 
-Research date: 2026-10-09. Recommendations remain subject to the Windows dependency probe and real audio measurements. No streaming path has been implemented.
+Research date: 2026-10-09. The audio dependency probe now cross-builds and runs on Windows; Tauri validation and real audio measurements remain separate. No streaming path has been implemented.
 
 ## Recommended first probe
 
@@ -24,9 +24,9 @@ Temporary starvation must not appear as permanent EOF. Inspect Songbird's actual
 
 rtrb Consumer is Send but not Sync while the media-source abstraction requires Sync. Use a sound adapter; do not add an unsafe Sync implementation merely to satisfy bounds. A private Mutex with exclusive access via get_mut is one candidate to verify against the exact trait and consumption pattern.
 
-Songbird 0.6 uses opus2 0.4 and libopus_sys ^0.3.2. The inspected 0.3.3 build script contains host-Unix conditionals, including libm linking, which may break Linux-to-MSVC builds. This is a source-level risk, not a reproduced failure. Prefer bundled/static Opus and inspect the resolved feature graph. If reproduced, use a narrowly scoped target-aware patch and document it; adding libopus_sys 0.4 separately does not replace a transitive ^0.3 dependency.
+Songbird 0.6 uses opus2 0.4 and libopus_sys ^0.3.2. The 0.3.3 bundled source failed under clang-cl on missing SSE4.1 flags, then an MSVC-only replacement block. A [narrow compatibility patch](../patches/README.md) fixes these and makes libm linkage target-aware. The patched probe builds native static Opus and passes a synthetic stereo encode/decode on Windows. Adding libopus_sys 0.4 separately would not replace the transitive ^0.3 dependency.
 
-DAVE uses davey/OpenMLS in this stack; do not assume it requires Discord's C++ libdave build. TLS may still introduce native dependencies. Pin exact versions and Cargo.lock after the smoke succeeds.
+DAVE uses davey/OpenMLS in this stack. The probe creates a DAVE key package offline with davey 0.1.4, initializes Songbird's driver/Serenity manager, and prepares raw PCM. No C++ libdave was needed. The lockfile resolves Serenity 0.12.5 and Symphonia 0.5.5. No live encryption transition has been tested. DLL import inspection shows Windows system/UCRT dependencies and VCRUNTIME140.dll, with no separate Opus DLL; a clean-machine runtime packaging check remains necessary.
 
 Sources: [RawAdapter source](https://github.com/serenity-rs/songbird/blob/v0.6.0/src/input/adapters/raw_adapter.rs), [Songbird configuration](https://github.com/serenity-rs/songbird/blob/v0.6.0/README.md), [Consumer traits](https://docs.rs/rtrb/0.4.0/rtrb/struct.Consumer.html), [Opus dependency](https://docs.rs/crate/opus2/0.4.0), [native build script](https://docs.rs/crate/libopus_sys/0.3.3/source/build.rs), [davey](https://github.com/Snazzah/davey/blob/master/davey/Cargo.toml), [Songbird release](https://github.com/serenity-rs/songbird/releases/tag/v0.6.0).
 

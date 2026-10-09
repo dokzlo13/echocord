@@ -1,0 +1,20 @@
+[package]
+name = "echocord-audio-dependency-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cpal = "=0.18.2"
+davey = "=0.1.4"
+opus2 = { version = "=0.4.0", features = ["bundled"] }
+rtrb = "=0.4.0"
+songbird = { version = "=0.6.0", default-features = false, features = ["driver", "gateway", "serenity", "rustls", "tungstenite"] }
+symphonia = { version = "0.5", default-features = false, features = ["pcm"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[patch.crates-io]
+# Materialized from a checksum-verified upstream archive by the probe script.
+libopus_sys = { path = "../../.cache/libopus_sys-0.3.3" }

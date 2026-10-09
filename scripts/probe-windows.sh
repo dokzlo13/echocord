@@ -23,8 +23,10 @@ if ! command -v clang-cl >/dev/null; then
   export PATH="$repo_root/.tools/bin:$PATH"
 fi
 export XWIN_CACHE_DIR="$repo_root/.cache/xwin"
+target_dir="$repo_root/probes/windows-build/target"
 cargo xwin build --locked --release --target x86_64-pc-windows-msvc \
+  --target-dir "$target_dir" \
   --manifest-path "$repo_root/probes/windows-build/Cargo.toml"
 if [[ "$run_probe" == true ]]; then
-  "$repo_root/probes/windows-build/target/x86_64-pc-windows-msvc/release/echocord-build-probe.exe"
+  "$target_dir/x86_64-pc-windows-msvc/release/echocord-build-probe.exe"
 fi

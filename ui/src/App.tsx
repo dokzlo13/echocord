@@ -1,18 +1,18 @@
-import {
-  Alert,
-  Button,
-  Modal,
-  NativeSelect,
-  Slider,
-  Stack,
-  Text,
-  VisuallyHidden,
-} from "@mantine/core";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { ActionIcon, Button, Slider } from "@mantine/core";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import styles from "./App.module.css";
 import type { ControlAdapter } from "./adapter";
-import type { FixtureName, FixtureTransport } from "./fixtures";
-import type { ControlSnapshot } from "./generated";
+import {
+  AudioDetails,
+  BotSetup,
+  type DrawerName,
+  RoomPicker,
+  ServerIcon,
+  Sheet,
+  SourcePicker,
+} from "./Drawers";
+import type { Selection } from "./generated";
+import { Icon } from "./Icons";
 import {
   captureLabel,
   connectionLabel,
@@ -21,590 +21,497 @@ import {
   outputLabel,
   readiness,
 } from "./presentation";
+import { CaptureQueue, SignalMeter } from "./Telemetry";
 
-function InputLevel({ snapshot }: { snapshot: ControlSnapshot | null }) {
-  const running = snapshot?.capture.phase === "running";
-  const level = running ? snapshot.capture.levelDbfs : null;
-  const label =
-    level === null
-      ? "No level"
-      : level <= -60
-        ? "Silent"
-        : `${Math.round(level)} dBFS`;
-  const width =
-    level === null ? 0 : Math.max(0, Math.min(100, ((level + 60) / 60) * 100));
+function sameRoute(first: Selection, second: Selection) {
   return (
-    <div className={styles.inputLevel}>
-      <div className={styles.levelLabel}>
-        <span id="level-label">
-          Input level <span className={styles.secondary}>before output</span>
-        </span>
-        <span data-testid="input-level">{label}</span>
-      </div>
-      <VisuallyHidden>
-        <meter
-          aria-labelledby="level-label"
-          aria-valuetext={label}
-          min={-60}
-          max={0}
-          value={level ?? -60}
-        />
-      </VisuallyHidden>
-      <div className={styles.meter} aria-hidden="true">
-        <span style={{ width: `${width}%` }} />
-      </div>
-      <p className={styles.captureStatus} data-testid="capture-status">
-        {snapshot ? captureLabel(snapshot) : "Waiting for app status"}
-      </p>
-    </div>
+    first.sourceId === second.sourceId &&
+    first.serverId === second.serverId &&
+    first.channelId === second.channelId
   );
 }
 
-export function App({
-  adapter,
-  fixtures,
-}: {
-  adapter: ControlAdapter;
-  fixtures: FixtureTransport | undefined;
-}) {
+export function App({ adapter }: { adapter: ControlAdapter }) {
   const view = useSyncExternalStore(adapter.subscribe, adapter.getSnapshot);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [preview, setPreview] = useState(fixtures?.name ?? "disconnected");
+  const [drawer, setDrawer] = useState<DrawerName | null>(null);
+  const [draft, setDraft] = useState<Selection | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const roomButton = useRef<HTMLButtonElement>(null);
   const snapshot = view.snapshot;
   const ready = view.phase === "ready" && snapshot !== null;
-  const locked = snapshot ? locksRoute(snapshot) : true;
-  const server = snapshot?.servers.find(
-    (item) => item.id === snapshot.selection.serverId,
-  );
+  const selection = snapshot?.selection ?? {
+    sourceId: null,
+    serverId: null,
+    channelId: null,
+  };
+  const queued = draft ?? selection;
+  const dirty = draft !== null && !sameRoute(draft, selection);
   const source = snapshot?.sources.find(
-    (item) => item.id === snapshot.selection.sourceId,
+    (item) => item.id === selection.sourceId,
   );
-  const channel = server?.channels.find(
-    (item) => item.id === snapshot?.selection.channelId,
+  const server = snapshot?.servers.find(
+    (item) => item.id === selection.serverId,
   );
-  const sourceId = snapshot?.selection.sourceId ?? "";
-  const serverId = snapshot?.selection.serverId ?? "";
-  const channelId = snapshot?.selection.channelId ?? "";
-  const discoveryLoading = snapshot?.discovery.phase === "loading";
-  const botBusy =
-    snapshot?.bot.status === "checking" ||
-    view.pending.includes("recheck-configuration");
-  const catalogBusy =
-    discoveryLoading || view.pending.includes("refresh-catalog");
-  const reason = snapshot ? readiness(snapshot) : "Waiting for app status.";
-  const canStop =
-    snapshot &&
-    ["connecting", "connected", "recovering"].includes(
-      snapshot.connection.phase,
-    );
-  const cleanup = snapshot?.connection.phase === "cleanup-incomplete";
-  const stopping = snapshot?.connection.phase === "disconnecting";
-  const actionLabel = cleanup
-    ? "Retry disconnect"
-    : canStop || stopping
-      ? "Disconnect"
-      : "Connect";
-  const actionDisabled =
-    !ready ||
-    stopping ||
-    view.pending.includes("disconnect") ||
-    (!canStop &&
-      !cleanup &&
-      (reason !== null || view.pending.includes("connect")));
-  const volume = view.volumeDraft ?? snapshot?.output.volumePercent ?? 0;
+  const room = server?.channels.find((item) => item.id === selection.channelId);
+  const nextSource = snapshot?.sources.find(
+    (item) => item.id === queued.sourceId,
+  );
+  const nextServer = snapshot?.servers.find(
+    (item) => item.id === queued.serverId,
+  );
+  const nextRoom = nextServer?.channels.find(
+    (item) => item.id === queued.channelId,
+  );
+  const operation = view.routeOperation;
+  const phase = snapshot?.connection.phase;
+  const active =
+    phase === "connected" || phase === "connecting" || phase === "recovering";
+  const cleanup = phase === "cleanup-incomplete";
+  const stopping = phase === "disconnecting";
+  const volume = view.volumeDraft ?? snapshot?.output.volumePercent ?? 80;
   const muted = snapshot?.output.muted ?? false;
+  const locked =
+    !ready || Boolean(operation) || view.configuringBot || cleanup || stopping;
+  const catalogBusy =
+    snapshot?.discovery.phase === "loading" ||
+    view.pending.includes("refresh-catalog");
+  const reason = snapshot ? readiness(snapshot) : "Waiting for app status.";
+  const routeValid = Boolean(
+    nextSource?.available &&
+      nextRoom &&
+      nextServer &&
+      snapshot?.bot.status === "ready" &&
+      snapshot.discovery.phase === "ready",
+  );
 
+  const open = (name: DrawerName) => {
+    opener.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setDrawer(name);
+  };
+  const close = () => {
+    setDrawer(null);
+    requestAnimationFrame(() => opener.current?.focus());
+  };
   useEffect(() => {
     void adapter.start();
     return adapter.dispose;
   }, [adapter]);
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (
+        event.ctrlKey &&
+        event.key.toLowerCase() === "k" &&
+        ready &&
+        !locked
+      ) {
+        event.preventDefault();
+        opener.current = roomButton.current;
+        setDrawer("target");
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, [ready, locked]);
 
-  const refresh = () => {
-    void adapter.dispatch({ type: "refresh-catalog" });
-  };
-  const recheck = () => {
-    void adapter.dispatch({ type: "recheck-configuration" });
-  };
-  const botLabel =
-    snapshot?.bot.status === "ready"
-      ? `Bot: ${snapshot.bot.name ?? "Ready"}`
-      : snapshot?.bot.status === "checking"
-        ? "Checking bot configuration…"
-        : snapshot?.bot.status === "invalid"
-          ? "Bot configuration invalid"
-          : snapshot?.bot.status === "error"
-            ? "Bot configuration failed"
-            : "Bot configuration needed";
+  const messages = [
+    view.error?.message,
+    view.commandError?.message,
+    snapshot?.capture.message,
+    snapshot?.connection.phase === "error" ||
+    snapshot?.connection.phase === "recovering" ||
+    snapshot?.connection.phase === "cleanup-incomplete"
+      ? snapshot.connection.message
+      : null,
+    snapshot?.discovery.phase === "error" ? snapshot.discovery.message : null,
+    snapshot?.bot.message,
+  ].filter((message): message is string => Boolean(message));
+  let notice: string | null = null;
+  if (view.error) notice = view.error.message;
+  else if (view.commandError)
+    notice = dirty
+      ? "Route change incomplete. Confirmed settings are shown; remaining changes are queued."
+      : "Control not confirmed. Check the current status before retrying.";
+  else if (cleanup)
+    notice =
+      "The session has not exited. Retry stop before applying or connecting.";
+  else if (snapshot?.capture.phase === "missing")
+    notice =
+      "Recording input missing. Restore it or stop and choose another input.";
+  else if (snapshot?.capture.phase === "error")
+    notice = "Recording input failed. Check its Windows sound settings.";
+  else if (phase === "error")
+    notice = "Connection failed. Review the bot's voice room permissions.";
+  else if (snapshot?.discovery.phase === "error")
+    notice = "Could not load inputs or rooms. Open the picker to refresh.";
+  else if (
+    snapshot?.bot.status === "invalid" ||
+    snapshot?.bot.status === "error"
+  )
+    notice = "Bot configuration needs attention. Open bot settings to test it.";
+
+  const status = snapshot
+    ? connectionLabel(snapshot)
+    : view.phase === "error"
+      ? "App unavailable"
+      : "Loading app";
+  const progress =
+    snapshot?.connection.phase === "connecting"
+      ? connectStageLabels[snapshot.connection.stage]
+      : snapshot?.connection.phase === "recovering"
+        ? `Restoring the same room · attempt ${snapshot.connection.attempt}`
+        : operation
+          ? "Applying the queued route…"
+          : (reason ??
+            (muted
+              ? "Output muted · input still active"
+              : room
+                ? `${phase === "connected" ? "In" : "Selected:"} ${room.name}`
+                : "Choose an input and room"));
+  const transportLabel = cleanup
+    ? "Retry stop"
+    : operation || phase === "connecting" || phase === "recovering"
+      ? "Cancel"
+      : active
+        ? "Stop"
+        : stopping
+          ? "Stopping…"
+          : "Connect";
+  const stopAction = active || cleanup || Boolean(operation);
+  const transportDisabled =
+    !ready ||
+    stopping ||
+    view.pending.includes("disconnect") ||
+    (!stopAction &&
+      (dirty ||
+        Boolean(reason) ||
+        view.configuringBot ||
+        view.pending.includes("connect")));
 
   return (
-    <main className={styles.app}>
-      <header className={styles.header}>
-        <h1>Echocord</h1>
-        <Button
-          className={styles.quietButton}
-          variant="default"
-          onClick={() => setSettingsOpen(true)}
-        >
-          Bot settings
-        </Button>
+    <main
+      className={styles.app}
+      data-crowded={Boolean(notice && (dirty || operation))}
+    >
+      <header className={styles.header} inert={drawer !== null}>
+        <h1>
+          <Icon name="bridge" />
+          Echocord
+        </h1>
+        <div className={styles.headerActions}>
+          <Button
+            variant="subtle"
+            size="compact-sm"
+            leftSection={<Icon name="details" />}
+            onClick={() => open("details")}
+          >
+            Audio details
+          </Button>
+          <ActionIcon
+            variant="subtle"
+            size="lg"
+            aria-label="Bot settings"
+            onClick={() => open("bot")}
+          >
+            <Icon name="settings" />
+          </ActionIcon>
+        </div>
       </header>
-      {fixtures && (
-        <aside className={styles.fixtureNotice} aria-label="Fixture mode">
-          Fixture preview — no audio or Discord connection
-        </aside>
-      )}
-      <div className={styles.routeScroll} data-testid="route-scroll">
-        {view.phase === "loading" && (
-          <p role="status" className={styles.notice}>
-            Loading app status…
-          </p>
-        )}
-        {view.error && (
-          <Alert
-            className={styles.errorAlert}
-            color="red"
-            title="App status unavailable"
-            role="alert"
-          >
-            {view.error.message}
-            <Button
-              variant="default"
-              mt="sm"
-              onClick={() => void adapter.start()}
-            >
-              Retry loading status
-            </Button>
-          </Alert>
-        )}
-        {view.commandError && (
-          <Alert
-            className={styles.errorAlert}
-            color="red"
-            title="Control not applied"
-            role="alert"
-          >
-            {view.commandError.message}
-            <Button variant="default" mt="sm" onClick={adapter.dismissError}>
-              Dismiss error
-            </Button>
-          </Alert>
-        )}
-        <NativeSelect
-          label="Recording device"
-          title={source?.name ?? "Choose a recording device"}
-          classNames={{ input: styles.routeInput }}
-          disabled={
-            !ready ||
-            locked ||
-            catalogBusy ||
-            view.pending.includes("select-source")
-          }
-          value={sourceId}
-          data={[
-            {
-              value: "",
-              label:
-                snapshot?.sources.length === 0
-                  ? "No recording devices"
-                  : "Select a recording device",
-              disabled: true,
-            },
-            ...(sourceId && !source
-              ? [
-                  {
-                    value: sourceId,
-                    label: "Saved recording device unavailable",
-                    disabled: true,
-                  },
-                ]
-              : []),
-            ...(snapshot?.sources.map((item) => ({
-              value: item.id,
-              label: item.name + (item.available ? "" : " (unavailable)"),
-              disabled: !item.available,
-            })) ?? []),
-          ]}
-          onChange={(event) =>
-            void adapter.dispatch({
-              type: "select-source",
-              sourceId: event.currentTarget.value,
-            })
-          }
-        />
-        {source?.detail && (
-          <p className={styles.deviceDetail}>{source.detail}</p>
-        )}
-        <InputLevel snapshot={snapshot} />
-        {snapshot?.sources.length === 0 && !catalogBusy && (
-          <p className={styles.notice}>
-            No recording devices found. Enable the recording device in Windows
-            Sound settings, then refresh.
-          </p>
-        )}
-        {sourceId && !source?.available && !snapshot?.capture.message && (
-          <p className={styles.warning}>
-            The saved recording device is unavailable. Restore it or choose
-            another while disconnected.
-          </p>
-        )}
-        {snapshot?.capture.message && (
-          <Alert
-            className={styles.errorAlert}
-            color="yellow"
-            title={captureLabel(snapshot)}
-            role="alert"
-          >
-            {snapshot.capture.message}
-          </Alert>
-        )}
-        <div className={styles.destination}>
-          <NativeSelect
-            label="Server"
-            title={server?.name ?? "Choose a server"}
-            classNames={{ input: styles.routeInput }}
-            disabled={
-              !ready ||
-              locked ||
-              catalogBusy ||
-              snapshot?.bot.status !== "ready" ||
-              view.pending.includes("select-destination")
-            }
-            value={serverId}
-            data={[
-              {
-                value: "",
-                label:
-                  snapshot?.servers.length === 0
-                    ? "No servers available"
-                    : "Select a server",
-                disabled: true,
-              },
-              ...(serverId && !server
-                ? [
-                    {
-                      value: serverId,
-                      label: "Saved server unavailable",
-                      disabled: true,
-                    },
-                  ]
-                : []),
-              ...(snapshot?.servers.map((item) => ({
-                value: item.id,
-                label: item.name,
-              })) ?? []),
-            ]}
-            onChange={(event) =>
-              void adapter.dispatch({
-                type: "select-destination",
-                serverId: event.currentTarget.value,
-                channelId: null,
-              })
-            }
-          />
-          <NativeSelect
-            label="Voice channel"
-            title={channel?.name ?? "Choose a voice channel"}
-            classNames={{ input: styles.routeInput }}
-            disabled={
-              !ready ||
-              locked ||
-              catalogBusy ||
-              !server ||
-              snapshot?.bot.status !== "ready" ||
-              view.pending.includes("select-destination")
-            }
-            value={channelId}
-            data={[
-              {
-                value: "",
-                label:
-                  server?.channels.length === 0
-                    ? "No voice channels"
-                    : "Select a voice channel",
-                disabled: true,
-              },
-              ...(channelId && !channel
-                ? [
-                    {
-                      value: channelId,
-                      label: "Saved channel unavailable",
-                      disabled: true,
-                    },
-                  ]
-                : []),
-              ...(server?.channels.map((item) => ({
-                value: item.id,
-                label: item.name,
-              })) ?? []),
-            ]}
-            onChange={(event) => {
-              if (server)
-                void adapter.dispatch({
-                  type: "select-destination",
-                  serverId: server.id,
-                  channelId: event.currentTarget.value,
-                });
-            }}
-          />
-        </div>
-        {server && server.channels.length === 0 && !catalogBusy && (
-          <p className={styles.notice}>
-            This server has no available voice channels. Check bot access or
-            choose another server.
-          </p>
-        )}
-        {snapshot?.servers.length === 0 && !catalogBusy && (
-          <p className={styles.notice}>
-            No servers are available. Check the bot's server membership and
-            configuration, then refresh.
-          </p>
-        )}
-        <div className={styles.botRow}>
-          <span>{botLabel}</span>
-          <Button
-            className={styles.quietButton}
-            variant="default"
-            size="xs"
-            disabled={!ready || locked || catalogBusy || botBusy}
-            onClick={refresh}
-          >
-            Refresh
-          </Button>
-        </div>
-        {discoveryLoading && (
-          <p className={styles.notice} role="status">
-            Loading devices and servers…
-          </p>
-        )}
-        {snapshot?.discovery.phase === "error" && (
-          <Alert
-            className={styles.errorAlert}
-            color="red"
-            title="Could not refresh"
-            role="alert"
-          >
-            {snapshot.discovery.message}
-          </Alert>
-        )}
-        {snapshot?.connection.phase === "error" && (
-          <Alert
-            className={styles.errorAlert}
-            color="red"
-            title="Connection failed"
-            role="alert"
-          >
-            {snapshot.connection.message}
-          </Alert>
-        )}
-        {snapshot?.connection.phase === "recovering" && (
-          <p className={styles.warning}>
-            {snapshot.connection.message} Attempt {snapshot.connection.attempt}.
-          </p>
-        )}
-        {cleanup && snapshot?.connection.phase === "cleanup-incomplete" && (
-          <Alert
-            className={styles.errorAlert}
-            color="yellow"
-            title="Cleanup incomplete"
-            role="alert"
-          >
-            {snapshot.connection.message}
-          </Alert>
-        )}
-        {locked && (
-          <p className={styles.notice}>
-            Disconnect before changing the route or bot configuration.
-          </p>
-        )}
-        <details className={styles.routingHelp}>
-          <summary>Routing help</summary>
-          <p>
-            Send your music app to VB-Cable's playback device, and select its
-            recording device above. Echocord provides no local monitoring.
-          </p>
-        </details>
-        {fixtures && (
-          <details className={styles.fixtureControls}>
-            <summary>Fixture states</summary>
-            <NativeSelect
-              label="Fixture state"
-              value={preview}
-              data={fixtures.names.map((name) => ({
-                value: name,
-                label: name.replaceAll("-", " "),
-              }))}
-              onChange={(event) => {
-                const name = event.currentTarget.value as FixtureName;
-                setPreview(name);
-                fixtures.preview(name);
-                adapter.dismissError();
-              }}
-            />
-          </details>
-        )}
-      </div>
-
-      <section className={styles.controls} aria-label="Session controls">
-        <div className={styles.sessionRow}>
-          <h2 data-testid="connection-status">
-            {snapshot
-              ? connectionLabel(snapshot)
-              : view.phase === "error"
-                ? "App unavailable"
-                : "Loading app"}
-          </h2>
-          <Button
-            className={
-              canStop || cleanup || stopping
-                ? styles.secondaryAction
-                : styles.accentButton
-            }
-            variant={canStop || cleanup || stopping ? "default" : "filled"}
-            disabled={Boolean(actionDisabled)}
-            onClick={() =>
-              void adapter.dispatch({
-                type: canStop || cleanup ? "disconnect" : "connect",
-              })
-            }
-          >
-            {actionLabel}
-          </Button>
-        </div>
-        {snapshot?.connection.phase === "connecting" && (
-          <p
-            className={styles.readiness}
-            data-testid="connection-progress"
-            role="status"
-          >
-            {connectStageLabels[snapshot.connection.stage]}
-          </p>
-        )}
-        {reason && !canStop && (
-          <p className={styles.readiness} data-testid="readiness">
-            {reason}
-          </p>
-        )}
-        <div className={styles.outputRow}>
-          <span>Output</span>
-          <strong data-testid="output-status">
-            {snapshot ? outputLabel(snapshot) : "Unavailable"}
-          </strong>
-        </div>
-        <div className={styles.volumeAndMute}>
-          <div className={styles.volume}>
-            <div className={styles.volumeLabel}>
-              <span>Discord volume</span>
-              <output aria-label="Discord volume value">
-                {snapshot
-                  ? `${volume}%${view.volumeDraft !== null ? " pending" : ""}`
-                  : "—"}
-              </output>
+      <div
+        className={styles.surface}
+        inert={drawer !== null}
+        data-testid="route-surface"
+      >
+        <section
+          className={styles.inputSection}
+          aria-labelledby="input-heading"
+        >
+          <div className={styles.sectionHeading}>
+            <h2 id="input-heading">Recording input</h2>
+            <span data-testid="capture-status">
+              {snapshot ? captureLabel(snapshot) : "Waiting for status"}
+            </span>
+          </div>
+          <div className={styles.inputBody}>
+            <div className={styles.routeIdentity}>
+              <strong title={source?.name}>
+                {source?.name ??
+                  (selection.sourceId
+                    ? "Saved input unavailable"
+                    : "Choose an input")}
+              </strong>
+              <span className={styles.secondary} title={source?.detail ?? ""}>
+                {source?.detail ?? "Windows recording endpoint"}
+              </span>
+              <Button
+                variant="subtle"
+                size="compact-sm"
+                disabled={locked}
+                onClick={() => open("source")}
+              >
+                {source ? "Change input" : "Choose input"}
+                <Icon name="chevron" />
+              </Button>
             </div>
+            <SignalMeter adapter={adapter} stage="input" />
+            <CaptureQueue adapter={adapter} />
+          </div>
+          <span className={styles.boundary}>
+            Input peak before gain · Engine PCM 48 kHz / 2 ch
+          </span>
+        </section>
+        <section className={styles.mixSection} aria-labelledby="mix-heading">
+          <div className={styles.mixIdentity}>
+            <h2 id="mix-heading">Shared mix</h2>
+            <span className={styles.secondary} data-testid="output-status">
+              {snapshot ? outputLabel(snapshot) : "Output unavailable"}
+            </span>
+            <span id="volume-label" className={styles.volumeLabel}>
+              Master volume{" "}
+              <strong>
+                {volume}
+                <small>%</small>
+              </strong>
+            </span>
+          </div>
+          <div className={styles.volumeControl}>
             <Slider
-              thumbLabel="Discord volume"
+              thumbLabel="Master volume"
+              thumbValueText={(value) => `${value}%`}
+              label={(value) => `${value}%`}
               min={0}
               max={100}
               step={1}
               value={volume}
               disabled={!ready}
               onChange={adapter.setVolume}
-              label={(value) => `${value}%`}
-              size="sm"
+              onChangeEnd={() => void adapter.flushVolume()}
+              marks={[
+                { value: 0, label: "0" },
+                { value: 50, label: "50" },
+                { value: 100, label: "100%" },
+              ]}
+              classNames={{ root: styles.fader, thumb: styles.faderThumb }}
             />
           </div>
+          <div className={styles.mixMeter}>
+            <span>Mix peak</span>
+            <SignalMeter adapter={adapter} stage="mix" />
+          </div>
+          <span className={styles.mixBoundary}>
+            After gain & mute · before Discord
+          </span>
+        </section>
+        <section
+          className={styles.outputSection}
+          aria-labelledby="output-heading"
+          data-testid="destination"
+        >
+          <div className={styles.sectionHeading}>
+            <h2 id="output-heading">Discord</h2>
+            <span>
+              {snapshot?.bot.status === "ready"
+                ? `Bot · ${snapshot.bot.name ?? "Ready"}`
+                : "Bot setup needed"}
+            </span>
+          </div>
+          <div className={styles.outputBody}>
+            <ServerIcon server={server} />
+            <div className={styles.routeIdentity}>
+              <strong title={room?.name}>
+                {room?.name ??
+                  (selection.channelId
+                    ? "Saved room unavailable"
+                    : "Choose a voice room")}
+              </strong>
+              <span className={styles.secondary} title={server?.name}>
+                {server?.name ?? "No server selected"}
+              </span>
+            </div>
+            <Button
+              ref={roomButton}
+              variant="subtle"
+              size="compact-sm"
+              disabled={locked}
+              onClick={() =>
+                open(snapshot?.bot.status === "ready" ? "target" : "bot")
+              }
+            >
+              {snapshot?.bot.status === "ready"
+                ? room
+                  ? "Change room"
+                  : "Choose room"
+                : "Set up bot"}
+              <Icon name="chevron" />
+            </Button>
+          </div>
+        </section>
+      </div>
+      {notice && (
+        <div className={styles.notice} role="alert" inert={drawer !== null}>
+          <p>{notice}</p>
           <Button
-            className={muted ? styles.accentButton : styles.secondaryAction}
-            variant={muted ? "filled" : "default"}
-            aria-label="Mute output"
-            aria-pressed={muted}
-            disabled={!ready || view.pending.includes("set-muted")}
+            variant="subtle"
+            size="compact-sm"
             onClick={() =>
-              void adapter.dispatch({ type: "set-muted", muted: !muted })
+              view.error ? void adapter.start() : open("details")
             }
           >
-            Mute output{muted ? " ✓" : ""}
+            {view.error ? "Retry status" : "Details"}
           </Button>
-        </div>
-        {view.commandError && (
-          <p className={styles.footerError}>
-            Control not applied. See the error above.
-          </p>
-        )}
-        <VisuallyHidden>
-          <div role="status" aria-live="polite" aria-atomic="true">
-            {snapshot
-              ? `${connectionLabel(snapshot)}. ${captureLabel(snapshot)}. ${outputLabel(snapshot)}.`
-              : view.phase === "error"
-                ? "App unavailable."
-                : "Loading app."}
-          </div>
-        </VisuallyHidden>
-      </section>
-
-      <Modal
-        opened={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        title="Bot settings"
-        centered
-        size="sm"
-        classNames={{ content: styles.modal }}
-        closeButtonProps={{
-          "aria-label": "Close bot settings",
-        }}
-      >
-        <Stack gap="md">
-          <div>
-            <Text fw={600}>{botLabel}</Text>
-            <Text size="sm" c="dimmed">
-              {snapshot?.bot.message ??
-                "Configuration is loaded by the app. No credentials are entered or stored in this window."}
-            </Text>
-          </div>
-          <Text size="sm" c="dimmed">
-            After updating the app's bot configuration, recheck it and refresh
-            the server list. The bot needs Connect and Speak access to the
-            chosen voice channel.
-          </Text>
-          <Button
-            className={styles.secondaryAction}
-            variant="default"
-            disabled={!ready || locked || botBusy || catalogBusy}
-            onClick={recheck}
-          >
-            Recheck configuration
-          </Button>
-          <Button
-            className={styles.secondaryAction}
-            variant="default"
-            disabled={
-              !ready ||
-              locked ||
-              catalogBusy ||
-              snapshot?.bot.status !== "ready" ||
-              botBusy
-            }
-            onClick={refresh}
-          >
-            Refresh servers
-          </Button>
-          {locked && (
-            <Text size="sm" c="dimmed">
-              Settings remain readable. Disconnect before rechecking
-              configuration or refreshing servers.
-            </Text>
-          )}
           {view.commandError && (
-            <Alert color="red" className={styles.errorAlert} role="alert">
-              {view.commandError.message}
-            </Alert>
+            <ActionIcon
+              variant="subtle"
+              aria-label="Dismiss error"
+              onClick={adapter.dismissError}
+            >
+              <Icon name="close" />
+            </ActionIcon>
           )}
-          {snapshot?.discovery.phase === "error" && (
-            <Alert color="red" className={styles.errorAlert} role="alert">
-              {snapshot.discovery.message}
-            </Alert>
+        </div>
+      )}
+      {(dirty || operation) && (
+        <section
+          className={styles.pendingRoute}
+          aria-label="Queued route"
+          inert={drawer !== null}
+        >
+          <div className={styles.queuedIdentity}>
+            <strong>{operation ? "Applying route…" : "Queued changes"}</strong>
+            <span
+              title={`${nextSource?.name ?? "Choose input"} → ${nextServer?.name ?? "Choose server"} / ${nextRoom?.name ?? "Choose room"}`}
+            >
+              {queued.sourceId !== selection.sourceId
+                ? `${nextSource?.name ?? "Choose input"} · `
+                : ""}
+              {queued.serverId !== selection.serverId ||
+              queued.channelId !== selection.channelId
+                ? `${nextServer?.name ?? "Choose server"} / ${nextRoom?.name ?? "Choose room"}`
+                : "Input selection"}
+            </span>
+          </div>
+          <div className={styles.pendingActions}>
+            <Button
+              size="compact-sm"
+              disabled={!routeValid || locked}
+              onClick={() => {
+                if (!draft || !snapshot) return;
+                void adapter
+                  .applyRoute(draft, locksRoute(snapshot))
+                  .then((applied) => {
+                    if (applied) setDraft(null);
+                  });
+              }}
+            >
+              {active ? "Apply & reconnect" : "Apply selection"}
+            </Button>
+            <Button
+              variant="subtle"
+              size="compact-sm"
+              disabled={Boolean(operation)}
+              onClick={() => {
+                setDraft(null);
+                adapter.dismissError();
+              }}
+            >
+              Discard
+            </Button>
+          </div>
+        </section>
+      )}
+      <section className={styles.transport} aria-label="Session controls">
+        <div className={styles.transportStatus}>
+          <strong
+            data-testid="connection-status"
+            data-phase={phase ?? "loading"}
+          >
+            {status}
+          </strong>
+          <span
+            title={progress}
+            data-testid="connection-progress"
+            role="status"
+          >
+            {progress}
+          </span>
+        </div>
+        <Button
+          variant="default"
+          className={muted ? styles.mutedButton : undefined}
+          aria-label="Mute output"
+          aria-pressed={muted}
+          disabled={!ready || view.pending.includes("set-muted")}
+          leftSection={<Icon name={muted ? "mute" : "speaker"} />}
+          onClick={() =>
+            void adapter.dispatch({ type: "set-muted", muted: !muted })
+          }
+        >
+          {muted ? "Unmute" : "Mute"}
+        </Button>
+        <Button
+          variant={stopAction || stopping ? "default" : "filled"}
+          disabled={transportDisabled}
+          onClick={() =>
+            void adapter.dispatch({
+              type: stopAction ? "disconnect" : "connect",
+            })
+          }
+        >
+          {transportLabel}
+        </Button>
+      </section>
+      {drawer && (
+        <Sheet
+          name={drawer}
+          title={
+            {
+              source: "Recording inputs",
+              target: "Discord rooms",
+              bot: "Bot settings",
+              details: "Audio details",
+            }[drawer]
+          }
+          close={close}
+        >
+          {drawer === "source" && snapshot && (
+            <SourcePicker
+              snapshot={snapshot}
+              draft={queued}
+              busy={locked || catalogBusy}
+              refresh={() => void adapter.dispatch({ type: "refresh-catalog" })}
+              choose={(sourceId) => {
+                setDraft({ ...queued, sourceId });
+                close();
+              }}
+            />
           )}
-        </Stack>
-      </Modal>
+          {drawer === "target" && snapshot && (
+            <RoomPicker
+              snapshot={snapshot}
+              draft={queued}
+              busy={locked || catalogBusy}
+              refresh={() => void adapter.dispatch({ type: "refresh-catalog" })}
+              setup={() => setDrawer("bot")}
+              choose={(serverId, channelId) => {
+                setDraft({ ...queued, serverId, channelId });
+                close();
+              }}
+            />
+          )}
+          {drawer === "bot" && (
+            <BotSetup adapter={adapter} view={view} close={close} />
+          )}
+          {drawer === "details" && (
+            <AudioDetails
+              adapter={adapter}
+              snapshot={snapshot}
+              messages={messages}
+            />
+          )}
+        </Sheet>
+      )}
     </main>
   );
 }

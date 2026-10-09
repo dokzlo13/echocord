@@ -36,13 +36,13 @@ export function fixtureSnapshot(
         id: "cable",
         name: "CABLE Output (VB-Audio Virtual Cable)",
         available: true,
-        detail: "48 kHz recording device",
+        detail: "VB-Audio Virtual Cable",
       },
       {
         id: "cable-b",
         name: "CABLE-B Output",
         available: true,
-        detail: "48 kHz recording device",
+        detail: "VB-Audio Virtual Cable",
       },
     ],
     servers: [
@@ -90,6 +90,7 @@ export function fixtureSnapshot(
     capture: {
       phase: "stopped",
       levelDbfs: null,
+      outputLevelDbfs: null,
       message: null,
       droppedFrames: 0,
       underrunFrames: 0,
@@ -124,6 +125,7 @@ export function fixtureSnapshot(
       ...snapshot.capture,
       phase: "running",
       levelDbfs: -21,
+      outputLevelDbfs: -22.9,
     };
   }
   switch (name) {
@@ -183,6 +185,7 @@ export function fixtureSnapshot(
       break;
     case "muted":
       snapshot.output.muted = true;
+      snapshot.capture.outputLevelDbfs = -96;
       break;
     case "recovering":
       snapshot.connection = {
@@ -198,6 +201,7 @@ export function fixtureSnapshot(
         ...snapshot.capture,
         phase: "missing",
         levelDbfs: null,
+        outputLevelDbfs: null,
         message:
           "The selected device is missing. Restore that device or disconnect to choose another.",
       };
@@ -210,6 +214,7 @@ export function fixtureSnapshot(
         ...snapshot.capture,
         phase: "error",
         levelDbfs: null,
+        outputLevelDbfs: null,
         message:
           "Could not open the selected input at 48 kHz. Check its Windows sound settings.",
       };
@@ -295,6 +300,13 @@ export class FixtureTransport implements Transport {
         break;
       case "set-muted":
         this.update({
+          capture: {
+            ...this.snapshot.capture,
+            outputLevelDbfs:
+              this.snapshot.capture.phase === "running" && command.muted
+                ? -96
+                : null,
+          },
           output: { ...this.snapshot.output, muted: command.muted },
         });
         break;
@@ -328,6 +340,7 @@ export class FixtureTransport implements Transport {
             ...this.snapshot.capture,
             phase: "opening",
             levelDbfs: null,
+            outputLevelDbfs: null,
           },
         });
         this.timer = setTimeout(() => {
@@ -341,6 +354,7 @@ export class FixtureTransport implements Transport {
                 ...this.snapshot.capture,
                 phase: "running",
                 levelDbfs: -21,
+                outputLevelDbfs: -22.9,
               },
             });
         }, 700);
@@ -354,6 +368,7 @@ export class FixtureTransport implements Transport {
             ...this.snapshot.capture,
             phase: "stopped",
             levelDbfs: null,
+            outputLevelDbfs: null,
           },
         });
         this.timer = setTimeout(

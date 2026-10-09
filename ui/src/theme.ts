@@ -1,0 +1,42 @@
+import { Button, createTheme, PasswordInput, TextInput } from "@mantine/core";
+export const theme = createTheme({
+  primaryColor: "seafoam",
+  primaryShade: 4,
+  colors: {
+    seafoam: [
+      "#edf9f4",
+      "#d5eee4",
+      "#bce6d8",
+      "#a9e0ce",
+      "#9bd9c7",
+      "#83c7b4",
+      "#69ab9a",
+      "#508979",
+      "#386557",
+      "#26493f",
+    ],
+    dark: [
+      "#edf2f1",
+      "#d4dfe3",
+      "#b4c2c9",
+      "#92a7b2",
+      "#708996",
+      "#546d7a",
+      "#465a64",
+      "#242e36",
+      "#172128",
+      "#101a20",
+    ],
+  },
+  fontFamily: '"Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+  fontSizes: { xs: "0.75rem", sm: "0.875rem", md: "0.875rem" },
+  headings: { fontWeight: "600" },
+  defaultRadius: 6,
+  focusRing: "always",
+  cursorType: "pointer",
+  components: {
+    Button: Button.extend({ defaultProps: { size: "sm", autoContrast: true } }),
+    TextInput: TextInput.extend({ defaultProps: { size: "sm" } }),
+    PasswordInput: PasswordInput.extend({ defaultProps: { size: "sm" } }),
+  },
+});

@@ -45,7 +45,7 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
       number,
       (event: { event: string; id: number; payload: ControlSnapshot }) => void
     >();
-    const registered = new Map<number, number>();
+    const registered = new Map<number, { handler: number; event: string }>();
     const calls: TestHost["calls"] = [];
     const host = window as unknown as {
       isTauri: boolean;
@@ -56,12 +56,13 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
     host.isTauri = true;
     const emit = (snapshot: ControlSnapshot) => {
       current = snapshot;
-      for (const [id, handler] of registered)
-        callbacks.get(handler)?.({
-          event: "echocord://snapshot",
-          id,
-          payload: snapshot,
-        });
+      for (const [id, registration] of registered)
+        if (registration.event === "echocord://snapshot")
+          callbacks.get(registration.handler)?.({
+            event: "echocord://snapshot",
+            id,
+            payload: snapshot,
+          });
     };
     host.echocordTestHost = { emit, calls, activeListeners: 0 };
     host.__TAURI_INTERNALS__ = {
@@ -80,11 +81,15 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
         calls.push({ name, args });
         if (name === "plugin:event|listen") {
           const id = ++next;
-          registered.set(id, args.handler as number);
+          registered.set(id, {
+            handler: args.handler as number,
+            event: args.event as string,
+          });
           host.echocordTestHost.activeListeners = registered.size;
           return id;
         }
         if (name === "plugin:event|unlisten") return;
+        if (name === "get_visibility") return true;
         if (name === "get_snapshot") {
           if (!registered.size)
             throw new Error("Snapshot read before listener");
@@ -150,12 +155,24 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
       .echocordTestHost;
     return { calls: host.calls, activeListeners: host.activeListeners };
   });
-  expect(host.activeListeners).toBe(1);
+  expect(host.activeListeners).toBe(2);
+  expect(host.calls.some((call) => call.name === "get_visibility")).toBe(true);
+  expect(
+    host.calls.some(
+      (call) =>
+        call.name === "plugin:event|listen" &&
+        call.args.event === "echocord://visibility",
+    ),
+  ).toBe(true);
   expect(host.calls.find((call) => call.name === "get_snapshot")?.args).toEqual(
     {},
   );
   expect(
-    host.calls.find((call) => call.name === "plugin:event|listen")?.args.event,
+    host.calls.find(
+      (call) =>
+        call.name === "plugin:event|listen" &&
+        call.args.event === "echocord://snapshot",
+    )?.args.event,
   ).toBe("echocord://snapshot");
   expect(
     host.calls

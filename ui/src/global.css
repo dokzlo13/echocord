@@ -12,20 +12,29 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 body {
-  min-width: 280px;
-  background: #181818;
-  color: #f4f4f4;
+  min-width: 320px;
+  background: #242e36;
+  color: #edf2f1;
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   font-size: 14px;
-  line-height: 20px;
+  line-height: 1.35;
 }
 button:focus-visible,
-select:focus-visible,
-summary:focus-visible,
+input:focus-visible,
+a:focus-visible,
 [role="slider"]:focus-visible {
-  outline: 2px solid #72cbd3;
-  outline-offset: 3px;
+  outline: 2px solid #9bd9c7;
+  outline-offset: 2px;
+}
+::selection {
+  background: #9bd9c7;
+  color: #172128;
+}
+input {
+  caret-color: #9bd9c7;
 }
 @media (prefers-reduced-motion: reduce) {
   *,

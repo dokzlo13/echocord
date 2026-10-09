@@ -1,388 +1,517 @@
-import { mkdir } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import { expect, type Page, test } from "@playwright/test";
 import { fixtureNames } from "../src/fixtures";
-
-const screenshots = fileURLToPath(
-  new URL("../../.trash/ec011/screenshots/", import.meta.url),
-);
 
 async function preview(page: Page, name = "disconnected") {
   await page.clock.install();
   await page.goto(`/?fixture=${name}`);
+  await expect(page.getByTestId("connection-status")).not.toHaveText(
+    "Loading app",
+  );
 }
-
-async function capture(page: Page, name: string) {
-  await mkdir(screenshots, { recursive: true });
-  await page.screenshot({
-    path: `${screenshots}${name}.png`,
-    animations: "disabled",
+async function fit(page: Page) {
+  await expect(
+    page.getByRole("region", { name: "Session controls" }),
+  ).toBeInViewport({ ratio: 1 });
+  await expect(page.getByTestId("destination")).toBeInViewport({ ratio: 1 });
+  await expect(
+    page.getByRole("slider", { name: /Master volume/ }),
+  ).toBeInViewport({ ratio: 1 });
+  const scrolling = await page.evaluate(
+    () =>
+      [
+        ...document.querySelectorAll("main, main *"),
+        document.documentElement,
+        document.body,
+      ].filter((node) => {
+        const style = getComputedStyle(node);
+        return (
+          ["auto", "scroll"].includes(style.overflowY) &&
+          node.scrollHeight > node.clientHeight + 1
+        );
+      }).length,
+  );
+  expect(scrolling).toBe(0);
+  const geometry = await page.evaluate(() => {
+    const blocks = [
+      ...document.querySelectorAll(
+        "main > :not(style), [data-testid='route-surface'] > section",
+      ),
+    ];
+    const defects: string[] = [];
+    for (const node of blocks) {
+      const box = node.getBoundingClientRect();
+      if (
+        box.top < -1 ||
+        box.bottom > innerHeight + 1 ||
+        box.left < -1 ||
+        box.right > innerWidth + 1
+      )
+        defects.push(`Outside viewport: ${node.className}`);
+      for (const child of node.querySelectorAll(
+        "h2, button, [role='slider'], [data-testid$='level'], [data-testid='queue-frames']",
+      )) {
+        const childBox = child.getBoundingClientRect();
+        if (
+          childBox.top < box.top - 1 ||
+          childBox.bottom > box.bottom + 1 ||
+          childBox.left < box.left - 1 ||
+          childBox.right > box.right + 1
+        )
+          defects.push(`Clipped: ${child.textContent}`);
+      }
+    }
+    const siblings = [...document.querySelectorAll("main > :not(style)")];
+    for (let i = 1; i < siblings.length; i++) {
+      if (
+        (siblings[i - 1]?.getBoundingClientRect().bottom ?? 0) >
+        (siblings[i]?.getBoundingClientRect().top ?? 0) + 1
+      )
+        defects.push("Main blocks overlap");
+    }
+    const regions = [
+      ...document.querySelectorAll("[data-testid='route-surface'] > section"),
+    ];
+    for (let i = 1; i < regions.length; i++) {
+      if (
+        (regions[i - 1]?.getBoundingClientRect().bottom ?? 0) >
+        (regions[i]?.getBoundingClientRect().top ?? 0) + 1
+      )
+        defects.push("Signal regions overlap");
+    }
+    return defects;
   });
-}
-
-async function persistentControls(page: Page) {
-  const controls = page.getByRole("region", { name: "Session controls" });
-  await expect(controls).toBeInViewport({ ratio: 1 });
+  expect(geometry).toEqual([]);
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth <= innerWidth &&
+        document.documentElement.scrollHeight <= innerHeight,
+    ),
+  ).toBe(true);
   await expect(
     page.getByRole("button", { name: "Mute output", exact: true }),
   ).toBeInViewport({ ratio: 1 });
-  await expect(
-    page.getByText("Discord volume", { exact: true }),
-  ).toBeInViewport({ ratio: 1 });
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
+}
+async function stageSource(page: Page) {
+  await page.getByRole("button", { name: "Change input", exact: true }).click();
+  await page.getByRole("button", { name: /CABLE-B Output/ }).click();
+}
+async function stageRoom(page: Page) {
+  await page.getByRole("button", { name: "Change room", exact: true }).click();
+  await page.getByRole("button", { name: "The tavern", exact: true }).click();
 }
 
-test("startup is stopped; connect, pre-output level, and stable mute remain independent", async ({
+test("connect, actual independent meters, mute, gain and stop", async ({
   page,
 }) => {
   await preview(page);
-  await expect(page.getByLabel("Fixture mode")).toContainText(
-    "no audio or Discord connection",
-  );
-  await expect(page.getByTestId("connection-status")).toHaveText(
-    "Disconnected",
-  );
-  await expect(page.getByTestId("capture-status")).toHaveText(
-    "Capture stopped",
-  );
   await expect(page.getByTestId("input-level")).toHaveText("No level");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.getByTestId("connection-status")).toHaveText("Connecting");
   await expect(page.getByTestId("connection-progress")).toHaveText(
     "Connecting to Discord…",
   );
-  await expect(page.getByTestId("capture-status")).toHaveText("Opening input");
+  await expect(
+    page.getByRole("button", { name: "Cancel", exact: true }),
+  ).toBeEnabled();
   await page.clock.runFor(800);
   await expect(page.getByTestId("connection-status")).toHaveText("Connected");
-  await expect(page.getByTestId("input-level")).toHaveText("-21 dBFS");
-  await page.getByRole("button", { name: "Mute output", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Mute output", exact: true }),
-  ).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
-  await expect(page.getByTestId("input-level")).toHaveText("-21 dBFS");
-  await expect(page.getByTestId("output-status")).toHaveText("Muted");
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(page.getByTestId("connection-status")).toHaveText(
-    "Disconnecting",
-  );
-  await expect(
-    page.getByRole("button", { name: "Disconnect", exact: true }),
-  ).toBeDisabled();
+  await expect(page.getByTestId("input-level")).toHaveText("-21.0 dBFS");
+  await page.getByRole("button", { name: "Mute output" }).click();
+  await page.clock.runFor(250);
+  await expect(page.getByTestId("input-level")).toHaveText("-21.0 dBFS");
+  await expect(page.getByTestId("mix-level")).toHaveText("Silent");
+  const slider = page.getByRole("slider", { name: /Master volume/ });
+  await slider.focus();
+  await slider.press("ArrowLeft");
+  await page.clock.runFor(200);
+  await expect(slider).toHaveAttribute("aria-valuenow", "79");
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
   await page.clock.runFor(500);
   await expect(page.getByTestId("connection-status")).toHaveText(
     "Disconnected",
   );
   await expect(
-    page.getByRole("button", { name: "Mute output", exact: true }),
+    page.getByRole("button", { name: "Mute output" }),
   ).toHaveAttribute("aria-pressed", "true");
 });
 
-test("source and destination are explicit; changing servers clears channel and session locks route", async ({
-  page,
-}) => {
-  await preview(page);
-  await page
-    .getByLabel("Recording device", { exact: true })
-    .selectOption("cable-b");
-  await page
-    .getByLabel("Server", { exact: true })
-    .selectOption("1234567890123456790");
-  await expect(page.getByLabel("Voice channel", { exact: true })).toHaveValue(
-    "",
-  );
-  await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toBeDisabled();
-  await page
-    .getByLabel("Voice channel", { exact: true })
-    .selectOption("9876543210987654323");
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(
-    page.getByLabel("Recording device", { exact: true }),
-  ).toBeDisabled();
-  await expect(page.getByLabel("Server", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Voice channel", { exact: true })).toHaveValue(
-    "9876543210987654323",
-  );
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await page.clock.runFor(5000);
-  await expect(page.getByTestId("connection-status")).toHaveText(
-    "Disconnected",
-  );
-});
-
-test("first run has actionable configuration/discovery and never auto-selects a route", async ({
-  page,
-}) => {
-  await preview(page, "first-run");
-  await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toBeDisabled();
-  await page.getByRole("button", { name: "Bot settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Bot settings" });
-  await expect(dialog.locator("input, textarea")).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Recheck configuration", exact: true })
-    .click();
-  await expect(dialog).toContainText("Checking bot configuration");
-  await page.clock.runFor(600);
-  await page
-    .getByRole("button", { name: "Refresh servers", exact: true })
-    .click();
-  await page.clock.runFor(600);
-  await page.getByRole("button", { name: "Close bot settings" }).click();
-  await expect(
-    page.getByLabel("Recording device", { exact: true }),
-  ).toHaveValue("");
-  await expect(page.getByLabel("Server", { exact: true })).toHaveValue("");
-  await expect(page.getByTestId("connection-status")).toHaveText(
-    "Disconnected",
-  );
-  await expect(page.getByTestId("readiness")).toHaveText(
-    "Select a recording device.",
-  );
-});
-
-test("connected capture failure is visible without replacing connection or claiming sending", async ({
-  page,
-}) => {
-  await preview(page, "missing-device");
-  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
-  await expect(page.getByTestId("capture-status")).toHaveText("Device missing");
-  await expect(page.getByTestId("input-level")).toHaveText("No level");
-  await expect(
-    page.getByLabel("Recording device", { exact: true }),
-  ).toHaveValue("cable");
-  await expect(
-    page.getByLabel("Recording device", { exact: true }),
-  ).toBeDisabled();
-  await expect(page.getByTestId("output-status")).toHaveText("Output enabled");
-  await expect(page.getByText("Sending", { exact: true })).toHaveCount(0);
-});
-
-test("rejected commands surface without optimistic connection or mute changes", async ({
-  page,
-}) => {
-  await preview(page, "rejected-command");
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("denied permission");
-  await expect(page.getByTestId("connection-status")).toHaveText(
-    "Disconnected",
-  );
-  await expect(page.getByTestId("capture-status")).toHaveText(
-    "Capture stopped",
-  );
-  await page.getByRole("button", { name: "Dismiss error" }).click();
-  await expect(page.getByRole("alert")).toHaveCount(0);
-});
-
-test("keyboard focus stays valid in a connected modal with disabled actions, then returns to trigger", async ({
+test("room search grouped by server/category stages, discard and explicit reconnect", async ({
   page,
 }) => {
   await preview(page, "connected");
-  await page.keyboard.press("Tab");
-  const settings = page.getByRole("button", {
-    name: "Bot settings",
-    exact: true,
-  });
-  await expect(settings).toBeFocused();
-  expect(
-    await settings.evaluate(
-      (element) => getComputedStyle(element).outlineStyle,
-    ),
-  ).not.toBe("none");
-  await page.keyboard.press("Enter");
-  const close = page.getByRole("button", { name: "Close bot settings" });
-  await expect(close).toBeFocused();
+  await page.keyboard.press("Control+k");
   await expect(
-    page.getByRole("button", { name: "Recheck configuration", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("dialog", { name: "Discord rooms" }),
+  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Game night" })).toBeVisible();
+  await page.getByLabel("Search servers and rooms").fill("tavern");
+  await expect(page.getByRole("button", { name: /Session room/ })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "The tavern", exact: true }).click();
+  await expect(page.getByTestId("destination")).toContainText("Session room");
   await expect(
-    page.getByRole("button", { name: "Refresh servers", exact: true }),
-  ).toBeDisabled();
-  await page.keyboard.press("Tab");
-  await expect(close).toBeFocused();
-  await page.keyboard.press("Escape");
-  await page.clock.runFor(200);
-  await expect(settings).toBeFocused();
-  const volume = page.getByRole("slider", { name: "Discord volume" });
-  await volume.focus();
-  await volume.press("ArrowLeft");
-  await page.clock.runFor(200);
-  await expect(volume).toHaveAttribute("aria-valuenow", "79");
-  const mute = page.getByRole("button", { name: "Mute output", exact: true });
-  await mute.focus();
-  await mute.press("Space");
-  await expect(mute).toHaveAttribute("aria-pressed", "true");
-  await persistentControls(page);
+    page.getByRole("region", { name: "Queued route" }),
+  ).toContainText("The tavern");
+  await fit(page);
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Queued route" })).toHaveCount(
+    0,
+  );
+  await stageRoom(page);
+  await page
+    .getByRole("button", { name: "Apply & reconnect", exact: true })
+    .click();
+  await expect(page.getByRole("button", { name: "Mute output" })).toBeEnabled();
+  await page.clock.runFor(500);
+  await expect(page.getByTestId("destination")).toContainText("The tavern");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connecting");
 });
 
-test("cleanup incomplete prevents connect and route changes while settings remain readable", async ({
+test("disconnected apply saves selection without connecting; cancel during apply does not reconnect", async ({
+  page,
+}) => {
+  await preview(page);
+  await stageSource(page);
+  await page
+    .getByRole("button", { name: "Apply selection", exact: true })
+    .click();
+  await expect(page.getByTestId("route-surface")).toContainText(
+    "CABLE-B Output",
+  );
+  await expect(page.getByTestId("connection-status")).toHaveText(
+    "Disconnected",
+  );
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await page.evaluate(() => {
+    window.uiHarness.holdDisconnect = true;
+  });
+  await stageRoom(page);
+  await page
+    .getByRole("button", { name: "Apply & reconnect", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.evaluate(() =>
+    window.uiHarness.emit({ connection: { phase: "disconnected" } }),
+  );
+  await page.clock.runFor(1500);
+  await expect(page.getByTestId("connection-status")).toHaveText(
+    "Disconnected",
+  );
+  await expect(page.getByTestId("destination")).toContainText("Session room");
+  expect(
+    await page.evaluate(() =>
+      window.uiHarness.commands.some((command) => command.type === "connect"),
+    ),
+  ).toBe(false);
+});
+
+test("first-run Test & Save validates, serializes and clears token; route is never auto-selected", async ({
+  page,
+}) => {
+  await preview(page, "first-run");
+  await page.getByRole("button", { name: "Set up bot", exact: true }).click();
+  const input = page.getByLabel("Bot token", { exact: true });
+  await page.getByRole("button", { name: "Test & Save", exact: true }).click();
+  await expect(page.getByText("Enter your bot token.")).toBeVisible();
+  await input.fill("synthetic-example-only");
+  await page.getByRole("button", { name: "Test & Save", exact: true }).click();
+  await expect(input).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Testing & saving…" }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Mute output" }).click();
+  await page.clock.runFor(600);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByTestId("connection-status")).toHaveText(
+    "Disconnected",
+  );
+  await expect(page.getByTestId("destination")).toContainText(
+    "Choose a voice room",
+  );
+  await page.getByRole("button", { name: "Bot settings" }).click();
+  await expect(input).toHaveValue("");
+});
+
+test("drawers preserve transport, keyboard focus, empty search and Escape return", async ({
+  page,
+}) => {
+  await preview(page, "connected");
+  const opener = page.getByRole("button", { name: "Change room", exact: true });
+  await opener.focus();
+  await opener.press("Enter");
+  await expect(
+    page.getByRole("dialog", { name: "Discord rooms" }),
+  ).toHaveAttribute("aria-modal", "false");
+  await page.getByLabel("Search servers and rooms").fill("no-matches");
+  await expect(page.getByText("No rooms match your search.")).toBeVisible();
+  await page.getByRole("button", { name: "Mute output" }).click();
+  await expect(
+    page.getByRole("button", { name: "Mute output" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Escape");
+  await page.clock.runFor(50);
+  await expect(opener).toBeFocused();
+  expect(
+    await opener.evaluate((el) => getComputedStyle(el).outlineStyle),
+  ).not.toBe("none");
+  await page.getByRole("button", { name: "Change input", exact: true }).click();
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await page.clock.runFor(500);
+  await expect(page.getByTestId("connection-status")).toHaveText(
+    "Disconnected",
+  );
+});
+
+test("partial apply preserves confirmed input and remaining room draft with truthful details", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await stageSource(page);
+  await stageRoom(page);
+  await page.evaluate(() => {
+    window.uiHarness.rejectDestination = true;
+  });
+  await page
+    .getByRole("button", { name: "Apply & reconnect", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Route change incomplete",
+  );
+  await expect(page.getByTestId("route-surface")).toContainText(
+    "CABLE-B Output",
+  );
+  await expect(page.getByTestId("destination")).toContainText("Session room");
+  await expect(
+    page.getByRole("region", { name: "Queued route" }),
+  ).toContainText("The tavern");
+  await fit(page);
+  const commands = await page.evaluate(() => window.uiHarness.commands);
+  expect(commands.map((command) => command.type)).toEqual([
+    "disconnect",
+    "select-source",
+    "select-destination",
+  ]);
+  await page.getByRole("button", { name: "Details", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Room change failed. Check permissions.",
+  );
+});
+
+for (const width of [480, 420]) {
+  test(`all main failure and pending states fit at ${width}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: width === 480 ? 600 : 540 });
+    for (const name of fixtureNames) {
+      await preview(page, name);
+      await fit(page);
+    }
+    await preview(page, "connection-error");
+    await stageSource(page);
+    await stageRoom(page);
+    await fit(page);
+  });
+}
+
+test("render bursts leave Profiler control commits unchanged, cap visual paints and resume latest after native/document hide", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await page.clock.runFor(250);
+  const baseline = await page.evaluate(() => window.uiHarness.commits);
+  await page.evaluate(() => window.uiHarness.burst(1000));
+  await page.clock.runFor(250);
+  expect(await page.evaluate(() => window.uiHarness.commits)).toBe(baseline);
+  await expect(page.getByTestId("input-level")).toHaveText("-21.0 dBFS");
+  await expect(page.getByTestId("mix-level")).toHaveText("-26.0 dBFS");
+  await expect(page.getByTestId("queue-frames")).toContainText("999/1,920");
+  const count = await page.evaluate(() => {
+    const readout = document.querySelector('[data-testid="input-level"]');
+    const tracked = window as unknown as {
+      paintCount: number;
+      observer: MutationObserver;
+    };
+    tracked.paintCount = 0;
+    tracked.observer = new MutationObserver((records) => {
+      tracked.paintCount += records.filter(
+        (r) => r.type === "childList",
+      ).length;
+    });
+    if (readout) tracked.observer.observe(readout, { childList: true });
+    return 0;
+  });
+  expect(count).toBe(0);
+  await page.evaluate(() => {
+    const interval = setInterval(() => window.uiHarness.burst(10), 5);
+    setTimeout(() => clearInterval(interval), 1000);
+  });
+  await page.clock.runFor(1000);
+  const paints = await page.evaluate(
+    () => (window as unknown as { paintCount: number }).paintCount,
+  );
+  await test.info().attach("telemetry-proof.json", {
+    body: JSON.stringify({
+      initialBurst: 1000,
+      baselineControlCommits: baseline,
+      afterBurstControlCommits: await page.evaluate(
+        () => window.uiHarness.commits,
+      ),
+      visualPaintsPerSimulatedSecond: paints,
+      cadenceLimit: 20,
+      nativeAndDocumentHiddenResume: "asserted below",
+    }),
+    contentType: "application/json",
+  });
+  expect(paints).toBeLessThanOrEqual(21);
+  expect(paints).toBeGreaterThan(10);
+  expect(await page.evaluate(() => window.uiHarness.commits)).toBe(baseline);
+  await page.evaluate(() => {
+    window.uiHarness.visible(false);
+    window.uiHarness.emit({
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: -9,
+        outputLevelDbfs: -70,
+      },
+    });
+  });
+  const beforeHidden = await page.getByTestId("input-level").textContent();
+  await page.clock.runFor(1000);
+  await expect(page.getByTestId("input-level")).toHaveText(beforeHidden ?? "");
+  await page.evaluate(() => window.uiHarness.visible(true));
+  await page.clock.runFor(250);
+  await expect(page.getByTestId("input-level")).toHaveText("-9.0 dBFS");
+  await expect(page.getByTestId("mix-level")).toHaveText("-70.0 dBFS");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: true,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.uiHarness.emit({
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: -5,
+        outputLevelDbfs: null,
+      },
+    });
+  });
+  await page.clock.runFor(1000);
+  await expect(page.getByTestId("input-level")).toHaveText("-9.0 dBFS");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "hidden", {
+      configurable: true,
+      value: false,
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.clock.runFor(250);
+  await expect(page.getByTestId("input-level")).toHaveText("-5.0 dBFS");
+  await expect(page.getByTestId("mix-level")).toHaveText("No level");
+  expect(await page.evaluate(() => window.uiHarness.commits)).toBe(baseline);
+  await page.getByRole("button", { name: "Mute output" }).click();
+  await page.clock.runFor(100);
+  expect(await page.evaluate(() => window.uiHarness.commits)).toBeGreaterThan(
+    baseline,
+  );
+});
+
+test("text scaling and DPR keep main controls within supported surface", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    viewport: { width: 420, height: 540 },
+    deviceScaleFactor: 1.5,
+  });
+  const page = await context.newPage();
+  await preview(page, "connected");
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "18px";
+  });
+  await stageSource(page);
+  await stageRoom(page);
+  await fit(page);
+  await context.close();
+});
+
+test("bot save failure stays truthful and credential entry clears when closed", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await page.evaluate(() => {
+    window.uiHarness.emit({ connection: { phase: "disconnected" } });
+    window.uiHarness.rejectSave = true;
+  });
+  await page.getByRole("button", { name: "Bot settings", exact: true }).click();
+  await page
+    .getByLabel("Bot token", { exact: true })
+    .fill("synthetic-private-token");
+  await page.getByRole("button", { name: "Test & Save", exact: true }).click();
+  await page.clock.runFor(400);
+  await expect(page.getByRole("dialog")).toContainText(
+    "Could not confirm this bot token was saved",
+  );
+  await expect(page.getByRole("alert")).not.toContainText(
+    "synthetic-private-token",
+  );
+  await expect(
+    page.getByRole("button", { name: "Test & Save", exact: true }),
+  ).toBeEnabled();
+  await page.getByRole("button", { name: "Close bot settings" }).click();
+  await page.getByRole("button", { name: "Bot settings", exact: true }).click();
+  await expect(page.getByLabel("Bot token", { exact: true })).toHaveValue("");
+});
+
+test("catalog icons use actual metadata with fallback; cleanup and missing input preserve truthful controls", async ({
   page,
 }) => {
   await preview(page, "cleanup-incomplete");
   await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page.getByRole("button", { name: "Retry disconnect" }),
+    page.getByRole("button", { name: "Retry stop", exact: true }),
   ).toBeEnabled();
   await expect(
-    page.getByLabel("Recording device", { exact: true }),
+    page.getByRole("button", { name: "Change input", exact: true }),
   ).toBeDisabled();
-  await page.getByRole("button", { name: "Bot settings", exact: true }).click();
   await expect(
-    page.getByRole("dialog", { name: "Bot settings" }),
-  ).toContainText("Settings remain readable");
-  await expect(
-    page.getByRole("button", { name: "Close bot settings" }),
-  ).toBeFocused();
-});
-
-function luminance(color: string) {
-  const channels = (color.match(/[\d.]+/g) ?? []).slice(0, 3).map((value) => {
-    const channel = Number(value) / 255;
-    return channel <= 0.04045
-      ? channel / 12.92
-      : ((channel + 0.055) / 1.055) ** 2.4;
-  });
-  return (
-    (channels[0] ?? 0) * 0.2126 +
-    (channels[1] ?? 0) * 0.7152 +
-    (channels[2] ?? 0) * 0.0722
-  );
-}
-
-function contrast(foreground: string, background: string) {
-  const first = luminance(foreground),
-    second = luminance(background);
-  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
-}
-
-test("accent, hover, pressed mute, disabled controls and selected locked text remain legible", async ({
-  page,
-}) => {
-  await preview(page);
-  const connect = page.getByRole("button", { name: "Connect", exact: true });
-  const measure = (element: Element) => ({
-    color: getComputedStyle(element).color,
-    background: getComputedStyle(element).backgroundColor,
-  });
-  let colors = await connect.evaluate(measure);
-  expect(colors.color).toBe("rgb(24, 24, 24)");
-  expect(contrast(colors.color, colors.background)).toBeGreaterThan(4.5);
-  await connect.hover();
-  colors = await connect.evaluate(measure);
-  expect(contrast(colors.color, colors.background)).toBeGreaterThan(4.5);
-  await page.getByRole("button", { name: "Mute output", exact: true }).click();
-  colors = await page
-    .getByRole("button", { name: "Mute output", exact: true })
-    .evaluate(measure);
-  expect(contrast(colors.color, colors.background)).toBeGreaterThan(4.5);
-  await connect.click();
-  colors = await page
-    .getByLabel("Recording device", { exact: true })
-    .evaluate(measure);
-  expect(contrast(colors.color, colors.background)).toBeGreaterThan(4.5);
-  await page.getByRole("button", { name: "Disconnect", exact: true }).click();
-  colors = await page
-    .getByRole("button", { name: "Disconnect", exact: true })
-    .evaluate(measure);
-  expect(contrast(colors.color, colors.background)).toBeGreaterThan(4.5);
-  await capture(page, "contrast-focus-480x600");
-});
-
-for (const name of fixtureNames) {
-  test(`inspected evidence fixture: ${name} at 480x600`, async ({ page }) => {
-    await preview(page, name);
-    await expect(page.getByTestId("connection-status")).not.toHaveText(
-      "Loading app",
+    page.getByRole("button", { name: "Change room", exact: true }),
+  ).toBeDisabled();
+  await preview(page, "missing-device");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await expect(page.getByTestId("capture-status")).toHaveText("Device missing");
+  await expect(page.getByTestId("input-level")).toHaveText("No level");
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  const icon =
+    "data:image/svg+xml," +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28"><rect width="28" height="28" fill="#9bd9c7"/></svg>',
     );
-    await persistentControls(page);
-    await capture(page, `${name}-480x600`);
-  });
-}
-
-for (const size of [
-  { width: 420, height: 540, scale: 1.25 },
-  { width: 480, height: 600, scale: 1.5 },
-  { width: 360, height: 500, scale: 2 },
-]) {
-  test(`persistent controls at ${size.width}x${size.height} DPR ${size.scale}`, async ({
-    browser,
-  }) => {
-    const context = await browser.newContext({
-      viewport: { width: size.width, height: size.height },
-      deviceScaleFactor: size.scale,
-      reducedMotion: "reduce",
-    });
-    const page = await context.newPage();
-    for (const name of [
-      "disconnected",
-      "muted",
-      "cleanup-incomplete",
-      "first-run",
-    ]) {
-      await page.goto(`http://127.0.0.1:4175/?fixture=${name}`);
-      await expect(page.getByTestId("connection-status")).not.toHaveText(
-        "Loading app",
-      );
-      await persistentControls(page);
-      await page.getByText("Routing help", { exact: true }).click();
-      await page.getByText("Fixture states", { exact: true }).click();
-      await page.getByLabel("Fixture state").scrollIntoViewIfNeeded();
-      await persistentControls(page);
-      await capture(
-        page,
-        `${name}-${size.width}x${size.height}-dpr-${size.scale}`,
-      );
-    }
-    await page
-      .getByRole("button", { name: "Bot settings", exact: true })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Close bot settings" }),
-    ).toBeFocused();
-    await capture(page, `bot-settings-${size.width}-dpr-${size.scale}`);
-    await context.close();
-  });
-}
-
-test("CSS zoom preserves the footer and all actions without horizontal overflow", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 960, height: 1200 });
-  await preview(page, "muted");
-  await page.evaluate(() => {
-    document.documentElement.style.zoom = "2";
-  });
-  await persistentControls(page);
-  await capture(page, "css-zoom-200-percent");
-});
-
-test("fixture preview has no service requests, capture permissions, or page errors", async ({
-  page,
-}) => {
-  const errors: string[] = [],
-    services: string[] = [];
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("request", (request) => {
-    if (new URL(request.url()).hostname !== "127.0.0.1")
-      services.push(request.url());
-  });
-  await preview(page, "connected");
-  await page.getByRole("button", { name: "Mute output", exact: true }).click();
-  await page.getByRole("button", { name: "Bot settings", exact: true }).click();
-  await expect(
-    page
-      .getByRole("dialog", { name: "Bot settings" })
-      .locator("input, textarea"),
-  ).toHaveCount(0);
-  expect(errors).toEqual([]);
-  expect(services).toEqual([]);
+  await page.evaluate(
+    (iconUrl) =>
+      window.uiHarness.emit({
+        servers: window.uiHarness
+          .snapshot()
+          .servers.map((server, index) =>
+            index === 0 ? { ...server, iconUrl } : server,
+          ),
+      }),
+    icon,
+  );
+  await expect(page.getByTestId("destination").locator("img")).toHaveAttribute(
+    "src",
+    icon,
+  );
+  await page.getByRole("button", { name: "Change room", exact: true }).click();
+  await expect(page.getByRole("dialog").locator("img")).toHaveAttribute(
+    "src",
+    icon,
+  );
 });

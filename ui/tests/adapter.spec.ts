@@ -376,6 +376,74 @@ test("restart ignores prior visibility events and reads, then recovers at the sa
   expect(host.visibilityStops).toBe(2);
 });
 
+test("restart visibility cannot present an old peak before a fresh equal-revision read", async () => {
+  const host = new VisibleHost();
+  host.state = fixtureSnapshot("connected");
+  host.state.capture = {
+    ...host.state.capture,
+    levelDbfs: -6,
+    outputLevelDbfs: -12,
+  };
+  const adapter = new ControlAdapter(host);
+  await adapter.start();
+  expect(adapter.getTelemetrySnapshot().capture?.outputLevelDbfs).toBe(-12);
+  const read = deferred<ControlSnapshot>();
+  host.getSnapshot = () => read.promise;
+  const presented: ReturnType<typeof adapter.getTelemetrySnapshot>[] = [];
+  adapter.subscribeTelemetry(() => {
+    const telemetry = adapter.getTelemetrySnapshot();
+    if (telemetry.visible) presented.push(telemetry);
+  });
+  const restart = adapter.start();
+  await expect.poll(() => adapter.getTelemetrySnapshot().visible).toBe(true);
+  expect(adapter.getSnapshot().phase).toBe("loading");
+  expect(adapter.getTelemetrySnapshot()).toEqual({
+    sessionId: 0,
+    sourceId: null,
+    capture: null,
+    visible: true,
+  });
+  expect(presented.every((telemetry) => telemetry.capture === null)).toBe(true);
+  const fresh = {
+    ...host.state,
+    capture: { ...host.state.capture, levelDbfs: -30, outputLevelDbfs: -36 },
+  };
+  read.resolve(fresh);
+  await restart;
+  expect(adapter.getSnapshot().phase).toBe("ready");
+  expect(adapter.getSnapshot().snapshot).toBe(fresh);
+  expect(adapter.getTelemetrySnapshot().capture).toBe(fresh.capture);
+  expect(presented.at(-1)?.capture?.outputLevelDbfs).toBe(-36);
+  adapter.dispose();
+});
+
+test("failed restart read leaves telemetry empty after visibility has resumed", async () => {
+  const host = new VisibleHost();
+  host.state = fixtureSnapshot("connected");
+  host.state.capture = { ...host.state.capture, outputLevelDbfs: -12 };
+  const adapter = new ControlAdapter(host);
+  await adapter.start();
+  expect(adapter.getTelemetrySnapshot().capture?.outputLevelDbfs).toBe(-12);
+  const read = deferred<ControlSnapshot>();
+  host.getSnapshot = () => read.promise;
+  const presented: ReturnType<typeof adapter.getTelemetrySnapshot>[] = [];
+  adapter.subscribeTelemetry(() => {
+    const telemetry = adapter.getTelemetrySnapshot();
+    if (telemetry.visible) presented.push(telemetry);
+  });
+  const restart = adapter.start();
+  await expect.poll(() => adapter.getTelemetrySnapshot().visible).toBe(true);
+  expect(adapter.getTelemetrySnapshot().capture).toBeNull();
+  read.reject(new Error("Fresh status unavailable"));
+  await restart;
+  expect(adapter.getSnapshot().phase).toBe("error");
+  expect(adapter.getTelemetrySnapshot().visible).toBe(true);
+  expect(adapter.getTelemetrySnapshot().capture).toBeNull();
+  expect(presented.every((telemetry) => telemetry.capture === null)).toBe(true);
+  expect(await adapter.dispatch({ type: "connect" })).toBe(false);
+  adapter.dispose();
+});
+
 test("native SDK uses boolean visibility IPC, refreshes after a hide, and unregisters both listeners", async ({
   page,
 }) => {

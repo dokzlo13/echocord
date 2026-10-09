@@ -252,6 +252,15 @@ export class ControlAdapter {
   /** Listener-first avoids losing a transition between cold start and subscription. */
   start = async (): Promise<void> => {
     this.dispose();
+    // A new subscription must observe its own capture before presentation resumes.
+    // Its initial read may legitimately have the same revision as the old one.
+    this.latestSnapshot = null;
+    this.telemetry = {
+      sessionId: 0,
+      sourceId: null,
+      capture: null,
+      visible: false,
+    };
     this.active = true;
     const generation = this.generation;
     // Native presentation waits for visibility; fixtures default to visible.
@@ -278,13 +287,6 @@ export class ControlAdapter {
       this.unlisten = unlisten;
       const snapshot = await this.transport.getSnapshot();
       this.receive(snapshot, generation);
-      // A retained snapshot with the same revision still completes a retry.
-      if (
-        this.active &&
-        generation === this.generation &&
-        this.state.phase === "loading"
-      )
-        this.publish({ phase: "ready" });
     } catch (error) {
       if (this.active && generation === this.generation)
         this.publish({ phase: "error", error: appError(error) });

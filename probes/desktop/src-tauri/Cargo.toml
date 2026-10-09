@@ -1,0 +1,22 @@
+[package]
+name = "echocord-desktop-probe"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", default-features = false }
+
+[dependencies]
+tauri = { version = "=2.12.2", default-features = false, features = ["wry", "compression", "common-controls-v6"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+strip = "debuginfo"
+
+# This probe owns its manifest and lockfile independently of other workers.
+[workspace]

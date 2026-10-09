@@ -266,17 +266,63 @@ pub(crate) fn read_token(path: &Path) -> Result<String, AppError> {
 /// Capture adapters may have diagnostic strings; only bounded measurements cross the pipe.
 pub fn clean_capture(mut capture: Capture) -> Capture {
     capture.message = None;
-    capture.level_dbfs = capture
-        .level_dbfs
-        .filter(|v| v.is_finite())
-        .map(|v| v.clamp(-160.0, 0.0));
+    capture.level_dbfs = clean_level(capture.level_dbfs);
+    capture.output_level_dbfs = clean_level(capture.output_level_dbfs);
     capture
+}
+
+fn clean_level(level: Option<f32>) -> Option<f32> {
+    level
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(-160.0, 0.0))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn both_meter_levels_are_sanitized_and_roundtrip_as_nullable_scalars() {
+        for (level, expected) in [
+            (None, None),
+            (Some(f32::NAN), None),
+            (Some(f32::INFINITY), None),
+            (Some(f32::NEG_INFINITY), None),
+            (Some(-200.0), Some(-160.0)),
+            (Some(2.0), Some(0.0)),
+            (Some(-6.0), Some(-6.0)),
+        ] {
+            let capture = clean_capture(Capture {
+                level_dbfs: level,
+                output_level_dbfs: level,
+                message: Some("private diagnostic".into()),
+                ..crate::model::ControlSnapshot::default().capture
+            });
+            assert_eq!(capture.level_dbfs, expected);
+            assert_eq!(capture.output_level_dbfs, expected);
+            assert_eq!(capture.message, None);
+            let frame = Frame {
+                version: VERSION,
+                generation: 1,
+                sequence: 1,
+                body: Status::Meter { capture },
+            };
+            let encoded = encode(&frame).unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(
+                json["body"]["capture"]["outputLevelDbfs"],
+                serde_json::to_value(expected).unwrap()
+            );
+            assert_eq!(
+                read::<Status>(&mut Cursor::new(encoded))
+                    .unwrap()
+                    .unwrap()
+                    .body,
+                frame.body
+            );
+        }
+    }
     fn frame(sequence: u64) -> Frame<Command> {
         Frame {
             version: VERSION,

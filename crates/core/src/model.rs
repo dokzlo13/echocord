@@ -150,7 +150,11 @@ pub enum CapturePhase {
 #[serde(rename_all = "camelCase")]
 pub struct Capture {
     pub phase: CapturePhase,
+    // Pre-gain capture callback peak; unavailable before capture starts.
     pub level_dbfs: Option<f32>,
+    // Post-gain/mute stereo peak at the native PCM reader handoff.
+    // Silence is -96 dBFS; unavailable observations are null.
+    pub output_level_dbfs: Option<f32>,
     pub message: Option<String>,
     pub dropped_frames: u32,
     pub underrun_frames: u32,
@@ -197,6 +201,7 @@ impl Default for ControlSnapshot {
             capture: Capture {
                 phase: CapturePhase::Stopped,
                 level_dbfs: None,
+                output_level_dbfs: None,
                 message: None,
                 dropped_frames: 0,
                 underrun_frames: 0,

@@ -155,6 +155,7 @@ impl CaptureControl {
         Capture {
             phase,
             level_dbfs,
+            output_level_dbfs: None,
             message: message.map(str::to_owned),
             dropped_frames: count(shared.dropped.load(Ordering::Relaxed)),
             underrun_frames: count(shared.underrun.load(Ordering::Relaxed)),

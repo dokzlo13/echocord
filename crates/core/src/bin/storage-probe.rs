@@ -7,7 +7,7 @@ mod storage;
 #[cfg(windows)]
 fn run() -> Result<(), model::AppError> {
     use model::{AppError, ErrorCode};
-    use std::{fs, path::PathBuf};
+    use std::{fs, os::windows::fs::OpenOptionsExt, path::PathBuf};
 
     fn check(condition: bool, message: &'static str) -> Result<(), AppError> {
         if condition {
@@ -85,6 +85,32 @@ fn run() -> Result<(), model::AppError> {
         "The replacement contains plaintext.",
     )?;
 
+    let maximum = "a".repeat(4096);
+    storage::save_token(&path, &maximum)?;
+    check(
+        storage::load_token(&path)? == maximum,
+        "The maximum supported token did not roundtrip.",
+    )?;
+    storage::save_token(&path, second)?;
+    let replacement = fs::read(&path).map_err(io_error)?;
+
+    // Deny delete sharing on the existing file to exercise a replacement
+    // failure after the encrypted sibling file has been written and flushed.
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+        .open(&path)
+        .map_err(io_error)?;
+    check(
+        storage::save_token(&path, first).is_err(),
+        "A locked destination was replaced.",
+    )?;
+    drop(lock);
+    check(
+        fs::read(&path).map_err(io_error)? == replacement,
+        "A failed replacement changed the committed token.",
+    )?;
+
     for invalid in ["", "synthetic invalid", "synthetic\n", &"a".repeat(4097)] {
         check(
             storage::save_token(&path, invalid).is_err(),
@@ -104,6 +130,15 @@ fn run() -> Result<(), model::AppError> {
     let mut unknown = original.clone();
     unknown[b"ECHOCORD-TOKEN\0".len()] = 2;
     fs::write(&bad, unknown).map_err(io_error)?;
+    rejected(&bad)?;
+    let mut invalid_length = original.clone();
+    let length_start = b"ECHOCORD-TOKEN\0".len() + 1;
+    invalid_length[length_start..length_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    fs::write(&bad, invalid_length).map_err(io_error)?;
+    rejected(&bad)?;
+    let mut trailing = original.clone();
+    trailing.push(0);
+    fs::write(&bad, trailing).map_err(io_error)?;
     rejected(&bad)?;
     let mut corrupt = original.clone();
     let last = corrupt.len() - 1;

@@ -375,6 +375,50 @@ mod tests {
         assert!(default_data_dir().unwrap() == expected.data_local_dir());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn rejects_dpapi_blob_from_another_entropy_domain() {
+        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::Cryptography::{
+                CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+            },
+        };
+        let token = b"synthetic-unrelated-token";
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: token.len() as u32,
+            pbData: token.as_ptr().cast_mut(),
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: null_mut(),
+        };
+        // SAFETY: valid synthetic input and output live through the call. The
+        // native allocation is copied and freed before the assertion below.
+        let succeeded = unsafe {
+            CryptProtectData(
+                &input,
+                null(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        assert!(succeeded != 0 && !output.pbData.is_null());
+        let encrypted = unsafe {
+            let bytes = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+            LocalFree(output.pbData.cast());
+            bytes
+        };
+        let Err(failure) = windows::unprotect(&encrypted) else {
+            panic!("a DPAPI blob from another entropy domain was accepted");
+        };
+        assert!(!format!("{failure:?}").contains("synthetic"));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn unsupported_operations_do_not_access_files() {

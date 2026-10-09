@@ -21,8 +21,8 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 | EC-015 | Repository and handoff cleanup | done | EC-005 | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Protected storage and setup API | done | EC-005 | coordinator + storage worker / a1 | main | [task](EC-016.md) |
 | EC-017 | Process-capture and local-mute experiment | ready | EC-014 | unassigned; next iteration | — | [task](EC-017.md) |
-| EC-018 | Native post-gain meter | active | EC-012 | audio worker / a1 | agent/EC-018-a1 | [task](EC-018.md) |
-| EC-019 | Isolated telemetry presentation | active | EC-012 | adapter worker / a1 | agent/EC-019-a1 | [task](EC-019.md) |
+| EC-018 | Native post-gain meter | review | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
+| EC-019 | Isolated telemetry presentation | review | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

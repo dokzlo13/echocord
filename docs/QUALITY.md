@@ -6,6 +6,10 @@ Verify WSL builds a Windows executable, then verify the actual native audio depe
 
 Documentation validation is separate from future application gates. Do not add green CI placeholders that skip missing manifests. Scaffold real checks with the code they validate.
 
+## Current executable gates
+
+`make check` runs audio-probe formatting, Windows Clippy, dependency-cache regression checks, desktop-probe formatting/Clippy/build, and the UI draft's lint/type/build/browser checks. `make smoke-windows` explicitly runs native audio and desktop probes. These gates cover the current probes and mocked UI only; they do not validate a live streaming app. See DEVELOPMENT.md for setup commands.
+
 ## Planned automated gates
 
 - Rust formatting and Clippy with warnings denied on supported targets; meaningful unit tests for buffer accounting, conversion, and recovery transitions.

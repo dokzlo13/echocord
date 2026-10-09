@@ -15,4 +15,6 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 - [Agent coordination](docs/WORKFLOW.md)
 - [Quality gates](docs/QUALITY.md)
 
-Status: discovery and environment validation. No working streaming application yet.
+Use `make help` for build, check, native-probe, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+Status: Windows audio/Tauri dependency probes pass; a mocked UI draft is under advisory review. No working streaming application yet.

@@ -10,27 +10,39 @@ For the Tauri runtime, verify existing WebView2 before installing anything; copy
 
 The initial build recipe uses Rust 1.99.0 with rustfmt, Clippy, and x86_64-pc-windows-msvc support; cargo-xwin 0.23.1, CMake 4.4.4, and Ninja 1.13.2 via uv; LLVM 18; and Node 24.11.1. These are project tool versions, not a machine inventory or claim to be latest. Keep host-specific inventory in ignored `.trash/`.
 
-Reproduce WSL tooling:
+Install Git, GNU Make, Python 3.12+, `patch`, rustup, uv, and the project's Node version first. Then install the pinned user-level WSL tools:
 
 ```sh
-rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy --target x86_64-pc-windows-msvc
-uv tool install cargo-xwin==0.23.1
-uv tool install cmake==4.4.4
-uv tool install ninja==1.13.2
+make setup-wsl
 ```
 
 Install Clang, LLD, and LLVM tools from suitable distro packages matching the validated LLVM version. CMake/Ninja matter for native dependencies even though the generic Rust probe does not use them.
 
-## Build proof
+## Development commands
+
+The root Makefile is the command entry point. Run `make` or `make help` to list targets. Missing prerequisites fail explicitly. Install UI dependencies and the browser before aggregate checks:
 
 ```sh
-bash scripts/probe-windows.sh
-bash scripts/probe-windows.sh --run
+make ui-install
+make ui-browser-install
+make build
+make check
 ```
 
-The script uses a project-local clang-cl alias when Ubuntu only exposes clang, keeps downloaded SDK/CRT files in ignored `.cache/xwin`, and produces an executable under the probe's ignored target directory. The SDK remains in WSL. The run option invokes the Windows executable through WSL interoperability.
+| Command | Purpose |
+| --- | --- |
+| `make probe-audio` / `make probe-desktop` | Cross-build isolated Windows audio or Tauri probe |
+| `make check-audio` / `make check-desktop` | Rust formatting and Windows Clippy; audio also checks dependency-cache integrity |
+| `make run-audio` | Run offline codec/crypto/device enumeration; no recording or Discord connection |
+| `make run-desktop` | Run the self-closing Windows shell and verify native/frontend telemetry |
+| `make smoke-windows` | Explicitly run both native probes |
+| `make ui-dev` | Preview mocked controls on localhost |
+| `make ui-build` | Typecheck and build the mock UI |
+| `make ui-check` / `make ui-test` | Full UI gate or browser tests alone |
 
-The initial probe only verifies Rust/MSVC cross-linking and launch. EC-002 must still establish CPAL/Songbird/Opus/DAVE/Tauri compatibility and actual runtime DLL needs. Avoid treating Wine or a browser mock as validation of Windows audio.
+`make check` does not open a Windows window or connect to Discord. Native runtime checks are separate. Browser tests use fixtures, not credentials or real audio. Build scripts keep SDK/cache files and artifacts in WSL; run commands use host interop. The original toolchain-only probe remains available with `bash scripts/probe-windows.sh --run`.
+
+The audio probe covers CPAL enumeration, native Opus encode/decode, Songbird PCM preparation, and offline DAVE key generation. The desktop probe covers embedded frontend execution, IPC, and native window lifecycle. They are separate executables; combined product integration, capture, live Discord, latency, and clean-machine packaging remain later checks. See each probe README for features, results, and limitations.
 
 cargo-xwin documents cross-compilation and WSL execution, including CMake/Ninja support. Tauri documents a cross-compilation route but cautions that it is less tested than native builds. This project investigates that route to keep development in WSL. Start with an executable; NSIS packaging can follow, and MSI packaging is not a prerequisite.
 

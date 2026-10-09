@@ -15,6 +15,9 @@ export const nativeTransport: Transport = {
     );
   },
   getSnapshot: () => invoke<ControlSnapshot>("get_snapshot"),
+  getVisible: () => invoke<boolean>("get_visibility"),
+  listenVisibility: (receive) =>
+    listen<boolean>("echocord://visibility", (event) => receive(event.payload)),
   dispatch: (command) => invoke<void>("dispatch", { command }),
   configureBot: (token) => invoke<void>("configure_bot", { token }),
 };

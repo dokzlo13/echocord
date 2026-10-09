@@ -1,5 +1,6 @@
 import type {
   AppError,
+  Capture,
   ControlCommand,
   ControlSnapshot,
   Selection,
@@ -12,6 +13,17 @@ export interface Transport {
   getSnapshot: () => Promise<ControlSnapshot>;
   dispatch: (command: ControlCommand) => Promise<void>;
   configureBot: (token: string) => Promise<void>;
+  getVisible?: () => Promise<boolean>;
+  listenVisibility?: (
+    receive: (visible: boolean) => void,
+  ) => Promise<() => void>;
+}
+
+export interface TelemetrySnapshot {
+  sessionId: number;
+  sourceId: string | null;
+  capture: Capture | null;
+  visible: boolean;
 }
 
 export type RouteOperation = "stopping" | "selecting" | "starting";
@@ -58,6 +70,52 @@ export function appError(error: unknown): AppError {
   };
 }
 
+/** IPC snapshots are immutable JSON values; catalog clones are not changes. */
+function sameValue(previous: unknown, next: unknown): boolean {
+  if (Object.is(previous, next)) return true;
+  if (
+    typeof previous !== "object" ||
+    previous === null ||
+    typeof next !== "object" ||
+    next === null
+  )
+    return false;
+  if (Array.isArray(previous) || Array.isArray(next))
+    return (
+      Array.isArray(previous) &&
+      Array.isArray(next) &&
+      previous.length === next.length &&
+      previous.every((value, index) => sameValue(value, next[index]))
+    );
+  const before = previous as Record<string, unknown>;
+  const after = next as Record<string, unknown>;
+  const keys = Object.keys(before);
+  return (
+    keys.length === Object.keys(after).length &&
+    keys.every(
+      (key) => Object.hasOwn(after, key) && sameValue(before[key], after[key]),
+    )
+  );
+}
+
+function sameControls(
+  previous: ControlSnapshot | null,
+  next: ControlSnapshot,
+): boolean {
+  if (!previous) return false;
+  const {
+    revision: _beforeRevision,
+    capture: before,
+    ...beforeControls
+  } = previous;
+  const { revision: _nextRevision, capture: after, ...afterControls } = next;
+  return (
+    before.phase === after.phase &&
+    before.message === after.message &&
+    sameValue(beforeControls, afterControls)
+  );
+}
+
 export class ControlAdapter {
   private state: ViewState = {
     phase: "loading",
@@ -71,7 +129,16 @@ export class ControlAdapter {
     routeOperation: null,
   };
   private readonly listeners = new Set<() => void>();
+  private readonly telemetryListeners = new Set<() => void>();
+  private latestSnapshot: ControlSnapshot | null = null;
+  private telemetry: TelemetrySnapshot = {
+    sessionId: 0,
+    sourceId: null,
+    capture: null,
+    visible: true,
+  };
   private unlisten: (() => void) | undefined;
+  private unlistenVisibility: (() => void) | undefined;
   private generation = 0;
   private active = false;
   private volumeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -89,6 +156,11 @@ export class ControlAdapter {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
+  getTelemetrySnapshot = (): TelemetrySnapshot => this.telemetry;
+  subscribeTelemetry = (listener: () => void): (() => void) => {
+    this.telemetryListeners.add(listener);
+    return () => this.telemetryListeners.delete(listener);
+  };
 
   private publish(patch: Partial<ViewState>) {
     this.state = { ...this.state, ...patch };
@@ -98,17 +170,83 @@ export class ControlAdapter {
   private receive(snapshot: ControlSnapshot, generation: number) {
     if (!this.active || generation !== this.generation) return;
     if (
-      this.state.snapshot &&
-      snapshot.revision <= this.state.snapshot.revision
+      this.latestSnapshot &&
+      snapshot.revision <= this.latestSnapshot.revision
     )
       return;
-    const confirmed = this.state.volumeDraft === snapshot.output.volumePercent;
-    this.publish({
-      snapshot,
-      phase: "ready",
-      error: null,
-      volumeDraft: confirmed ? null : this.state.volumeDraft,
-    });
+    // Ordering and command confirmation always use the latest full observation.
+    this.latestSnapshot = snapshot;
+    const telemetryChanged =
+      this.telemetry.sessionId !== snapshot.sessionId ||
+      this.telemetry.sourceId !== snapshot.selection.sourceId ||
+      !sameValue(this.telemetry.capture, snapshot.capture);
+    if (telemetryChanged)
+      this.telemetry = {
+        sessionId: snapshot.sessionId,
+        sourceId: snapshot.selection.sourceId,
+        capture: snapshot.capture,
+        visible: this.telemetry.visible,
+      };
+    const confirmed =
+      this.state.volumeDraft !== null &&
+      this.state.volumeDraft === snapshot.output.volumePercent;
+    if (
+      !sameControls(this.state.snapshot, snapshot) ||
+      this.state.phase !== "ready" ||
+      this.state.error !== null ||
+      confirmed
+    )
+      this.publish({
+        snapshot,
+        phase: "ready",
+        error: null,
+        volumeDraft: confirmed ? null : this.state.volumeDraft,
+      });
+    // Keep one fresh observation while hidden; visibility return notifies once.
+    if (
+      this.active &&
+      generation === this.generation &&
+      telemetryChanged &&
+      this.telemetry.visible
+    )
+      this.notifyTelemetry();
+  }
+
+  private notifyTelemetry() {
+    for (const listener of this.telemetryListeners) listener();
+  }
+
+  private setVisible(visible: boolean) {
+    if (this.telemetry.visible === visible) return;
+    this.telemetry = { ...this.telemetry, visible };
+    this.notifyTelemetry();
+  }
+
+  private async startVisibility(generation: number): Promise<void> {
+    const current = () => this.active && generation === this.generation;
+    let receivedEvent = false;
+    try {
+      if (this.transport.listenVisibility) {
+        const unlisten = await this.transport.listenVisibility((visible) => {
+          if (!current()) return;
+          receivedEvent = true;
+          this.setVisible(visible);
+        });
+        if (!current()) {
+          unlisten();
+          return;
+        }
+        this.unlistenVisibility = unlisten;
+      }
+      if (!current()) return;
+      if (this.transport.getVisible) {
+        const visible = await this.transport.getVisible();
+        // A boolean read has no revision; any subscribed event outranks it.
+        if (current() && !receivedEvent) this.setVisible(visible);
+      }
+    } catch {
+      // Visibility failures cannot block commands or override a known hide.
+    }
   }
 
   /** Listener-first avoids losing a transition between cold start and subscription. */
@@ -116,6 +254,8 @@ export class ControlAdapter {
     this.dispose();
     this.active = true;
     const generation = this.generation;
+    // Native presentation waits for visibility; fixtures default to visible.
+    this.setVisible(!this.transport.getVisible);
     this.publish({
       phase: "loading",
       error: null,
@@ -126,6 +266,7 @@ export class ControlAdapter {
       configurationError: null,
       routeOperation: null,
     });
+    const visibility = this.startVisibility(generation);
     try {
       const unlisten = await this.transport.listen((snapshot) =>
         this.receive(snapshot, generation),
@@ -148,6 +289,7 @@ export class ControlAdapter {
       if (this.active && generation === this.generation)
         this.publish({ phase: "error", error: appError(error) });
     }
+    await visibility;
   };
 
   dispose = () => {
@@ -155,6 +297,9 @@ export class ControlAdapter {
     this.generation++;
     this.unlisten?.();
     this.unlisten = undefined;
+    this.unlistenVisibility?.();
+    this.unlistenVisibility = undefined;
+    this.setVisible(false);
     clearTimeout(this.volumeTimer);
     this.volumeTimer = undefined;
     this.volumeQueued = null;
@@ -167,7 +312,7 @@ export class ControlAdapter {
   dismissConfigurationError = () => this.publish({ configurationError: null });
 
   configureBot = async (token: string): Promise<boolean> => {
-    const snapshot = this.state.snapshot;
+    const snapshot = this.latestSnapshot;
     if (
       !this.active ||
       this.state.phase !== "ready" ||
@@ -217,7 +362,7 @@ export class ControlAdapter {
       const inspect = () => {
         if (!this.active || epoch !== this.routeEpoch)
           return finish({ code: "busy", message: "Route change cancelled." });
-        const snapshot = this.state.snapshot;
+        const snapshot = this.latestSnapshot;
         if (!snapshot) return;
         if (snapshot.connection.phase === "cleanup-incomplete")
           return finish({
@@ -250,7 +395,7 @@ export class ControlAdapter {
     selection: Selection,
     connectAfter = false,
   ): Promise<boolean> => {
-    const initial = this.state.snapshot;
+    const initial = this.latestSnapshot;
     if (
       !this.active ||
       this.state.phase !== "ready" ||
@@ -298,7 +443,7 @@ export class ControlAdapter {
       }
       if (!active()) return false;
       this.publish({ routeOperation: "selecting" });
-      if (this.state.snapshot?.selection.sourceId !== selection.sourceId) {
+      if (this.latestSnapshot?.selection.sourceId !== selection.sourceId) {
         if (
           !(await this.sendCommand({
             type: "select-source",
@@ -312,7 +457,7 @@ export class ControlAdapter {
         );
       }
       if (!active()) return false;
-      const current = this.state.snapshot?.selection;
+      const current = this.latestSnapshot?.selection;
       if (
         current?.serverId !== selection.serverId ||
         current.channelId !== selection.channelId

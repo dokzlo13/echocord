@@ -21,7 +21,7 @@ if ! command -v clang-cl >/dev/null; then
   export PATH="$repo_root/.tools/bin:$PATH"
 fi
 export XWIN_CACHE_DIR="$repo_root/.cache/xwin"
-export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-Ctarget-feature=+crt-static"
+export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-Ctarget-feature=-crt-static"
 python3 scripts/prepare-opus.py
 cargo run --locked -p echocord-core --bin export-bindings -- --check ui/src/generated.ts
 npm --prefix ui run build

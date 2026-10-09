@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 use tauri::{
-    Emitter, Manager, RunEvent, State, WindowEvent,
+    Emitter, Listener, Manager, RunEvent, State, WindowEvent,
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -19,6 +19,8 @@ struct ShellState {
     controller: Controller,
     exiting: AtomicBool,
     snapshot_requested: AtomicBool,
+    visibility_requested: AtomicBool,
+    presentation_visible: AtomicBool,
     expect_authenticated: bool,
 }
 
@@ -26,6 +28,28 @@ struct ShellState {
 fn get_snapshot(state: State<'_, ShellState>) -> ControlSnapshot {
     state.snapshot_requested.store(true, Ordering::SeqCst);
     state.controller.snapshot()
+}
+
+fn window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)
+    })
+}
+
+fn publish_visibility(app: &tauri::AppHandle) {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return;
+    };
+    let visible = window_visible(app);
+    if state.presentation_visible.swap(visible, Ordering::SeqCst) != visible {
+        let _ = app.emit("echocord://visibility", visible);
+    }
+}
+
+#[tauri::command]
+fn get_visibility(app: tauri::AppHandle, state: State<'_, ShellState>) -> bool {
+    state.visibility_requested.store(true, Ordering::SeqCst);
+    window_visible(&app)
 }
 
 #[tauri::command]
@@ -43,6 +67,7 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        publish_visibility(app);
     }
 }
 
@@ -149,10 +174,13 @@ fn main() {
             controller,
             exiting: AtomicBool::new(false),
             snapshot_requested: AtomicBool::new(false),
+            visibility_requested: AtomicBool::new(false),
+            presentation_visible: AtomicBool::new(true),
             expect_authenticated,
         })
         .invoke_handler(tauri::generate_handler![
             get_snapshot,
+            get_visibility,
             dispatch,
             configure_bot
         ])
@@ -160,6 +188,11 @@ fn main() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                publish_visibility(window.app_handle());
+            } else if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
+                // Losing focus alone does not hide a visible window. Native
+                // minimize/restore changes are observed through window state.
+                publish_visibility(window.app_handle());
             }
         })
         .setup(move |app| {
@@ -261,6 +294,10 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
         .state::<ShellState>()
         .snapshot_requested
         .load(Ordering::SeqCst)
+        || !app
+            .state::<ShellState>()
+            .visibility_requested
+            .load(Ordering::SeqCst)
     {
         return false;
     }
@@ -284,14 +321,56 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     if app.tray_by_id("echocord").is_none() || window.is_visible().ok() != Some(true) {
         return false;
     }
-    if window.close().is_err() {
-        return false;
+    let hidden_event = std::sync::Arc::new(AtomicBool::new(false));
+    let visible_event = std::sync::Arc::new(AtomicBool::new(false));
+    let hidden = hidden_event.clone();
+    let visible = visible_event.clone();
+    let listener = app.listen("echocord://visibility", move |event| {
+        if event.payload() == "false" {
+            hidden.store(true, Ordering::SeqCst);
+        } else if event.payload() == "true" {
+            visible.store(true, Ordering::SeqCst);
+        }
+    });
+    let result = async {
+        if window.minimize().is_err() || !wait_visibility(app, false).await {
+            return false;
+        }
+        if !hidden_event.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        show_window(app);
+        if !wait_visibility(app, true).await || !visible_event.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        if window.close().is_err() || !wait_visibility(app, false).await {
+            return false;
+        }
+        if window.is_visible().ok() != Some(false) || !hidden_event.load(Ordering::SeqCst) {
+            return false;
+        }
+        show_window(app);
+        wait_visibility(app, true).await && visible_event.load(Ordering::SeqCst)
     }
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    if window.is_visible().ok() != Some(false) {
-        return false;
+    .await;
+    app.unlisten(listener);
+    result
+}
+
+async fn wait_visibility(app: &tauri::AppHandle, expected: bool) -> bool {
+    for _ in 0..40 {
+        if window_visible(app) == expected
+            && app
+                .state::<ShellState>()
+                .presentation_visible
+                .load(Ordering::SeqCst)
+                == expected
+        {
+            // Event handlers run synchronously with emit; let presentation settle.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    show_window(app);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    window.is_visible().ok() == Some(true)
+    false
 }

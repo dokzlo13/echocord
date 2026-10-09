@@ -66,8 +66,10 @@ impl EngineProcess {
     /// Launch an absolute executable path directly, with Windows CRT/Rust argv
     /// quoting. Arguments must contain no NUL; credentials must not be arguments.
     /// The child inherits the environment and working directory, only the three
-    /// redirected standard handles, and no console. Successful creation does
-    /// not imply successful engine initialization.
+    /// redirected standard handles, and no console. `STARTF_USESTDHANDLES`
+    /// supplies these pipes even to a Windows GUI subsystem engine (exercised
+    /// by process-probe). Successful creation does not imply successful engine
+    /// initialization.
     pub fn spawn(executable: &Path, args: &[OsString]) -> io::Result<Self> {
         let (application, mut command_line) = command_line(executable, args)?;
         let job = create_job()?;

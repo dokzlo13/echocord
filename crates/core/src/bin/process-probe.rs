@@ -672,11 +672,31 @@ mod probe {
     }
 
     fn repeated_launch(exe: &Path, evidence: &Path) -> io::Result<()> {
+        let mut counts = File::create(evidence.join("handle-counts.log"))?;
+        writeln!(counts, "before-failed-create-warmup {}", handles()?)?;
+        // Windows may lazily initialize process-creation failure handling. Use
+        // the platform's plain process launcher first to distinguish that cost
+        // from owned-job/pipe leaks; then warm both paths of this abstraction.
+        check(
+            Command::new(evidence.join("platform-missing.exe"))
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .is_err(),
+            "platform missing executable launched",
+        )?;
+        writeln!(counts, "after-platform-failed-create {}", handles()?)?;
+        check(
+            EngineProcess::spawn(&evidence.join("owned-missing.exe"), &[]).is_err(),
+            "owned missing executable launched",
+        )?;
+        writeln!(counts, "after-owned-failed-create {}", handles()?)?;
         // Warm up std/thread/process bookkeeping before comparing handles.
         let mut child = spawn(exe, "exit", &[OsString::from("0")])?;
         exited(&mut child, 0)?;
         drop(child);
-        let mut counts = File::create(evidence.join("handle-counts.log"))?;
         let before = handles()?;
         writeln!(counts, "baseline {before}")?;
         for _ in 0..32 {
@@ -685,9 +705,10 @@ mod probe {
             drop(child);
             writeln!(counts, "success {}", handles()?)?;
         }
-        for _ in 0..32 {
+        for attempt in 0..32 {
             check(
-                EngineProcess::spawn(&evidence.join("missing.exe"), &[]).is_err(),
+                EngineProcess::spawn(&evidence.join(format!("missing-{attempt}.exe")), &[])
+                    .is_err(),
                 "missing executable launched",
             )?;
             writeln!(counts, "failure {}", handles()?)?;

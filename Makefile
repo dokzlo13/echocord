@@ -3,7 +3,8 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
 .PHONY: help setup-wsl build check check-audio check-desktop probe-audio probe-desktop \
-        run-audio run-desktop smoke-windows ui-install ui-browser-install ui-dev ui-build ui-check ui-test
+        run-audio run-desktop smoke-windows ui-install ui-browser-install ui-dev ui-build ui-check ui-test \
+        bindings bindings-check core-check app-install app-build app-run app-smoke app-check
 .NOTPARALLEL: build check smoke-windows
 
 help: ## Show supported development commands
@@ -57,3 +58,31 @@ ui-check: ## Run UI lint, typecheck, build, and behavior tests
 
 ui-test: ## Run the UI prototype's browser tests
 	npm --prefix prototypes/control-ui test
+
+bindings: ## Regenerate TypeScript control types from Rust
+	cargo run --locked -p echocord-core --bin export-bindings -- ui/src/generated.ts
+
+bindings-check: ## Fail if generated frontend types differ from Rust
+	cargo run --locked -p echocord-core --bin export-bindings -- --check ui/src/generated.ts
+
+core-check: ## Run portable core formatting, Clippy, and tests
+	cargo fmt --all --check
+	cargo clippy --locked -p echocord-core --all-targets -- -D warnings
+	cargo test --locked -p echocord-core
+	$(MAKE) bindings-check
+
+app-install: ## Install locked production frontend dependencies in WSL
+	npm --prefix ui ci --no-audit --no-fund
+
+app-build: ## Build the real Windows application from WSL
+	bash scripts/build-app.sh
+
+app-run: ## Run the built app with private local configuration; starts disconnected
+	bash scripts/run-app.sh
+
+app-smoke: ## Run native UI/IPC/tray lifecycle checks, without connecting voice
+	bash scripts/run-app.sh --smoke
+
+app-check: core-check ## Check production UI and Windows Rust integration
+	npm --prefix ui run check
+	bash scripts/build-app.sh --check

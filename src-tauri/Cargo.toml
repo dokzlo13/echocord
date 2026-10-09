@@ -1,0 +1,17 @@
+[package]
+name = "echocord"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+echocord-core = { path = "../crates/core" }
+tauri = { version = "=2.12.2", default-features = false, features = ["wry", "compression", "common-controls-v6", "tray-icon", "image-ico"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", default-features = false }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

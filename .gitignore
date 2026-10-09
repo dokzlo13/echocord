@@ -3,11 +3,11 @@
 /node_modules/
 **/node_modules/
 /dist/
-/.worktrees/
-/.tools/
-/.cache/
-/.trash/
-/artifacts/
+/.worktrees
+/.tools
+/.cache
+/.trash
+/artifacts
 .env
 .env.*
 !.env.example

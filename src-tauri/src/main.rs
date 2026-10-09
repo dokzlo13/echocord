@@ -290,10 +290,9 @@ fn main() {
 async fn native_smoke(app: &tauri::AppHandle) -> bool {
     // Explicit test mode: no Connect command, audio capture, or voice transmission.
     for _ in 0..100 {
-        if app
-            .state::<ShellState>()
-            .snapshot_requested
-            .load(Ordering::SeqCst)
+        let state = app.state::<ShellState>();
+        if state.snapshot_requested.load(Ordering::SeqCst)
+            && state.visibility_requested.load(Ordering::SeqCst)
         {
             break;
         }

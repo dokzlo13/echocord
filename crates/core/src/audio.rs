@@ -287,6 +287,11 @@ impl Reader {
         let mut pop_budget = QUEUE_FRAMES;
         while written < limit {
             if !matches!(shared.status.load(Ordering::Acquire), RUNNING | OPENING) {
+                if written == 0 {
+                    // Failure can race the clock check above. Re-enter the
+                    // terminal path so only stop, never failure, returns EOF.
+                    return self.read(shared, buf);
+                }
                 break;
             }
             if self.pending_pos == FRAME_BYTES {
@@ -327,7 +332,7 @@ impl Reader {
             let gain = (output & 0xff) as f32 / 100.0;
             return [frame.samples[0] * gain, frame.samples[1] * gain];
         }
-        // Intentional mute/zero gain is not an underrun. Muted reads still
+        // Intentional mute is not an underrun. Muted reads still
         // drain old queued frames instead of leaving audio to replay later.
         if shared.output.load(Ordering::Acquire) & MUTED == 0 {
             shared.underrun.fetch_add(1, Ordering::Relaxed);
@@ -707,10 +712,20 @@ mod tests {
         waits: AtomicU64,
         // A deterministic cancellation injected exactly when a reader waits.
         cancel_on_wait: Mutex<Option<Weak<Shared>>>,
+        fail_on_now: Mutex<Option<Weak<Shared>>>,
     }
 
     impl Clock for ManualClock {
         fn now(&self) -> u64 {
+            if let Some(shared) = self
+                .fail_on_now
+                .lock()
+                .unwrap()
+                .take()
+                .and_then(|w| w.upgrade())
+            {
+                shared.fail(MISSING);
+            }
             self.ns.load(Ordering::Relaxed)
         }
 
@@ -1094,6 +1109,17 @@ mod tests {
             assert_eq!(session.control.snapshot().queued_frames, 0);
             assert_eq!(session.control.snapshot().level_dbfs, None);
         }
+    }
+
+    #[test]
+    fn failure_racing_read_budget_reports_error_instead_of_eof() {
+        let (_, mut session, clock) = setup();
+        *clock.fail_on_now.lock().unwrap() = Some(Arc::downgrade(&session.control.owner.shared));
+        assert_eq!(
+            session.input.read(&mut [0; 1]).unwrap_err().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Missing);
     }
 
     #[test]

@@ -16,6 +16,7 @@ import type { ControlSnapshot } from "./generated";
 import {
   captureLabel,
   connectionLabel,
+  connectStageLabels,
   locksRoute,
   outputLabel,
   readiness,
@@ -469,6 +470,15 @@ export function App({
             {actionLabel}
           </Button>
         </div>
+        {snapshot?.connection.phase === "connecting" && (
+          <p
+            className={styles.readiness}
+            data-testid="connection-progress"
+            role="status"
+          >
+            {connectStageLabels[snapshot.connection.stage]}
+          </p>
+        )}
         {reason && !canStop && (
           <p className={styles.readiness} data-testid="readiness">
             {reason}

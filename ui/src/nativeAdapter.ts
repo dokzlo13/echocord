@@ -16,6 +16,7 @@ export const nativeTransport: Transport = {
   },
   getSnapshot: () => invoke<ControlSnapshot>("get_snapshot"),
   dispatch: (command) => invoke<void>("dispatch", { command }),
+  configureBot: (token) => invoke<void>("configure_bot", { token }),
 };
 
 export class NativeAdapter extends ControlAdapter {

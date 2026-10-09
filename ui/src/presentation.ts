@@ -1,4 +1,12 @@
-import type { ControlSnapshot } from "./generated";
+import type { ConnectStage, ControlSnapshot } from "./generated";
+
+export const connectStageLabels: Record<ConnectStage, string> = {
+  checking: "Checking bot configuration…",
+  preflight: "Checking the selected route…",
+  gateway: "Connecting to Discord…",
+  join: "Joining the voice channel…",
+  capture: "Opening the recording device…",
+};
 
 export function locksRoute(snapshot: ControlSnapshot): boolean {
   return [

@@ -49,15 +49,34 @@ export function fixtureSnapshot(
       {
         id: "1234567890123456789",
         name: "The Sunday Table",
+        iconUrl: null,
         channels: [
-          { id: "9876543210987654321", name: "Session room" },
-          { id: "9876543210987654322", name: "Lobby" },
+          {
+            id: "9876543210987654321",
+            name: "Session room",
+            categoryName: "Game night",
+            position: 0,
+          },
+          {
+            id: "9876543210987654322",
+            name: "Lobby",
+            categoryName: "General",
+            position: 1,
+          },
         ],
       },
       {
         id: "1234567890123456790",
         name: "One-shot Club",
-        channels: [{ id: "9876543210987654323", name: "The tavern" }],
+        iconUrl: null,
+        channels: [
+          {
+            id: "9876543210987654323",
+            name: "The tavern",
+            categoryName: null,
+            position: 0,
+          },
+        ],
       },
     ],
     selection: {
@@ -149,8 +168,7 @@ export function fixtureSnapshot(
       snapshot.bot = {
         status: "invalid",
         name: null,
-        message:
-          "Bot configuration is invalid. Update it outside this window, then recheck.",
+        message: "Bot configuration is invalid. Check the token, then recheck.",
       };
       break;
     case "discovery-error":
@@ -160,7 +178,7 @@ export function fixtureSnapshot(
       };
       break;
     case "connecting":
-      snapshot.connection = { phase: "connecting" };
+      snapshot.connection = { phase: "connecting", stage: "gateway" };
       snapshot.capture.phase = "opening";
       break;
     case "muted":
@@ -256,6 +274,17 @@ export class FixtureTransport implements Transport {
     this.update(fixtureSnapshot(name));
   };
 
+  configureBot = async (token: string): Promise<void> => {
+    if (!token.trim() || token.length > 4096)
+      throw { code: "configuration", message: "Token could not be saved." };
+    // Do not retain the token or add it to command/snapshot evidence.
+    this.update({ bot: { status: "checking", name: null, message: null } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    this.update({
+      bot: { status: "ready", name: "Table Audio", message: null },
+    });
+  };
+
   dispatch = async (command: ControlCommand) => {
     this.commands.push(command);
     switch (command.type) {
@@ -294,7 +323,7 @@ export class FixtureTransport implements Transport {
         const sessionId = this.snapshot.sessionId + 1;
         this.update({
           sessionId,
-          connection: { phase: "connecting" },
+          connection: { phase: "connecting", stage: "gateway" },
           capture: {
             ...this.snapshot.capture,
             phase: "opening",

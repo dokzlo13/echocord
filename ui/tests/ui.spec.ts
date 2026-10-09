@@ -52,6 +52,9 @@ test("startup is stopped; connect, pre-output level, and stable mute remain inde
   await expect(page.getByTestId("input-level")).toHaveText("No level");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
   await expect(page.getByTestId("connection-status")).toHaveText("Connecting");
+  await expect(page.getByTestId("connection-progress")).toHaveText(
+    "Connecting to Discord…",
+  );
   await expect(page.getByTestId("capture-status")).toHaveText("Opening input");
   await page.clock.runFor(800);
   await expect(page.getByTestId("connection-status")).toHaveText("Connected");

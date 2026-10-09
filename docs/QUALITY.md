@@ -43,3 +43,11 @@ Run silence/resume, 44.1/48 kHz inputs, stereo channel checks, and supported-for
 Separate the stable five-hour run from deliberate network/device/permission failure tests. Verify retry exhaustion, preserving mute, explicit disconnect during recovery, device return, sleep/resume, tray reopening, and clean Quit. A silent input must not trigger reconnects.
 
 Resources are a practical guardrail: no unexplained sustained load, unbounded queues, or continuing memory growth after warm-up. Compare experience with Kenku informally if useful; there is no exact Kenku superiority gate.
+
+## Live visualization budget
+
+Meters are a telemetry surface, not whole-application state. Keep audio callbacks and PCM in Rust. Publish bounded scalar observations independently of audio sample rate; the current engine/control telemetry cadence is approximately 10 Hz. The redesigned UI must isolate those observations from top-level React controls, selection lists and settings renders. Start with lightweight DOM/CSS; add Canvas only when a concrete history/plot warrants it. No charting/WebGL dependency is required for simple bars.
+
+Target a capped 15–30 visual updates per second while visible, with bounded smoothing/history and no invented measurements. Suspend visualization work when hidden/minimized; verify the actual Tauri/WebView visibility path as well as browser behavior. Control state changes and mute/cancel must remain responsive. A focused render-count/telemetry-burst test should demonstrate that metering does not rerender the whole control surface; a visibility test should demonstrate paused visual work and a safe refresh on return.
+
+Diagnostic values must name their measurement boundary. Capture queue occupancy can be expressed in frames or milliseconds at the known sample rate; it is not local total latency or listener delay. A pre-Discord output meter must observe samples after gain/mute at the native reader boundary, or be explicitly identified as derived. Do not fabricate latency, spectrum, delivery health or sample-rate measurements for visual appeal. The complete pipeline and five-hour resource checks remain separate acceptance.

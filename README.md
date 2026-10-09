@@ -15,6 +15,6 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 - [Agent coordination](docs/WORKFLOW.md)
 - [Quality gates](docs/QUALITY.md)
 
-Use `make help` for build, check, native-probe, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Use `make help` for build, check, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Status: first local Windows build, ready for controlled user testing. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).
+Status: the first Windows alpha passed a real audio/Discord user test; usability and setup improvements are in progress. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).

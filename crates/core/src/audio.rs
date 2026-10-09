@@ -31,6 +31,7 @@ const QUEUE_FRAMES: usize = 1_920; // 40 ms of complete stereo frames.
 const MAX_AGE_NS: u64 = 40_000_000;
 const WAIT_SLICE_NS: u64 = 2_000_000;
 const METER_AGE_NS: u64 = 200_000_000;
+const SILENCE_DBFS: f32 = -96.0;
 const MUTED: u64 = 1 << 8;
 const GENERATION_SHIFT: u32 = 9;
 const STOPPED: u8 = 0;
@@ -104,8 +105,9 @@ impl CaptureControl {
         self.owner.shared.xruns.load(Ordering::Relaxed)
     }
 
-    /// Pre-volume peak input level, independent of mute. Counts are stereo frames
-    /// and saturate at u32::MAX. Occupancy is an approximate concurrent snapshot.
+    /// Input is the pre-volume callback peak, independent of mute. Output is a
+    /// peak held for at most 200 ms over completed post-gain reader frames.
+    /// Counts are stereo frames and saturate at u32::MAX. Occupancy is approximate.
     pub fn snapshot(&self) -> Capture {
         let shared = &self.owner.shared;
         let status = shared.status.load(Ordering::Acquire);
@@ -142,11 +144,7 @@ impl CaptureControl {
             } else {
                 0.0
             };
-            Some(if peak > 0.0 {
-                (20.0 * peak.log10()).max(-96.0)
-            } else {
-                -96.0
-            })
+            Some(peak_dbfs(peak))
         } else {
             None
         };
@@ -155,7 +153,11 @@ impl CaptureControl {
         Capture {
             phase,
             level_dbfs,
-            output_level_dbfs: None,
+            output_level_dbfs: if status == RUNNING {
+                shared.output_meter.level(shared)
+            } else {
+                None
+            },
             message: message.map(str::to_owned),
             dropped_frames: count(shared.dropped.load(Ordering::Relaxed)),
             underrun_frames: count(shared.underrun.load(Ordering::Relaxed)),
@@ -170,6 +172,61 @@ impl CaptureControl {
 
 fn count(value: u64) -> u32 {
     value.min(u64::from(u32::MAX)) as u32
+}
+
+fn peak_dbfs(peak: f32) -> f32 {
+    if peak > 0.0 {
+        (20.0 * peak.log10()).max(SILENCE_DBFS)
+    } else {
+        SILENCE_DBFS
+    }
+}
+
+/// One PCM-reader writer, with a bounded single-attempt snapshot. Sequentially
+/// consistent atomics make the sequence and payload one coherent observation;
+/// a concurrent publication returns null instead of spinning or mixing fields.
+/// Capture callbacks never access this meter.
+#[derive(Default)]
+struct OutputMeter {
+    sequence: AtomicU64,
+    peak_bits: AtomicU32,
+    peak_ns: AtomicU64,
+    output: AtomicU64,
+}
+
+impl OutputMeter {
+    fn publish(&self, peak: ReaderPeak) {
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+        self.peak_bits.store(peak.value.to_bits(), Ordering::SeqCst);
+        self.peak_ns.store(peak.ns, Ordering::SeqCst);
+        self.output.store(peak.output, Ordering::SeqCst);
+        self.sequence.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn level(&self, shared: &Shared) -> Option<f32> {
+        let output = shared.output.load(Ordering::Acquire);
+        if output & MUTED != 0 {
+            return Some(SILENCE_DBFS);
+        }
+        let sequence = self.sequence.load(Ordering::SeqCst);
+        if sequence == 0 || sequence & 1 != 0 {
+            return None;
+        }
+        let peak = f32::from_bits(self.peak_bits.load(Ordering::SeqCst));
+        let ns = self.peak_ns.load(Ordering::SeqCst);
+        let observed_output = self.output.load(Ordering::SeqCst);
+        if sequence != self.sequence.load(Ordering::SeqCst)
+            || output != observed_output
+            || output != shared.output.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        Some(if shared.clock.now().saturating_sub(ns) <= METER_AGE_NS {
+            peak_dbfs(peak)
+        } else {
+            SILENCE_DBFS
+        })
+    }
 }
 
 struct Owner {
@@ -189,6 +246,7 @@ struct Shared {
     output: AtomicU64,
     peak_bits: AtomicU32,
     last_callback_ns: AtomicU64,
+    output_meter: OutputMeter,
     pushed: AtomicU64,
     popped: AtomicU64,
     dropped: AtomicU64,
@@ -267,9 +325,18 @@ struct Reader {
     consumer: Consumer<Frame>,
     pending: [u8; FRAME_BYTES],
     pending_pos: usize,
+    pending_peak: ReaderPeak,
+    output_peak: Option<ReaderPeak>,
     frames_left: usize,
     next_quantum_ns: Option<u64>,
     position: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct ReaderPeak {
+    value: f32,
+    ns: u64,
+    output: u64,
 }
 
 impl Reader {
@@ -330,7 +397,12 @@ impl Reader {
                 if self.frames_left == 0 {
                     break;
                 }
-                let samples = self.next_frame(shared, &mut pop_budget);
+                let (samples, output) = self.next_frame(shared, &mut pop_budget);
+                self.pending_peak = ReaderPeak {
+                    value: samples[0].abs().max(samples[1].abs()),
+                    ns: shared.clock.now(),
+                    output,
+                };
                 self.pending[..4].copy_from_slice(&samples[0].to_le_bytes());
                 self.pending[4..].copy_from_slice(&samples[1].to_le_bytes());
                 self.pending_pos = 0;
@@ -341,12 +413,27 @@ impl Reader {
                 .copy_from_slice(&self.pending[self.pending_pos..self.pending_pos + n]);
             self.pending_pos += n;
             written += n;
+            if self.pending_pos == FRAME_BYTES {
+                let peak = self.pending_peak;
+                if peak.output == shared.output.load(Ordering::Acquire)
+                    && self.output_peak.is_none_or(|held| {
+                        held.output != peak.output
+                            || peak.ns.saturating_sub(held.ns) > METER_AGE_NS
+                            || peak.value >= held.value
+                    })
+                {
+                    self.output_peak = Some(peak);
+                }
+            }
+        }
+        if let Some(peak) = self.output_peak {
+            shared.output_meter.publish(peak);
         }
         self.position = self.position.saturating_add(written as u64);
         Ok(written)
     }
 
-    fn next_frame(&mut self, shared: &Shared, budget: &mut usize) -> [f32; 2] {
+    fn next_frame(&mut self, shared: &Shared, budget: &mut usize) -> ([f32; 2], u64) {
         while *budget > 0 {
             let Ok(frame) = self.consumer.pop() else {
                 break;
@@ -362,14 +449,15 @@ impl Reader {
                 continue;
             }
             let gain = (output & 0xff) as f32 / 100.0;
-            return [frame.samples[0] * gain, frame.samples[1] * gain];
+            return ([frame.samples[0] * gain, frame.samples[1] * gain], output);
         }
         // Intentional mute is not an underrun. Muted reads still
         // drain old queued frames instead of leaving audio to replay later.
-        if shared.output.load(Ordering::Acquire) & MUTED == 0 {
+        let output = shared.output.load(Ordering::Acquire);
+        if output & MUTED == 0 {
             shared.underrun.fetch_add(1, Ordering::Relaxed);
         }
-        [0.0; 2]
+        ([0.0; 2], output)
     }
 
     fn discard_queue(&mut self, shared: &Shared) {
@@ -495,6 +583,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
         output: AtomicU64::new(100),
         peak_bits: AtomicU32::new(u32::MAX),
         last_callback_ns: AtomicU64::new(0),
+        output_meter: OutputMeter::default(),
         pushed: AtomicU64::new(0),
         popped: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
@@ -519,6 +608,8 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
                     consumer,
                     pending: [0; FRAME_BYTES],
                     pending_pos: FRAME_BYTES,
+                    pending_peak: ReaderPeak::default(),
+                    output_peak: None,
                     frames_left: 0,
                     next_quantum_ns: None,
                     position: 0,
@@ -1027,6 +1118,10 @@ mod tests {
         assert_eq!(frames(&mut session.input, 2), vec![[0.25, -0.125]; 2]);
         assert_eq!(session.control.snapshot().dropped_frames, 700);
         assert_eq!(session.control.snapshot().queued_frames, 0);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.25))
+        );
     }
 
     #[test]
@@ -1080,6 +1175,10 @@ mod tests {
         feed(&mut writer, 960, 0.5, -0.25);
         session.control.set_output(25, true);
         feed(&mut writer, 960, 0.75, -0.5);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
         assert_eq!(session.control.snapshot().queued_frames, 960);
         assert!(
             (session.control.snapshot().level_dbfs.unwrap() - 20.0 * 0.75_f32.log10()).abs()
@@ -1089,8 +1188,13 @@ mod tests {
         assert_eq!(session.control.snapshot().queued_frames, 0);
         assert_eq!(session.control.snapshot().underrun_frames, 0);
         session.control.set_output(25, false);
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
         feed(&mut writer, 2, 0.5, -0.25);
         assert_eq!(frames(&mut session.input, 2), vec![[0.125, -0.0625]; 2]);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.125))
+        );
     }
 
     #[test]
@@ -1102,6 +1206,10 @@ mod tests {
         feed(&mut writer, 2, 0.125, -0.25);
         assert_eq!(frames(&mut session.input, 2), vec![[0.125, -0.25]; 2]);
         assert_eq!(session.control.snapshot().dropped_frames, 960);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.25))
+        );
     }
 
     #[test]
@@ -1117,6 +1225,150 @@ mod tests {
             [0.25_f32.to_le_bytes(), (-0.5_f32).to_le_bytes()].concat()
         );
         assert_eq!(&output[FRAME_BYTES..], &[0; FRAME_BYTES]);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+    }
+
+    #[test]
+    fn output_peak_observes_handoff_and_gain_without_rewriting_input_or_queue_generation() {
+        let (mut writer, mut session, _) = setup();
+        feed(&mut writer, 4, 0.5, -1.0);
+        assert_eq!(session.control.snapshot().level_dbfs, Some(0.0));
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        let generation = writer.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT;
+        for (volume, peak) in [(50, 0.5), (0, 0.0), (25, 0.25), (255, 1.0)] {
+            session.control.set_output(volume, false);
+            assert_eq!(session.control.snapshot().output_level_dbfs, None);
+            assert_eq!(frames(&mut session.input, 1), vec![[0.5 * peak, -peak]]);
+            assert_eq!(
+                session.control.snapshot().output_level_dbfs,
+                Some(peak_dbfs(peak))
+            );
+            assert_eq!(session.control.snapshot().level_dbfs, Some(0.0));
+            assert_eq!(
+                writer.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+                generation
+            );
+        }
+        assert_eq!(session.control.snapshot().dropped_frames, 0);
+    }
+
+    #[test]
+    fn output_peak_hold_expires_without_silence_refreshing_an_old_peak() {
+        let (mut writer, mut session, clock) = setup();
+        feed(&mut writer, 1, 1.0, -0.5);
+        frames(&mut session.input, 1);
+        assert_eq!(session.control.snapshot().output_level_dbfs, Some(0.0));
+        assert_eq!(frames(&mut session.input, 960), vec![[0.0; 2]; 960]);
+        clock.ns.store(METER_AGE_NS, Ordering::Relaxed);
+        assert_eq!(session.control.snapshot().output_level_dbfs, Some(0.0));
+        frames(&mut session.input, 1);
+        clock.ns.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+        feed(&mut writer, 1, -0.25, 0.125);
+        frames(&mut session.input, 1);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.25))
+        );
+    }
+
+    #[test]
+    fn output_meter_distinguishes_initial_opening_and_starved_silence() {
+        let (writer, mut session, _) = setup();
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        assert_eq!(session.input.read(&mut []).unwrap(), 0);
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        writer.shared.status.store(OPENING, Ordering::Release);
+        frames(&mut session.input, 1);
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        writer.shared.status.store(RUNNING, Ordering::Release);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+        assert_eq!(session.control.snapshot().level_dbfs, None);
+    }
+
+    #[test]
+    fn rejected_stale_and_overflowed_loud_frames_do_not_reach_output_meter() {
+        let (mut writer, mut session, clock) = setup();
+        feed(&mut writer, 1, 1.0, -1.0);
+        clock.ns.store(MAX_AGE_NS + 1, Ordering::Relaxed);
+        assert_eq!(frames(&mut session.input, 1), vec![[0.0; 2]]);
+        assert_eq!(session.control.snapshot().level_dbfs, Some(0.0));
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+        feed(&mut writer, QUEUE_FRAMES, 0.125, -0.25);
+        feed(&mut writer, 1, 1.0, -1.0);
+        frames(&mut session.input, 1);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.25))
+        );
+        assert_eq!(session.control.snapshot().dropped_frames, 2);
+    }
+
+    #[test]
+    fn output_peak_requires_complete_frames_and_does_not_refresh_a_stalled_fragment() {
+        let (mut writer, mut session, clock) = setup();
+        feed(&mut writer, 2, 0.25, -0.5);
+        session.input.read_exact(&mut [0; 7]).unwrap();
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        session.input.read_exact(&mut [0; 1]).unwrap();
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.5))
+        );
+        session.input.read_exact(&mut [0; 1]).unwrap();
+        clock.ns.store(METER_AGE_NS + 1, Ordering::Relaxed);
+        session.input.read_exact(&mut [0; 7]).unwrap();
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+    }
+
+    #[test]
+    fn rapid_mute_generation_and_old_partial_frames_cannot_restore_a_peak() {
+        let (mut writer, mut session, _) = setup();
+        feed(&mut writer, 2, 1.0, -1.0);
+        frames(&mut session.input, 1);
+        session.input.read_exact(&mut [0; 3]).unwrap();
+        session.control.set_output(100, true);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(SILENCE_DBFS)
+        );
+        session.control.set_output(100, false);
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        session.input.read_exact(&mut [0; 5]).unwrap();
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
+        feed(&mut writer, 1, 0.125, -0.25);
+        frames(&mut session.input, 1);
+        assert_eq!(
+            session.control.snapshot().output_level_dbfs,
+            Some(peak_dbfs(0.25))
+        );
+    }
+
+    #[test]
+    fn new_capture_session_has_no_peak_from_a_stopped_session() {
+        let (mut writer, mut old, _) = setup();
+        feed(&mut writer, 1, 1.0, -1.0);
+        frames(&mut old.input, 1);
+        assert_eq!(old.control.snapshot().output_level_dbfs, Some(0.0));
+        old.control.stop();
+        assert_eq!(old.control.snapshot().output_level_dbfs, None);
+        let (_, new, _) = setup();
+        assert_eq!(new.control.snapshot().output_level_dbfs, None);
     }
 
     #[test]
@@ -1186,6 +1438,7 @@ mod tests {
         assert_eq!(clone.snapshot().phase, CapturePhase::Stopped);
         assert_eq!(clone.snapshot().queued_frames, 0);
         assert_eq!(clone.snapshot().level_dbfs, None);
+        assert_eq!(clone.snapshot().output_level_dbfs, None);
         writer.shared.fail(MISSING);
         assert_eq!(clone.snapshot().phase, CapturePhase::Stopped);
     }
@@ -1210,6 +1463,8 @@ mod tests {
         ] {
             let (mut writer, mut session, _) = setup();
             feed(&mut writer, 960, 0.5, -0.5);
+            frames(&mut session.input, 1);
+            assert!(session.control.snapshot().output_level_dbfs.is_some());
             writer.shared.fail(status);
             writer.shared.fail(FAILED);
             assert_eq!(session.control.snapshot().phase, phase);
@@ -1220,6 +1475,7 @@ mod tests {
             );
             assert_eq!(session.control.snapshot().queued_frames, 0);
             assert_eq!(session.control.snapshot().level_dbfs, None);
+            assert_eq!(session.control.snapshot().output_level_dbfs, None);
         }
     }
 

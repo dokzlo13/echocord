@@ -15,10 +15,6 @@ export interface Transport {
 }
 
 export type RouteOperation = "stopping" | "selecting" | "starting";
-export interface LevelObservation {
-  at: number;
-  dbfs: number;
-}
 
 export interface ViewState {
   phase: "loading" | "ready" | "error";
@@ -30,7 +26,6 @@ export interface ViewState {
   configuringBot: boolean;
   configurationError: AppError | null;
   routeOperation: RouteOperation | null;
-  levelHistory: readonly LevelObservation[];
 }
 
 export function appError(error: unknown): AppError {
@@ -74,7 +69,6 @@ export class ControlAdapter {
     configuringBot: false,
     configurationError: null,
     routeOperation: null,
-    levelHistory: [],
   };
   private readonly listeners = new Set<() => void>();
   private unlisten: (() => void) | undefined;
@@ -109,29 +103,11 @@ export class ControlAdapter {
     )
       return;
     const confirmed = this.state.volumeDraft === snapshot.output.volumePercent;
-    const previous = this.state.snapshot;
-    const level = snapshot.capture.levelDbfs;
-    const running =
-      snapshot.capture.phase === "running" &&
-      level !== null &&
-      Number.isFinite(level);
-    const sameInput =
-      previous?.sessionId === snapshot.sessionId &&
-      previous.selection.sourceId === snapshot.selection.sourceId;
-    let history = sameInput && running ? this.state.levelHistory : [];
-    if (running && history.at(-1)?.dbfs !== level) {
-      const at = Date.now();
-      history = [
-        ...history.filter((item) => item.at >= at - 15_000),
-        { at, dbfs: level },
-      ].slice(-96);
-    }
     this.publish({
       snapshot,
       phase: "ready",
       error: null,
       volumeDraft: confirmed ? null : this.state.volumeDraft,
-      levelHistory: history,
     });
   }
 
@@ -149,7 +125,6 @@ export class ControlAdapter {
       configuringBot: false,
       configurationError: null,
       routeOperation: null,
-      levelHistory: [],
     });
     try {
       const unlisten = await this.transport.listen((snapshot) =>
@@ -217,7 +192,7 @@ export class ControlAdapter {
           configurationError: {
             code: "configuration",
             message:
-              "Could not save this bot token. Check the token and try again. Your previous configuration is preserved.",
+              "Could not confirm this bot token was saved. Check bot status and try again.",
           },
         });
       return false;

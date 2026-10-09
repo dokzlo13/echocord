@@ -380,19 +380,28 @@ test("token submission is separate, serial, redacted from view state, and does n
   adapter.dispose();
 });
 
-test("credential exceptions cannot echo a token, and late failures after restart cannot replace current state", async () => {
+test("unconfirmed token saves preserve authoritative status without echoing a token; late failures cannot replace current state", async () => {
   const host = new Host();
   host.configureBot = async (token) => {
+    // Saving may finish and publish a new profile before the IPC response fails.
+    host.emit({ bot: { status: "ready", name: "Updated Bot", message: null } });
     throw { code: "configuration", message: `Rejected ${token}` };
   };
   const adapter = new ControlAdapter(host);
   await adapter.start();
   expect(await adapter.configureBot("synthetic-credential")).toBe(false);
   expect(adapter.getSnapshot().configurationError?.code).toBe("configuration");
+  expect(adapter.getSnapshot().configurationError?.message).toBe(
+    "Could not confirm this bot token was saved. Check bot status and try again.",
+  );
   expect(JSON.stringify(adapter.getSnapshot())).not.toContain(
     "synthetic-credential",
   );
-  expect(adapter.getSnapshot().snapshot?.bot.status).toBe("ready");
+  expect(adapter.getSnapshot().snapshot?.bot).toEqual({
+    status: "ready",
+    name: "Updated Bot",
+    message: null,
+  });
   const late = deferred<void>();
   host.configureBot = () => late.promise;
   const pending = adapter.configureBot("synthetic-credential");
@@ -424,45 +433,4 @@ test("active and incomplete sessions cannot configure credentials", async () => 
     expect(called).toBe(false);
     adapter.dispose();
   }
-});
-
-test("level history contains bounded received changes only, ignores stale events and clears for a missing or different input", async () => {
-  const host = new Host();
-  host.state = fixtureSnapshot("connected");
-  const adapter = new ControlAdapter(host);
-  await adapter.start();
-  expect(adapter.getSnapshot().levelHistory.map((item) => item.dbfs)).toEqual([
-    -21,
-  ]);
-  host.emit({ output: { volumePercent: 40, muted: true } });
-  expect(adapter.getSnapshot().levelHistory).toHaveLength(1);
-  host.emit({ capture: { ...host.state.capture, levelDbfs: -19 } });
-  host.receive({ ...fixtureSnapshot("connected"), revision: 1 });
-  expect(adapter.getSnapshot().levelHistory.map((item) => item.dbfs)).toEqual([
-    -21, -19,
-  ]);
-  for (let index = 0; index < 200; index++)
-    host.emit({
-      capture: { ...host.state.capture, levelDbfs: index % 2 ? -18 : -22 },
-    });
-  expect(adapter.getSnapshot().levelHistory).toHaveLength(96);
-  host.emit({
-    capture: { ...host.state.capture, phase: "missing", levelDbfs: null },
-  });
-  expect(adapter.getSnapshot().levelHistory).toEqual([]);
-  host.emit({
-    sessionId: 2,
-    capture: { ...host.state.capture, phase: "running", levelDbfs: -30 },
-  });
-  expect(adapter.getSnapshot().levelHistory.map((item) => item.dbfs)).toEqual([
-    -30,
-  ]);
-  host.emit({
-    selection: { ...host.state.selection, sourceId: "cable-b" },
-    capture: { ...host.state.capture, levelDbfs: -12 },
-  });
-  expect(adapter.getSnapshot().levelHistory.map((item) => item.dbfs)).toEqual([
-    -12,
-  ]);
-  adapter.dispose();
 });

@@ -582,6 +582,8 @@ impl Actor {
             stage: ConnectStage::Checking,
         };
         self.snapshot.capture.phase = CapturePhase::Stopped;
+        self.snapshot.capture.level_dbfs = None;
+        self.snapshot.capture.output_level_dbfs = None;
         self.deadline = Some(Instant::now() + CONNECT_DEADLINE);
         self.publish();
         let generation = self.snapshot.session_id;
@@ -995,6 +997,7 @@ impl Actor {
                         };
                         self.snapshot.capture.phase = CapturePhase::Missing;
                         self.snapshot.capture.level_dbfs = None;
+                        self.snapshot.capture.output_level_dbfs = None;
                     }
                     Status::Meter { capture } => {
                         self.snapshot.capture = protocol::clean_capture(capture)
@@ -1083,6 +1086,8 @@ impl Actor {
             *current = stage;
             if stage == ConnectStage::Capture {
                 self.snapshot.capture.phase = CapturePhase::Opening;
+                self.snapshot.capture.level_dbfs = None;
+                self.snapshot.capture.output_level_dbfs = None;
             }
             self.publish();
         }
@@ -2556,6 +2561,20 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn device_loss_clears_both_signal_readings_before_another_meter_event() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.snapshot.capture.phase = CapturePhase::Running;
+        a.snapshot.capture.level_dbfs = Some(-6.0);
+        a.snapshot.capture.output_level_dbfs = Some(-12.0);
+        a.event(Event::Status(4, Status::DeviceMissing));
+        assert_eq!(a.snapshot.capture.phase, CapturePhase::Missing);
+        assert_eq!(a.snapshot.capture.level_dbfs, None);
+        assert_eq!(a.snapshot.capture.output_level_dbfs, None);
+    }
+
     #[test]
     fn buffered_specific_failure_refines_generic_protocol_cleanup() {
         let mut a = actor();

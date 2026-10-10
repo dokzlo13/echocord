@@ -309,6 +309,25 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     {
         return false;
     }
+    let mut local_sources_ready = false;
+    for _ in 0..70 {
+        match app
+            .state::<ShellState>()
+            .controller
+            .snapshot()
+            .source_discovery
+        {
+            Discovery::Ready => {
+                local_sources_ready = true;
+                break;
+            }
+            Discovery::Error { .. } => return false,
+            _ => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    if !local_sources_ready {
+        return false;
+    }
     if app.state::<ShellState>().expect_authenticated {
         let mut authenticated = false;
         for _ in 0..150 {

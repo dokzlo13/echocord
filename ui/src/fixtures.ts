@@ -51,6 +51,9 @@ export function fixtureSnapshot(
       available: false,
     },
   ];
+  const player = sources[0];
+  const browser = sources[1];
+  if (!player || !browser) throw Error("Missing owned test catalog");
   const servers: ControlSnapshot["servers"] = [
     {
       id: "guild:1",
@@ -91,10 +94,10 @@ export function fixtureSnapshot(
       : [
           {
             stripId: "strip:1",
-            sourceId: sources[0]!.id,
+            sourceId: player.id,
             kind: "application",
-            displayName: sources[0]!.name,
-            detail: sources[0]!.detail,
+            displayName: player.name,
+            detail: player.detail,
             phase: "capturing",
             gainDb: -3,
             muted: false,
@@ -106,10 +109,10 @@ export function fixtureSnapshot(
   if (name === "many" || name === "restored" || name === "faults") {
     inputs.push({
       stripId: "strip:2",
-      sourceId: sources[1]!.id,
+      sourceId: browser.id,
       kind: "application",
-      displayName: sources[1]!.name,
-      detail: sources[1]!.detail,
+      displayName: browser.name,
+      detail: browser.detail,
       phase: name === "restored" ? "stopped" : "capturing",
       gainDb: 0,
       muted: name === "many",
@@ -142,9 +145,9 @@ export function fixtureSnapshot(
               message: "Audio cleanup has not finished. Retry disconnect.",
             }
           : { phase: "disconnected" };
-  if (name === "faults") {
-    inputs[0]!.phase = "fault";
-    inputs[0]!.fault = {
+  if (name === "faults" && inputs[0]) {
+    inputs[0].phase = "fault";
+    inputs[0].fault = {
       code: "capture-failed",
       message:
         "The selected application closed. Pick its current process again.",
@@ -156,6 +159,7 @@ export function fixtureSnapshot(
     };
   }
   const telemetry: MixTelemetry = {
+    mixPreClip: false,
     inputs: inputs.map((s) => ({
       stripId: s.stripId,
       levelDbfs: s.phase === "capturing" ? -18 : null,

@@ -123,6 +123,21 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
     return () => ro.disconnect();
   }, []);
   const snapshot = view.snapshot;
+  const failedCommand = view.commandErrorCommand;
+  const operationError = (uid: string) =>
+    failedCommand &&
+    (("stripId" in failedCommand && failedCommand.stripId === uid) ||
+      ("destinationId" in failedCommand && failedCommand.destinationId === uid))
+      ? view.commandError?.message
+      : undefined;
+  const targetedError =
+    !!failedCommand &&
+    (("stripId" in failedCommand &&
+      snapshot?.inputs.some((s) => s.stripId === failedCommand.stripId)) ||
+      ("destinationId" in failedCommand &&
+        snapshot?.destinations.some(
+          (d) => d.destinationId === failedCommand.destinationId,
+        )));
   const catalog = useMemo(
     () => snapshot?.sources.map(catalogSource) ?? [],
     [snapshot?.sources],
@@ -149,6 +164,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       muted: c.muted,
       gainDb: c.gainDb,
       restored: c.restored,
+      operationError: operationError(c.stripId),
       fault: c.fault
         ? { title: c.fault.message, actionLabel: "Pick again" }
         : undefined,
@@ -160,14 +176,18 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           liveTimes.current.set(d.destinationId, Date.now());
       } else if (d.connection.phase !== "recovering")
         liveTimes.current.delete(d.destinationId);
-      return destination(
-        snapshot,
-        d,
-        confirm === d.destinationId,
-        liveTimes.current.get(d.destinationId),
-      );
+      return {
+        ...destination(
+          snapshot,
+          d,
+          confirm === d.destinationId,
+          liveTimes.current.get(d.destinationId),
+        ),
+        operationError: operationError(d.destinationId),
+      };
     }) ?? [];
   const open = (next: Sheet) => {
+    if (view.phase !== "ready") return;
     if (!sheet)
       opener.current =
         document.activeElement instanceof HTMLElement
@@ -242,15 +262,17 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             }
           >
             {bot === "ready" ? (
-              <BotAvatar size={20} />
+              <BotAvatar size={20} avatarUrl={snapshot?.bot.avatarUrl} />
             ) : (
               <span className="bot-dot" aria-hidden />
             )}
-            {bot === "ready"
-              ? botName
-              : bot === "checking"
-                ? "Checking bot"
-                : "Set up bot"}
+            <span className="bot-chip-name">
+              {bot === "ready"
+                ? botName
+                : bot === "checking"
+                  ? "Checking bot"
+                  : "Set up bot"}
+            </span>
             {bot === "ready" && (
               <span className="bot-dot" title="Token verified" aria-hidden />
             )}
@@ -304,7 +326,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               </button>
             </div>
           )}
-          {view.commandError && (
+          {view.commandError && !targetedError && (
             <div className="app-error" role="alert">
               <span>{view.commandError.message}</span>
               <button
@@ -360,6 +382,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     mode={mode}
                     expand={wide && sources.length === 1}
                     h={{
+                      dismiss: adapter.dismissError,
                       change: () => open({ kind: "source", replaceUid: c.uid }),
                       remove: () =>
                         void send({ type: "remove-source", stripId: c.uid }),
@@ -427,6 +450,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     sourcesCapturing={capturing.length}
                     botReady={bot === "ready"}
                     h={{
+                      dismiss: adapter.dismissError,
                       change: () => open({ kind: "room", replaceUid: d.uid }),
                       remove: () => {
                         setConfirm(null);

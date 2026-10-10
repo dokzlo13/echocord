@@ -1,5 +1,5 @@
-/* Shared structure for the mixing-era prototype (On Air world). */
-
+/* biome-ignore-all lint/style/noDescendingSpecificity: Approved component layers intentionally override base primitives; rendered states are checked. */
+/* Adopted On Air component structure. Only Stack and the combined channel fader ship. */
 *,
 *::before,
 *::after {
@@ -30,20 +30,7 @@ input {
 .flex {
   flex: 1;
 }
-
 /* ---------- stage ---------- */
-.stage {
-  min-height: 100vh;
-  display: grid;
-  place-items: center;
-  padding: 96px 24px 32px;
-}
-.stage[data-embed] {
-  padding: 0;
-  min-height: 0;
-  place-items: start;
-}
-
 /* ---------- window ---------- */
 .window {
   --pad-x: 16px;
@@ -70,12 +57,6 @@ input {
     0 0 0 1px rgb(255 255 255 / 0.06),
     0 24px 64px rgb(0 0 0 / 0.55);
 }
-.stage[data-embed] .window {
-  border-radius: 0;
-  box-shadow: none;
-  resize: none;
-  max-width: none;
-}
 .window ::selection {
   background: var(--action);
   color: var(--action-ink);
@@ -84,7 +65,6 @@ input {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
-
 /* ---------- title bar ---------- */
 .titlebar {
   display: flex;
@@ -159,7 +139,6 @@ input {
   background: #c42b1c;
   color: #fff;
 }
-
 /* ---------- surface & slots ---------- */
 .surface {
   display: flex;
@@ -181,8 +160,7 @@ input {
 .window[data-layout="stack"] .src-slot {
   flex: 0 1 auto;
 }
-.window[data-layout="stack"] .dst-slot,
-.window[data-layout="grid"] .dst-slot {
+.window[data-layout="stack"] .dst-slot {
   flex: 1 0 auto;
 }
 /* Content-weighted split: each list starts from its full height, and when both don't fit
@@ -195,54 +173,22 @@ input {
 .window .src-slot[data-many] {
   min-height: 158px;
 }
-.window[data-layout="grid"] .src-slot {
-  flex: 0 1 auto;
-}
-/* Strips: the console row is the flexible part. */
-.window[data-layout="strips"] .src-slot {
-  flex: 1 1 auto;
-  min-height: 250px;
-}
-.window[data-layout="strips"] .dst-slot {
-  flex: 0 0 auto;
-}
-.window[data-layout="strips"] .dst-slot[data-many] {
-  flex: 0 1 auto;
-  max-height: 45%;
-}
-
 @container win (min-width: 700px) {
   .surface {
     flex-direction: row;
     gap: 18px;
   }
-  .window[data-layout="stack"] .src-slot,
-  .window[data-layout="grid"] .src-slot {
+  .window[data-layout="stack"] .src-slot {
     flex: 1.25 1 0;
   }
-  .window[data-layout="stack"] .dst-slot,
-  .window[data-layout="grid"] .dst-slot {
+  .window[data-layout="stack"] .dst-slot {
     flex: 1 1 0;
-  }
-  .window[data-layout="strips"] .src-slot {
-    flex: 1 1 0;
-    min-height: 0;
-  }
-  .window[data-layout="strips"] .dst-slot[data-many] {
-    max-height: none;
   }
   .window .dst-slot[data-many],
   .window .src-slot[data-many] {
     min-height: 0;
   }
-  .window[data-layout="strips"] .dst-slot {
-    flex: 0 0 390px;
-  }
-  .window[data-layout="strips"] .dst-list[data-count="1"] .dest-card {
-    flex: 1;
-  }
 }
-
 .slot-head {
   display: flex;
   flex: none;
@@ -271,7 +217,6 @@ input {
   min-width: 0;
   overflow: hidden;
 }
-
 .list {
   display: flex;
   flex-direction: column;
@@ -307,12 +252,6 @@ input {
     opacity: 1;
   }
 }
-.window[data-layout="grid"] .src-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-  align-content: start;
-}
-
 /* ---------- channel numbers & chips ---------- */
 .ch {
   display: grid;
@@ -375,7 +314,6 @@ input {
 .chip:hover {
   filter: brightness(1.2);
 }
-
 /* ---------- cards ---------- */
 .card {
   position: relative;
@@ -425,18 +363,6 @@ input {
   min-height: 0;
   padding-top: 4px;
 }
-.window[data-layout="grid"] .source-card.row {
-  grid-template-rows: 40px auto;
-}
-.window[data-layout="grid"] .source-card.row .controls-row {
-  flex-wrap: wrap;
-  row-gap: 8px;
-}
-.window[data-layout="grid"] .source-card.row .mf {
-  flex-basis: 100%;
-  order: 3;
-}
-
 .identity {
   display: flex;
   align-items: center;
@@ -543,7 +469,6 @@ input {
   font-size: 12px;
   text-align: right;
 }
-
 /* ---------- buttons ---------- */
 .btn {
   display: inline-flex;
@@ -638,27 +563,7 @@ input {
   align-self: flex-start;
   margin: -4px -4px 0 0;
 }
-
 /* ---------- meter + fader ---------- */
-.mf {
-  position: relative;
-  display: flex;
-  flex: 1;
-  align-items: center;
-  min-width: 60px;
-  height: 32px;
-}
-.mf-track {
-  position: relative;
-  width: 100%;
-  height: var(--mf-size, 8px);
-  overflow: hidden;
-  border-radius: 3px;
-  background: var(--inset);
-}
-.mf[data-mode="history"] {
-  --mf-size: 30px;
-}
 .mf-fill {
   position: absolute;
   inset: 0;
@@ -666,10 +571,6 @@ input {
   transform-origin: left;
   background: var(--meter-fill);
   transition: transform 110ms linear;
-}
-.mf[data-mode="history"] .mf-fill {
-  top: auto;
-  height: 3px;
 }
 .mf-peak {
   position: absolute;
@@ -680,40 +581,11 @@ input {
   background: var(--meter-peak);
   opacity: calc(var(--peak, 0) * 4);
 }
-.mf-tick {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(var(--at) * 100%);
-  z-index: 1;
-  width: 1px;
-  background: var(--tick);
-}
-.mf[data-mode="history"] .mf-tick {
-  display: none;
-}
 .well {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
-}
-.mf[data-muted] .mf-fill,
-.mf[data-muted] .well {
-  opacity: 0.5;
-}
-.mf[data-muted] .mf-fill {
-  background-image: repeating-linear-gradient(
-    135deg,
-    transparent 0 3px,
-    rgb(19 23 26 / 0.7) 3px 5px
-  );
-}
-.mf[data-muted] .well {
-  filter: grayscale(0.6);
-}
-.mf[data-idle] .mf-track {
-  opacity: 0.6;
 }
 .mf-idle {
   position: absolute;
@@ -731,216 +603,6 @@ input {
 .card[data-signal="hot"] .mf-fill {
   background: var(--meter-hot);
 }
-
-.mf-input {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background: transparent;
-  appearance: none;
-  cursor: pointer;
-}
-.mf-input::-webkit-slider-runnable-track {
-  height: 100%;
-  background: transparent;
-}
-.mf-input::-webkit-slider-thumb {
-  width: 6px;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--thumb);
-  box-shadow:
-    0 0 0 2px var(--panel),
-    0 1px 4px rgb(0 0 0 / 0.6);
-  appearance: none;
-}
-.mf-input:hover::-webkit-slider-thumb {
-  background: var(--thumb-hi);
-}
-.mf-input:focus-visible {
-  outline-offset: 0;
-}
-
-/* vertical */
-.mf[data-orient="v"] {
-  --thumb-w: 30px;
-  flex: 1;
-  flex-direction: column;
-  align-items: center;
-  align-self: center;
-  width: var(--thumb-w);
-  min-width: 0;
-  height: auto;
-  min-height: 70px;
-}
-.mf[data-orient="v"][data-mode="history"] {
-  --thumb-w: 46px;
-}
-.mf[data-orient="v"] .mf-track {
-  width: var(--mf-size-v, 10px);
-  height: 100%;
-}
-.mf[data-orient="v"][data-mode="history"] {
-  --mf-size-v: 46px;
-}
-.mf[data-orient="v"] .mf-fill {
-  transform: scaleY(var(--level, 0));
-  transform-origin: bottom;
-}
-.mf[data-orient="v"][data-mode="history"] .mf-fill {
-  inset: 0 auto 0 0;
-  width: 3px;
-  height: auto;
-}
-.mf[data-orient="v"] .mf-peak {
-  top: auto;
-  right: 0;
-  bottom: calc(var(--peak, 0) * 100% - 2px);
-  left: 0;
-  width: auto;
-  height: 2px;
-}
-.mf[data-orient="v"] .mf-tick {
-  top: auto;
-  right: 0;
-  bottom: calc(var(--at) * 100%);
-  left: 0;
-  width: auto;
-  height: 1px;
-}
-.mf[data-orient="v"] .mf-input {
-  writing-mode: vertical-lr;
-  direction: rtl;
-}
-.mf[data-orient="v"] .mf-input::-webkit-slider-runnable-track {
-  width: 100%;
-  height: 100%;
-}
-.mf[data-orient="v"] .mf-input::-webkit-slider-thumb {
-  width: var(--thumb-w);
-  height: 6px;
-}
-.mf[data-orient="v"] .mf-idle {
-  padding: 4px 2px;
-  writing-mode: vertical-rl;
-  transform: translate(-50%, -50%) rotate(180deg);
-}
-
-/* ---------- strips ---------- */
-.strip-rail {
-  display: flex;
-  flex: 1;
-  gap: 8px;
-  min-height: 0;
-  padding-bottom: 6px;
-  margin-bottom: -6px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
-}
-.source-card.strip {
-  display: flex;
-  flex: 0 0 98px;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  padding: 8px 8px 10px;
-  scroll-snap-align: start;
-}
-.strip-top {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-}
-.strip-top .remove {
-  margin: 0 -4px 0 auto;
-}
-.add-strip small {
-  max-width: 16ch;
-  color: var(--ink-3);
-  font-size: 12px;
-  line-height: 1.3;
-  text-align: center;
-}
-.strip-tag {
-  overflow: hidden;
-  color: var(--ink-3);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.source-card.strip .identity {
-  flex: none;
-  flex-direction: column;
-  gap: 6px;
-  height: auto;
-  margin: 0 -4px;
-  padding: 4px;
-  text-align: center;
-}
-.source-card.strip .id-text {
-  width: 100%;
-}
-.source-card.strip .id-name {
-  font-size: 13.5px;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  line-height: 1.2;
-}
-.source-card.strip .id-detail {
-  font-size: 11px;
-}
-.source-card.strip .readout {
-  width: auto;
-  min-height: 16px;
-  text-align: center;
-}
-.strip-btns {
-  display: flex;
-  justify-content: center;
-  gap: 6px;
-}
-.strip-btns .btn {
-  --ctl-h: 34px;
-}
-.strip-fault {
-  display: flex;
-  flex: 1;
-}
-.strip-fault .slip {
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-  padding: 10px 6px;
-}
-.add-strip {
-  display: flex;
-  flex: 1 0 98px;
-  max-width: 220px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: 1.5px dashed var(--line-strong);
-  border-radius: var(--r-card);
-  background: transparent;
-  color: var(--ink-2);
-  font-size: 13px;
-  cursor: pointer;
-}
-.add-strip:hover {
-  border-color: var(--ink-3);
-  color: var(--ink);
-}
-
 /* ---------- destination ---------- */
 .dest-card.panel {
   display: flex;
@@ -965,36 +627,6 @@ input {
   gap: 8px;
   min-height: 0;
 }
-.dest-card.console {
-  display: grid;
-  flex: 1 0 auto;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 12px;
-  min-height: 220px;
-  padding: 12px 12px 12px 8px;
-}
-.console-strip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  min-height: 0;
-}
-.console-strip .readout {
-  width: auto;
-  min-height: 16px;
-}
-.console-main {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-width: 0;
-  min-height: 0;
-}
-.console-actions {
-  height: 34px;
-}
-
 .badge {
   display: inline-flex;
   flex: none;
@@ -1049,7 +681,6 @@ input {
   box-shadow: inset 0 0 0 1px var(--fault-line);
   color: var(--fault);
 }
-
 .stats-btn {
   display: block;
   width: 100%;
@@ -1098,12 +729,6 @@ input {
 .stat-value[data-warn] {
   color: var(--fault);
 }
-.spark {
-  grid-row: 1 / span 2;
-  grid-column: 2;
-  width: 46px;
-  height: 26px;
-}
 .stats[data-compact] .stat {
   grid-template-rows: auto;
   grid-template-columns: auto 1fr;
@@ -1115,7 +740,6 @@ input {
   font-size: 13px;
   text-align: right;
 }
-
 .chart-slot {
   display: flex;
   flex: 1;
@@ -1209,33 +833,6 @@ input {
   display: grid;
   gap: 8px;
 }
-.stage-steps {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.stage-steps li {
-  padding-top: 6px;
-  border-top: 3px solid var(--line-strong);
-  color: var(--ink-3);
-  font-size: 11.5px;
-}
-.stage-steps li[data-done] {
-  border-color: var(--standby);
-  color: var(--ink-2);
-}
-.stage-steps li[data-now] {
-  border-color: var(--standby);
-  color: var(--ink);
-  animation: pulse 900ms ease-in-out infinite alternate;
-}
-.stage-line {
-  color: var(--ink-2);
-  font-size: 12.5px;
-}
 .preflight {
   display: grid;
   align-content: start;
@@ -1261,7 +858,6 @@ input {
 .preflight li[data-ok] svg {
   color: var(--ok);
 }
-
 .slip {
   display: flex;
   flex: 1;
@@ -1313,7 +909,6 @@ input {
   flex-wrap: wrap;
   gap: 8px;
 }
-
 /* ---------- empty slot ---------- */
 .empty {
   display: flex;
@@ -1344,7 +939,6 @@ input {
   color: var(--ink-2);
   font-size: 13px;
 }
-
 /* ---------- connection sheet ---------- */
 .conn-head {
   display: flex;
@@ -1401,7 +995,6 @@ input {
   flex: none;
   width: 170px;
 }
-
 /* ---------- sheet ---------- */
 .sheet {
   position: absolute;
@@ -1462,7 +1055,6 @@ input {
   color: var(--ink-2);
   font-size: 12px;
 }
-
 .tabs {
   display: flex;
   gap: 4px;
@@ -1489,7 +1081,6 @@ input {
   color: var(--ink-3);
   font-weight: 500;
 }
-
 .search {
   display: flex;
   align-items: center;
@@ -1516,7 +1107,6 @@ input {
 .search input::placeholder {
   color: var(--ink-3);
 }
-
 .pick-list {
   display: grid;
   align-content: start;
@@ -1601,28 +1191,6 @@ input {
   font-weight: 600;
   white-space: nowrap;
 }
-
-.activity {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 14px;
-}
-.activity span {
-  width: 3px;
-  height: 100%;
-  border-radius: 1px;
-  background: var(--activity, var(--live));
-  transform-origin: bottom;
-  animation: eq 900ms ease-in-out infinite alternate;
-}
-.activity span:nth-child(2) {
-  animation-delay: -300ms;
-}
-.activity span:nth-child(3) {
-  animation-delay: -600ms;
-}
-
 .rooms {
   display: grid;
   grid-template-columns: 56px 1fr;
@@ -1742,7 +1310,6 @@ input {
   color: var(--ink-3);
   font-size: 12px;
 }
-
 .steps {
   display: grid;
   gap: 8px;
@@ -1804,7 +1371,6 @@ input {
   background: var(--inset);
   color: var(--ink-3);
 }
-
 .set-group {
   display: grid;
   gap: 8px;
@@ -1875,7 +1441,6 @@ input {
   color: var(--ink-3);
   font-size: 12px;
 }
-
 /* ---------- motion ---------- */
 .spin {
   animation: spin 900ms linear infinite;
@@ -1912,12 +1477,12 @@ input {
   *,
   *::before,
   *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override every component state. */
     animation: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: Reduced motion must override every component state. */
     transition: none !important;
   }
 }
-
-/* ---------- round-2 polish ---------- */
 .sheet-body {
   overflow-y: auto;
   scrollbar-width: thin;
@@ -2025,7 +1590,6 @@ input {
   justify-self: start;
   margin-top: 2px;
 }
-
 /* Quieter telemetry: no boxes, hairline separators; sparklines only when no graph is showing. */
 .stats {
   gap: 0;
@@ -2047,14 +1611,6 @@ input {
 .stats-btn:hover .stat-value {
   color: var(--action-hi);
 }
-.dest-body:has(.net-chart:not([data-hidden])) .spark {
-  display: none;
-}
-
-/* ---------- destination density (round 3) ----------
-   The destination list is a size container whose intrinsic height is a content estimate
-   (--dst-natural), so the content-weighted split still works, and its cards read the height
-   they actually received. */
 .window .dst-slot,
 .window[data-layout] .dst-slot,
 .window .dst-slot[data-many] {
@@ -2103,8 +1659,6 @@ button.d-line:hover {
 .dest-card[data-compact] .d-hint {
   display: inline-flex;
 }
-
-/* ---------- combined channel fader (round 3) ---------- */
 .window {
   --ctl-h: 32px;
   --track-h: 6px;
@@ -2129,7 +1683,6 @@ button.d-line:hover {
 .card[data-expand]:has(.cf[data-mode="simple"]) {
   --cf-h: 32px;
 }
-
 .cf {
   display: flex;
   flex: 1;
@@ -2318,7 +1871,6 @@ button.d-line:hover {
 .cf[data-mode="history"] .cf-level {
   align-self: center;
 }
-
 /* Destination density thresholds for the combined-fader card (simple / history). */
 @container dlist (max-height: 181px) {
   .d-tiles .stat {
@@ -2333,7 +1885,6 @@ button.d-line:hover {
   .d-tiles .stat-label {
     order: 2;
   }
-  .d-tiles .spark,
   .d-chart {
     display: none;
   }
@@ -2363,9 +1914,6 @@ button.d-line:hover {
   .dest-card:has(.cf[data-mode="history"]) .d-tiles .stat-label {
     order: 2;
   }
-  .dest-card:has(.cf[data-mode="history"]) :is(.d-tiles .spark, .d-chart) {
-    display: none;
-  }
 }
 @container dlist (max-height: 179px) {
   .dest-card:has(.cf[data-mode="history"])
@@ -2379,7 +1927,6 @@ button.d-line:hover {
 .dst-slot:has(.cf[data-mode="history"]) {
   min-height: 184px;
 }
-
 /* Short windows: tighter rhythm and a shallower history well. */
 @container win (max-height: 540px) {
   .surface {
@@ -2400,7 +1947,6 @@ button.d-line:hover {
     --cf-h: 36px;
   }
 }
-
 /* Header: chips keep priority over the summary, which truncates first. */
 .slot-head .chips {
   flex-shrink: 0;
@@ -2409,7 +1955,6 @@ button.d-line:hover {
   flex: 0 1 auto;
   min-width: 0;
 }
-
 /* Connection log: the joining steps as live records when there is room, else the stage line. */
 .connect-log {
   display: grid;
@@ -2509,21 +2054,4 @@ li[data-status="now"] .log-result svg {
   align-items: center;
   gap: 10px;
   min-height: 18px;
-}
-.d-stage-line .stage-steps {
-  display: flex;
-  flex: none;
-  gap: 3px;
-}
-.d-stage-line .stage-steps li {
-  width: 14px;
-  height: 0;
-  padding: 0;
-  overflow: hidden;
-  font-size: 0;
-}
-.d-stage-line .stage-line {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }

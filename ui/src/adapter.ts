@@ -28,6 +28,7 @@ export interface ViewState {
   snapshot: ControlSnapshot | null;
   error: AppError | null;
   commandError: AppError | null;
+  commandErrorCommand: ControlCommand | null;
   pending: readonly string[];
   configuringBot: boolean;
   configurationError: AppError | null;
@@ -82,6 +83,7 @@ export class ControlAdapter {
     snapshot: null,
     error: null,
     commandError: null,
+    commandErrorCommand: null,
     pending: [],
     configuringBot: false,
     configurationError: null,
@@ -111,6 +113,7 @@ export class ControlAdapter {
       return;
     this.revision = snapshot.revision;
     this.telemetry.setOutput(snapshot.destinations[0]?.destinationId ?? null);
+    this.telemetry.setSession(snapshot.sessionId);
     this.telemetry.ingest(snapshot.telemetry);
     if (
       !this.state.snapshot ||
@@ -128,11 +131,21 @@ export class ControlAdapter {
       phase: "loading",
       error: null,
       commandError: null,
+      commandErrorCommand: null,
       pending: [],
       configuringBot: false,
       configurationError: null,
     });
     this.telemetry.setVisible(!this.transport.getVisible);
+    if (typeof document !== "undefined") {
+      const onVisibility = () => {
+        if (!document.hidden) this.telemetry.resetHistory();
+      };
+      document.addEventListener("visibilitychange", onVisibility);
+      this.cleanup.push(() =>
+        document.removeEventListener("visibilitychange", onVisibility),
+      );
+    }
     const own = async (p: Promise<() => void>) => {
       const un = await p;
       if (!this.active || g !== this.generation) un();
@@ -182,18 +195,26 @@ export class ControlAdapter {
     this.telemetry.setVisible(false);
     this.telemetry.clear();
   };
-  dismissError = () => this.publish({ commandError: null });
+  dismissError = () =>
+    this.publish({ commandError: null, commandErrorCommand: null });
   dispatch = async (command: ControlCommand): Promise<boolean> => {
     if (!this.active || this.state.phase !== "ready") return false;
     const g = this.generation;
     const key = JSON.stringify(command);
-    this.publish({ pending: [...this.state.pending, key], commandError: null });
+    this.publish({
+      pending: [...this.state.pending, key],
+      commandError: null,
+      commandErrorCommand: null,
+    });
     try {
       await this.transport.dispatch(command);
       return this.active && g === this.generation;
     } catch (e) {
       if (this.active && g === this.generation)
-        this.publish({ commandError: appError(e) });
+        this.publish({
+          commandError: appError(e),
+          commandErrorCommand: command,
+        });
       return false;
     } finally {
       if (this.active && g === this.generation) {
@@ -237,6 +258,8 @@ export class ControlAdapter {
       work = { command: null, timer: null, inFlight: false, waiters: [] };
       this.faders.set(key, work);
     }
+    for (const resolve of work.waiters) resolve(false);
+    work.waiters = [];
     work.command = command;
     const pending = new Promise<boolean>((resolve) =>
       work.waiters.push(resolve),

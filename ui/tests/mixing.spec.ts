@@ -628,3 +628,155 @@ test("reduced motion suppresses badge and card animations", async ({
       .evaluate((e) => getComputedStyle(e).transitionDuration),
   ).toBe("0s");
 });
+
+test("native summed overload remains visible after destination attenuation", async ({
+  page,
+}) => {
+  await open(page);
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.emit({
+      telemetry: {
+        ...t.current.telemetry,
+        mixPreClip: true,
+        outputLevelDbfs: -36,
+      },
+    });
+  });
+  await expect
+    .poll(() => page.locator(".dest-card").getAttribute("data-clip"))
+    .toBe("");
+  await expect(page.locator(".dest-card .meter-clip")).toHaveAttribute(
+    "title",
+    "Mix clipped before destination volume",
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator(".dest-card")
+        .evaluate((e) => e.style.getPropertyValue("--level")),
+    )
+    .toBe("0.400");
+});
+
+test("History meters keep complete source and destination controls at minimum window", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 420, height: 420 });
+  await open(page, "many");
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.emit({ settings: { ...t.current.settings, meterStyle: "history" } });
+  });
+  await expect(page.locator(".source-card .cf").first()).toHaveAttribute(
+    "data-mode",
+    "history",
+  );
+  const fit = await page.evaluate(() => {
+    const src = document.querySelector(".source-card")?.getBoundingClientRect();
+    const list = document.querySelector(".src-list")?.getBoundingClientRect();
+    const dst = document.querySelector(".dest-card")?.getBoundingClientRect();
+    return {
+      source: !!src && !!list && src.bottom <= list.bottom + 1,
+      destination: !!dst && dst.bottom <= innerHeight,
+      scroll: document.documentElement.scrollHeight,
+    };
+  });
+  expect(fit).toEqual({ source: true, destination: true, scroll: 420 });
+});
+
+test("rejected persisted settings stay readable inside their sheet", async ({
+  page,
+}) => {
+  await open(page);
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.evaluate(
+    () =>
+      (window.uiHarness.transport.reject = {
+        code: "configuration",
+        message: "Could not save settings. Try again.",
+      }),
+  );
+  await page.getByRole("radio", { name: "History", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "Could not save settings",
+  );
+  await expect(
+    page.getByRole("radio", { name: "Simple", exact: true }),
+  ).toBeChecked();
+});
+
+test("targeted source operation errors preserve whole cards and live native phases at420", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 420, height: 420 });
+  await open(page, "many");
+  await page.evaluate(
+    () =>
+      (window.uiHarness.transport.reject = {
+        code: "capture-failed",
+        message:
+          "The selected application changed. Refresh sources and pick the running process again.",
+      }),
+  );
+  await page
+    .getByRole("button", { name: "Stop capturing Preview player", exact: true })
+    .click();
+  await expect(
+    page.locator(".source-card").first().getByRole("alert"),
+  ).toContainText("selected application changed");
+  await expect(page.locator(".source-card").first()).toHaveAttribute(
+    "data-state",
+    "capturing",
+  );
+  await expect(page.locator(".dest-card")).toHaveAttribute(
+    "data-state",
+    "live",
+  );
+  expect(
+    await page
+      .locator(".dest-card")
+      .evaluate((e) => e.getBoundingClientRect().bottom <= innerHeight),
+  ).toBe(true);
+  await expect(
+    page.getByRole("button", { name: "Disconnect", exact: true }),
+  ).toBeVisible();
+  await page
+    .locator(".source-card")
+    .first()
+    .getByRole("button", { name: "Dismiss", exact: true })
+    .click();
+  await expect(
+    page.locator(".source-card").first().getByRole("alert"),
+  ).toHaveCount(0);
+});
+
+test("a removal that succeeds before a settings save rejection still reports the failure", async ({
+  page,
+}) => {
+  await open(page, "many");
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    const original = t.dispatch;
+    t.dispatch = async (command) => {
+      if (command.type === "remove-source") {
+        t.emit({
+          inputs: t.current.inputs.filter((s) => s.stripId !== command.stripId),
+        });
+        throw {
+          code: "configuration",
+          message:
+            "Source removed, but the saved setup could not be updated. Try again.",
+        };
+      }
+      await original(command);
+    };
+  });
+  await page
+    .getByRole("button", { name: "Remove Preview player", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "saved setup could not be updated",
+  );
+  await expect(page.locator(".source-card")).toHaveCount(2);
+});

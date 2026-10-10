@@ -157,16 +157,25 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
         ctx.textBaseline = "alphabetic";
         ctx.fillText(`${MINUS}60 s`, 0, h - 3 * dpr);
         ctx.fillText("now", plotW - ctx.measureText("now").width, h - 3 * dpr);
-        if (!ring) return;
+        if (!ring) {
+          if (peakRef.current) peakRef.current.textContent = "";
+          return;
+        }
         const n = ring.buf.length;
         let peak = 0;
         const x = (k: number) => plotW - (k / (n - 1)) * plotW;
         const y = (f: number) => padT + plotH - f * plotH;
+        let oldest = 0;
+        for (let k = n - 1; k >= 0; k--)
+          if (Number.isFinite(ring.at(k))) {
+            oldest = k;
+            break;
+          }
         ctx.beginPath();
-        ctx.moveTo(x(n - 1), y(0));
-        for (let k = n - 1; k >= 0; k--) {
-          const f = ring.at(k);
-          const v = Number.isNaN(f) ? 0 : f;
+        ctx.moveTo(x(oldest), y(0));
+        for (let k = oldest; k >= 0; k--) {
+          const v = ring.at(k);
+          if (!Number.isFinite(v)) continue;
           peak = Math.max(peak, v);
           ctx.lineTo(x(k), y(v));
         }
@@ -177,11 +186,17 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
         ctx.fill();
         ctx.globalAlpha = 1;
         ctx.beginPath();
-        for (let k = n - 1; k >= 0; k--) {
-          const f = ring.at(k);
-          const v = Number.isNaN(f) ? 0 : f;
-          if (k === n - 1) ctx.moveTo(x(k), y(v));
-          else ctx.lineTo(x(k), y(v));
+        let connected = false;
+        for (let k = oldest; k >= 0; k--) {
+          const v = ring.at(k);
+          if (!Number.isFinite(v)) {
+            connected = false;
+            continue;
+          }
+          if (!connected) {
+            ctx.moveTo(x(k), y(v));
+            connected = true;
+          } else ctx.lineTo(x(k), y(v));
         }
         ctx.strokeStyle = colour;
         ctx.lineWidth = 1.5 * dpr;
@@ -281,7 +296,14 @@ function ChannelFader({
             <span className="mf-peak" />
             <span className="cf-ceiling" />
           </span>
-          <span className="meter-clip" title="Input clipped before gain" />
+          <span
+            className="meter-clip"
+            title={
+              levelKey.startsWith("src:")
+                ? "Input clipped before gain"
+                : "Mix clipped before destination volume"
+            }
+          />
           {mode === "simple" && (
             <span className="meter-scale">
               {SCALE.map((g) => (
@@ -431,8 +453,10 @@ export function NetChart({
           const samples = Math.min(seconds * 2, n.buffer2m.buf.length);
           let max = 0;
           for (let k = 0; k < samples; k++) {
-            const v = n.buffer2m.at(k);
-            if (Number.isFinite(v)) max = Math.max(max, v);
+            const buffer = n.buffer2m.at(k);
+            const gateway = n.ping2m.at(k);
+            if (Number.isFinite(buffer)) max = Math.max(max, buffer);
+            if (Number.isFinite(gateway)) max = Math.max(max, gateway);
           }
           const top = Math.max(60, Math.ceil(max / 20) * 20);
           const right = 30 * dpr;
@@ -467,28 +491,34 @@ export function NetChart({
           ctx.lineWidth = 2 * dpr;
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
-          ctx.strokeStyle = cs.getPropertyValue("--net-b").trim();
-          ctx.beginPath();
-          let connected = false;
-          for (let k = samples - 1; k >= 0; k--) {
-            const v = n.buffer2m.at(k);
-            if (!Number.isFinite(v)) {
-              connected = false;
-              continue;
+          for (const series of [
+            { ring: n.ping2m, css: "--net-a" },
+            { ring: n.buffer2m, css: "--net-b" },
+          ]) {
+            ctx.strokeStyle = cs.getPropertyValue(series.css).trim();
+            ctx.beginPath();
+            let connected = false;
+            for (let k = samples - 1; k >= 0; k--) {
+              const v = series.ring.at(k);
+              if (!Number.isFinite(v)) {
+                connected = false;
+                continue;
+              }
+              if (!connected) {
+                ctx.moveTo(x(k), y(v));
+                connected = true;
+              } else ctx.lineTo(x(k), y(v));
             }
-            if (!connected) {
-              ctx.moveTo(x(k), y(v));
-              connected = true;
-            } else ctx.lineTo(x(k), y(v));
+            ctx.stroke();
           }
-          ctx.stroke();
           const at = hover.current;
           const tooltip = tip.current;
           if (tooltip) {
             tooltip.hidden = at === null;
             if (at !== null) {
               const v = n.buffer2m.at(at);
-              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 2)} s`} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
+              const gateway = n.ping2m.at(at);
+              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 2)} s`} · Gateway ${Number.isFinite(gateway) ? `${Math.round(gateway)} ms` : "unavailable"} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
               tooltip.style.left = `${Math.max(0, Math.min(cv.clientWidth - 150, x(at) / dpr + 12))}px`;
               ctx.fillStyle = cs.getPropertyValue("--crosshair").trim();
               ctx.fillRect(
@@ -507,6 +537,9 @@ export function NetChart({
   return (
     <div className="net-chart" ref={box}>
       <div className="net-legend" aria-hidden>
+        <span className="net-key" data-series="ping2m">
+          Gateway
+        </span>
         <span className="net-key" data-series="buffer2m">
           Buffer
         </span>
@@ -663,13 +696,15 @@ export function OnAirTime({ since }: { since?: number | undefined }) {
 
 function Slip({
   text,
+  compact,
   children,
 }: {
   text: string;
+  compact?: boolean;
   children?: ReactNode | undefined;
 }) {
   return (
-    <div className="slip" role="alert">
+    <div className={`slip${compact ? " operation-slip" : ""}`} role="alert">
       <TriangleAlert size={16} aria-hidden className="slip-icon" />
       <span className="slip-text" title={text}>
         {text}
@@ -729,6 +764,7 @@ const sourceTag = (c: Source) =>
 /* ----------------------------------------------------------------- sources */
 
 export interface SourceHandlers {
+  dismiss: () => void;
   change: () => void;
   remove: () => void;
   capture: () => void;
@@ -851,17 +887,29 @@ export function SourceCard({
             onChange={h.mute}
             what={`${s.name} in the mix`}
           />
-          <ChannelFader
-            levelKey={`src:${card.uid}`}
-            mode={expand ? "simple" : mode}
-            gainDb={card.gainDb}
-            onChange={h.gain}
-            onCommit={h.commit}
-            label={`${s.name} gain`}
-            muted={card.muted}
-            idle={idle}
-            readout={readout}
-          />
+          {card.operationError ? (
+            <Slip text={card.operationError} compact>
+              <button
+                type="button"
+                className="btn btn-small"
+                onClick={h.dismiss}
+              >
+                Dismiss
+              </button>
+            </Slip>
+          ) : (
+            <ChannelFader
+              levelKey={`src:${card.uid}`}
+              mode={expand ? "simple" : mode}
+              gainDb={card.gainDb}
+              onChange={h.gain}
+              onCommit={h.commit}
+              label={`${s.name} gain`}
+              muted={card.muted}
+              idle={idle}
+              readout={readout}
+            />
+          )}
         </div>
       )}
       {expand && <SourceHistory levelKey={`src:${card.uid}`} />}
@@ -872,6 +920,7 @@ export function SourceCard({
 /* ------------------------------------------------------------ destinations */
 
 export interface DestHandlers {
+  dismiss: () => void;
   change: () => void;
   remove: () => void;
   confirmRemove: (on: boolean) => void;
@@ -1061,6 +1110,14 @@ export function DestCard({
         </button>
       </Slip>
     );
+  } else if (card.operationError) {
+    body = (
+      <Slip text={card.operationError} compact>
+        <button type="button" className="btn btn-small" onClick={h.dismiss}>
+          Dismiss
+        </button>
+      </Slip>
+    );
   } else if (card.state === "connecting") {
     const idx = STAGES.findIndex((x) => x.id === card.stage);
     body = (
@@ -1148,35 +1205,33 @@ export function DestCard({
       data-compact={compact || undefined}
       aria-label={`${channel.name} on ${server.name}, ${STATUS[sk]}`}
     >
-      <>
-        <div className="card-row identity-row">
-          {identity}
-          {badge}
-          {remove}
+      <div className="card-row identity-row">
+        {identity}
+        {badge}
+        {remove}
+      </div>
+      {!faulted && !card.confirmRemove && (
+        <div className="card-row controls-row">
+          {action}
+          <MuteToggle
+            muted={card.muted}
+            onChange={h.mute}
+            what={channel.name}
+          />
+          <ChannelFader
+            levelKey={`dst:${card.uid}`}
+            mode={mode}
+            gainDb={card.volumeDb}
+            onChange={h.volume}
+            onCommit={h.commit}
+            label={`${channel.name} volume`}
+            muted={card.muted}
+            idle={live ? undefined : "Not sending"}
+            readout={readout}
+          />
         </div>
-        {!faulted && !card.confirmRemove && (
-          <div className="card-row controls-row">
-            {action}
-            <MuteToggle
-              muted={card.muted}
-              onChange={h.mute}
-              what={channel.name}
-            />
-            <ChannelFader
-              levelKey={`dst:${card.uid}`}
-              mode={mode}
-              gainDb={card.volumeDb}
-              onChange={h.volume}
-              onCommit={h.commit}
-              label={`${channel.name} volume`}
-              muted={card.muted}
-              idle={live ? undefined : "Not sending"}
-              readout={readout}
-            />
-          </div>
-        )}
-        <div className="dest-body">{body}</div>
-      </>
+      )}
+      <div className="dest-body">{body}</div>
     </article>
   );
 }

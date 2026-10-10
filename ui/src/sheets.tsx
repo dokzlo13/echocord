@@ -657,7 +657,13 @@ export function BotSetup({
   );
 }
 
-export function BotAvatar({ size = 40 }: { size?: number | undefined }) {
+export function BotAvatar({
+  size = 40,
+  avatarUrl,
+}: {
+  size?: number | undefined;
+  avatarUrl?: string | undefined;
+}) {
   // The native profile currently has no avatar; use a neutral bot glyph.
   return (
     <span
@@ -665,7 +671,11 @@ export function BotAvatar({ size = 40 }: { size?: number | undefined }) {
       style={{ width: size, height: size }}
       aria-hidden
     >
-      <Bot size={Math.round(size * 0.55)} />
+      {avatarUrl ? (
+        <img src={avatarUrl} alt="" />
+      ) : (
+        <Bot size={Math.round(size * 0.55)} />
+      )}
     </span>
   );
 }
@@ -831,9 +841,10 @@ export function BotInfo({
       }
     >
       <div className="bot-head">
-        <BotAvatar size={56} />
+        <BotAvatar size={56} avatarUrl={bot.avatarUrl} />
         <span className="set-text">
           <span className="bot-name">{bot.name ?? "Discord bot"}</span>
+          {bot.id && <span className="set-sub tabular">ID {bot.id}</span>}
           <span className="bot-status">
             <span className="bot-dot" aria-hidden />
             {bot.status === "ready"

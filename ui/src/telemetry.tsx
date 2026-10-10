@@ -41,8 +41,9 @@ export class TelemetryStore {
     ping2m: new Ring(240),
     buffer2m: new Ring(240),
   };
-  private lastLevel = 0;
-  private lastNet = 0;
+  private lastLevel = Number.NEGATIVE_INFINITY;
+  private lastNet = Number.NEGATIVE_INFINITY;
+  private sessionId: number | null = null;
   private outputId: string | null = null;
   private peaks = new Map<string, { db: number; until: number }>();
   private visibleListeners = new Set<() => void>();
@@ -60,8 +61,29 @@ export class TelemetryStore {
       };
     }
   }
+  resetHistory = () => {
+    this.histories.clear();
+    this.peaks.clear();
+    this.network.ping2m = new Ring(240);
+    this.network.buffer2m = new Ring(240);
+    this.lastLevel = Number.NEGATIVE_INFINITY;
+    this.lastNet = Number.NEGATIVE_INFINITY;
+  };
+  setSession(id: number) {
+    if (this.sessionId !== id) {
+      this.sessionId = id;
+      for (const key of this.histories.keys())
+        if (key.startsWith("dst:")) this.histories.delete(key);
+      for (const key of this.peaks.keys())
+        if (key.startsWith("dst:")) this.peaks.delete(key);
+      this.network.ping2m = new Ring(240);
+      this.network.buffer2m = new Ring(240);
+      this.lastNet = Number.NEGATIVE_INFINITY;
+    }
+  }
   setVisible(visible: boolean) {
     if (this.visible === visible) return;
+    if (visible) this.resetHistory();
     this.visible = visible;
     for (const f of this.visibleListeners) f();
   }
@@ -78,6 +100,8 @@ export class TelemetryStore {
     if (!this.visible || (typeof document !== "undefined" && document.hidden))
       return;
     const now = performance.now();
+    if (Number.isFinite(this.lastLevel) && now - this.lastLevel > 250)
+      this.resetHistory();
     if (now - this.lastLevel >= 95) {
       this.lastLevel = now;
       const valid = new Set<string>();
@@ -93,6 +117,8 @@ export class TelemetryStore {
       }
       for (const key of this.histories.keys())
         if (!valid.has(key)) this.histories.delete(key);
+      for (const key of this.peaks.keys())
+        if (!valid.has(key)) this.peaks.delete(key);
     }
     if (now - this.lastNet >= 490) {
       this.lastNet = now;
@@ -127,11 +153,18 @@ export class TelemetryStore {
       held = { db, until: now + 1200 };
       this.peaks.set(key, held);
     }
-    return { db, peak: held?.db ?? null, preClip: input?.preClip ?? false };
+    return {
+      db,
+      peak: held?.db ?? null,
+      preClip:
+        input?.preClip ??
+        (key.startsWith("dst:") ? (this.latest?.mixPreClip ?? false) : false),
+    };
   };
   net = () => this.network;
   clear() {
     this.latest = null;
+    this.sessionId = null;
     this.histories.clear();
     this.peaks.clear();
     this.network = {

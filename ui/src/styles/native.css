@@ -66,3 +66,41 @@ body {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
 }
+
+.brand,
+.win-btn,
+.bot-dot,
+.bot-avatar {
+  flex-shrink: 0;
+}
+.bot-chip {
+  min-width: 0;
+  max-width: 38vw;
+}
+.bot-chip-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bot-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+.source-card .controls-row > .slip {
+  height: var(--cf-h);
+  padding: 3px 6px;
+  gap: 6px;
+}
+.operation-slip {
+  height: 28px;
+  padding: 1px 6px;
+  gap: 6px;
+}
+.operation-slip .slip-text {
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

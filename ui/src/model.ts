@@ -42,6 +42,7 @@ export interface SourceCard {
   muted: boolean;
   gainDb: number | null;
   fault?: Fault | undefined;
+  operationError?: string | undefined;
   restored: boolean;
 }
 export type DestState =
@@ -66,6 +67,7 @@ export interface DestCard {
   volumeDb: number | null;
   muted: boolean;
   fault?: Fault | undefined;
+  operationError?: string | undefined;
   confirmRemove: boolean;
   op: number;
   liveAt?: number | undefined;

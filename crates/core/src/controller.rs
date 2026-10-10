@@ -1,14 +1,14 @@
 //! Parent control surface. This module never creates a gateway client or handles PCM.
 use crate::{
     model::*,
-    protocol::{self, Command, Failure, Frame, Init, Status, Validator},
+    protocol::{self, Failure},
 };
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
-    io::{BufReader, Read},
+    io::Read,
     path::PathBuf,
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -16,12 +16,6 @@ use tokio::{
     time::Instant,
 };
 
-const LAUNCH_COOLDOWN: Duration = Duration::from_secs(5);
-const STOP_GRACE: Duration = Duration::from_millis(750);
-const EXIT_GRACE: Duration = Duration::from_secs(3);
-const CONNECT_DEADLINE: Duration = Duration::from_secs(45);
-const RECOVERY_DEADLINE: Duration = Duration::from_secs(40);
-const DIAGNOSTIC_GRACE: Duration = Duration::from_secs(1);
 const MAX_SETTINGS_BYTES: u64 = 65536;
 
 #[derive(Clone)]
@@ -58,14 +52,6 @@ enum Event {
     Catalog(u64, Result<Catalog, AppError>),
     Unconfigured(u64),
     Configured(u64, Result<(), AppError>),
-    #[cfg(any(windows, test))]
-    Stage(u32, ConnectStage),
-    Preflight(u32, Result<StartLimit, AppError>),
-    LaunchFailed(u32),
-    Status(u32, Status),
-    ProtocolFailed(u32),
-    Exited(u32, bool),
-    CleanupIncomplete(u32),
 }
 
 impl Controller {
@@ -193,15 +179,16 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     let mut prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
-    if prefs.version > 3
+    if prefs.version > 4
         || prefs.inputs.len() > MAX_INPUTS
         || prefs.destinations.len() > MAX_DESTINATIONS
-        || prefs
-            .destinations
-            .iter()
-            .filter(|d| d.kind == DestinationKind::Discord)
-            .count()
-            > 1
+        || (prefs.version < 4
+            && prefs
+                .destinations
+                .iter()
+                .filter(|d| d.kind == DestinationKind::Discord)
+                .count()
+                > 1)
         || prefs
             .destinations
             .iter()
@@ -294,6 +281,7 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     let mut destination_ids = std::collections::HashSet::new();
     let mut playback_ids = std::collections::HashSet::new();
+    let mut discord_servers = std::collections::HashSet::new();
     if prefs.destinations.iter().any(|d| {
         !destination_ids.insert(d.destination_id.clone())
             || d.destination_id.len() > 64
@@ -302,7 +290,8 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
                 .is_some_and(|name| name.len() > 1024 || name.chars().any(char::is_control))
             || match d.kind {
                 DestinationKind::Discord => {
-                    d.destination_id != "discord-1"
+                    !d.destination_id.starts_with("discord-")
+                        || !discord_servers.insert(d.server_id.clone())
                         || d.device_id.is_some()
                         || protocol::discord_id(&d.server_id).is_none()
                         || protocol::discord_id(&d.channel_id).is_none()
@@ -373,7 +362,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
             && serde_json::from_slice::<serde_json::Value>(&old)
                 .ok()
                 .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
-                .is_some_and(|version| version > 3)
+                .is_some_and(|version| version > 4)
         {
             return Err(error(
                 ErrorCode::Configuration,
@@ -382,7 +371,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
         }
     }
     let bytes = serde_json::to_vec(&Preferences {
-        version: 3,
+        version: 4,
         inputs: snapshot
             .inputs
             .iter()
@@ -479,16 +468,6 @@ fn missing_token(config: &ControllerConfig) -> bool {
 fn missing_token_error(kind: std::io::ErrorKind) -> bool {
     kind == std::io::ErrorKind::NotFound
 }
-struct StartLimit {
-    remaining: u64,
-    reset_after: Duration,
-}
-
-struct RetiredSession {
-    generation: u32,
-    catalog_epoch: u64,
-    until: Instant,
-}
 
 struct ConfigurationCheck {
     epoch: u64,
@@ -533,21 +512,6 @@ impl ConfigurationControl {
     }
 }
 
-fn generic_failure(code: &ErrorCode) -> bool {
-    matches!(code, ErrorCode::Internal | ErrorCode::ConnectionFailed)
-}
-fn specific_failure(code: Failure) -> bool {
-    matches!(
-        code,
-        Failure::Configuration
-            | Failure::Authentication
-            | Failure::Permission
-            | Failure::Capture
-            | Failure::ApplicationCapture
-            | Failure::SourceExited
-    )
-}
-
 #[cfg(windows)]
 struct PlaybackRuntime {
     host: crate::playback::PlaybackHost,
@@ -560,7 +524,26 @@ struct PlaybackRuntime {
     stop_since: Option<Instant>,
 }
 
+#[cfg(windows)]
+type GatewayHost = crate::discord::worker::Worker<
+    crate::discord::protocol::GatewayCommand,
+    crate::discord::protocol::GatewayStatus,
+>;
+#[cfg(windows)]
+type VoiceHost = crate::discord::worker::Worker<
+    crate::discord::protocol::VoiceCommand,
+    crate::discord::protocol::VoiceStatus,
+>;
+
 struct Actor {
+    discord: crate::discord::control::Manager,
+    next_discord_publish: Instant,
+    discord_restart: std::collections::BTreeSet<String>,
+    discord_removing: std::collections::BTreeSet<String>,
+    #[cfg(windows)]
+    gateway_host: Option<(u32, GatewayHost)>,
+    #[cfg(windows)]
+    voice_hosts: std::collections::BTreeMap<String, (u32, VoiceHost)>,
     #[cfg(windows)]
     playback: std::collections::BTreeMap<String, PlaybackRuntime>,
     playback_epoch: u64,
@@ -570,7 +553,6 @@ struct Actor {
     audio: Option<crate::mixing::AudioHost>,
     audio_failed: bool,
     next_strip: u64,
-    move_pending: bool,
     config: ControllerConfig,
     snapshot: ControlSnapshot,
     snapshots: watch::Sender<ControlSnapshot>,
@@ -578,15 +560,7 @@ struct Actor {
     catalog_epoch: u64,
     source_epoch: u64,
     source_scanning: bool,
-    child: Option<ChildControl>,
-    pending: bool,
-    preflight: Option<tokio::task::JoinHandle<()>>,
     configuration: Option<ConfigurationCheck>,
-    next_launch: Option<Instant>,
-    deadline: Option<Instant>,
-    next_meter: Instant,
-    terminal_error: Option<AppError>,
-    retired: Option<RetiredSession>,
     preferences_error: Option<AppError>,
     shutting_down: bool,
     shutdown_waiters: Vec<oneshot::Sender<Result<(), AppError>>>,
@@ -598,6 +572,14 @@ impl Actor {
         events: mpsc::Sender<Event>,
     ) -> Self {
         Self {
+            discord: crate::discord::control::Manager::default(),
+            next_discord_publish: Instant::now(),
+            discord_restart: std::collections::BTreeSet::new(),
+            discord_removing: std::collections::BTreeSet::new(),
+            #[cfg(windows)]
+            gateway_host: None,
+            #[cfg(windows)]
+            voice_hosts: std::collections::BTreeMap::new(),
             #[cfg(windows)]
             playback: std::collections::BTreeMap::new(),
             playback_epoch: 0,
@@ -607,7 +589,6 @@ impl Actor {
             audio: None,
             audio_failed: false,
             next_strip: 1,
-            move_pending: false,
             config,
             snapshot: ControlSnapshot::default(),
             snapshots,
@@ -615,67 +596,44 @@ impl Actor {
             catalog_epoch: 0,
             source_epoch: 0,
             source_scanning: false,
-            child: None,
-            pending: false,
-            preflight: None,
             configuration: None,
-            next_launch: None,
-            deadline: None,
-            next_meter: Instant::now(),
-            terminal_error: None,
-            retired: None,
             preferences_error: None,
             shutting_down: false,
             shutdown_waiters: Vec::new(),
         }
     }
     fn publish(&mut self) {
-        if let Some(destination) = self
-            .snapshot
-            .destinations
-            .iter_mut()
-            .find(|d| d.kind == DestinationKind::Discord)
-        {
-            destination.connection = self.snapshot.connection.clone();
-            destination.session_id = self.snapshot.session_id;
-        }
-        self.snapshot.telemetry.output_level_dbfs = self.snapshot.capture.output_level_dbfs;
-        self.snapshot.telemetry.queued_frames = self.snapshot.capture.queued_frames;
-        self.snapshot.telemetry.dropped_frames = self.snapshot.capture.dropped_frames;
-        self.snapshot.telemetry.underrun_frames = self.snapshot.capture.underrun_frames;
+        self.discord.publish(&mut self.snapshot);
         self.snapshot.telemetry.destinations.retain(|meter| {
             self.snapshot
                 .destinations
                 .iter()
                 .any(|d| d.destination_id == meter.destination_id)
         });
-        if let Some(destination) = self
+        if let Some(d) = self
             .snapshot
             .destinations
             .iter()
             .find(|d| d.kind == DestinationKind::Discord)
         {
-            let measured = DestinationTelemetry {
-                destination_id: destination.destination_id.clone(),
-                session_id: destination.session_id,
-                level_dbfs: self.snapshot.capture.output_level_dbfs,
-                queued_frames: self.snapshot.capture.queued_frames,
-                dropped_frames: self.snapshot.capture.dropped_frames,
-                underrun_frames: self.snapshot.capture.underrun_frames,
-                gateway_ping_ms: self.snapshot.telemetry.gateway_ping_ms,
-            };
-            if let Some(existing) = self
-                .snapshot
-                .telemetry
-                .destinations
-                .iter_mut()
-                .find(|m| m.destination_id == destination.destination_id)
-            {
-                *existing = measured;
-            } else {
-                self.snapshot.telemetry.destinations.push(measured);
-            }
+            self.snapshot.connection = d.connection.clone();
+            self.snapshot.session_id = d.session_id;
+            self.snapshot.selection.server_id = Some(d.server_id.clone());
+            self.snapshot.selection.channel_id = Some(d.channel_id.clone());
+            self.snapshot.capture = self
+                .discord
+                .rooms
+                .get(&d.destination_id)
+                .map_or_else(|| ControlSnapshot::default().capture, |r| r.capture.clone());
+        } else {
+            self.snapshot.connection = Connection::Disconnected;
+            self.snapshot.capture = ControlSnapshot::default().capture;
         }
+        self.snapshot.telemetry.gateway_ping_ms = self.discord.ping;
+        self.snapshot.telemetry.output_level_dbfs = self.snapshot.capture.output_level_dbfs;
+        self.snapshot.telemetry.queued_frames = self.snapshot.capture.queued_frames;
+        self.snapshot.telemetry.dropped_frames = self.snapshot.capture.dropped_frames;
+        self.snapshot.telemetry.underrun_frames = self.snapshot.capture.underrun_frames;
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
         self.snapshots.send_replace(self.snapshot.clone());
     }
@@ -711,7 +669,8 @@ impl Actor {
                     .iter()
                     .filter_map(|d| {
                         d.destination_id
-                            .strip_prefix("playback-")
+                            .split_once('-')
+                            .map(|(_, id)| id)
                             .and_then(|id| id.parse::<u64>().ok())
                     })
                     .max()
@@ -787,40 +746,23 @@ impl Actor {
                 },
                 Some(event) = events.recv() => self.event(event),
                 _ = tick.tick() => {
-                    if Instant::now() >= self.next_meter {
-                        self.next_meter = Instant::now() + Duration::from_millis(100);
-                        if !matches!(self.snapshot.connection, Connection::Disconnecting | Connection::CleanupIncomplete { .. }) {
-                            let capture = self.child.as_ref().and_then(ChildControl::take_meter);
-                            if let Some(capture) = capture { self.snapshot.capture = protocol::clean_capture(capture); self.publish(); }
-                        }
-                    }
                     self.poll_audio();
                     self.poll_playback();
-                    if self.move_pending && self.child.is_none() && !self.pending && !self.shutting_down && self.next_launch.is_none_or(|at| Instant::now() >= at) {
-                        self.move_pending = false;
-                        if let Err(error) = self.connect() { self.fail(error); }
-                    }
-                    self.poll_deadline();
+                    self.poll_discord();
                 }
             }
             if self.shutting_down
                 && self.audio_stopped()
                 && self.playback_stopped()
+                && !self.discord.busy()
                 && self.configuration.is_none()
-                && (self.child.is_none()
-                    || matches!(
-                        self.snapshot.connection,
-                        Connection::CleanupIncomplete { .. }
-                    ))
             {
-                let result = if self.child.is_some()
-                    || self.audio_cleanup_incomplete()
-                    || self.playback_cleanup_incomplete()
-                {
-                    Err(cleanup_error())
-                } else {
-                    Ok(())
-                };
+                let result =
+                    if self.audio_cleanup_incomplete() || self.playback_cleanup_incomplete() {
+                        Err(cleanup_error())
+                    } else {
+                        Ok(())
+                    };
                 for waiter in self.shutdown_waiters.drain(..) {
                     let _ = waiter.send(result.clone());
                 }
@@ -831,11 +773,13 @@ impl Actor {
     }
     fn begin_shutdown(&mut self) {
         self.shutting_down = true;
+        self.discord_restart.clear();
+        self.discord.stop_all();
+        self.poll_discord();
         #[cfg(windows)]
         if let Some(audio) = &self.audio {
             audio.stop();
         }
-        self.disconnect();
         #[cfg(windows)]
         for output in self.playback.values_mut() {
             output.stopping = true;
@@ -852,6 +796,7 @@ impl Actor {
             configuration.task.abort();
             let _ = configuration.reply.send(Err(unavailable()));
         }
+        self.publish();
         // Saving is committed under the same mutex as cancellation. A queued or
         // running blocking save must report its actual result before shutdown
         // can succeed; the shell separately owns its three-second Quit fallback.
@@ -859,7 +804,6 @@ impl Actor {
     fn refresh(&mut self) {
         self.refresh_sources();
         self.refresh_playback_devices();
-        self.retired = None;
         self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
         let epoch = self.catalog_epoch;
         self.snapshot.discovery = Discovery::Loading;
@@ -909,16 +853,6 @@ impl Actor {
             Duration::from_secs(5),
         ));
     }
-    fn poll_deadline(&mut self) {
-        if self.deadline.is_some_and(|d| Instant::now() >= d)
-            && !matches!(
-                self.snapshot.connection,
-                Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-            )
-        {
-            self.fail(Failure::Connection.error());
-        }
-    }
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
             ControlCommand::RefreshPlaybackDevices => {
@@ -930,55 +864,51 @@ impl Actor {
                 return Ok(());
             }
             ControlCommand::RefreshCatalog | ControlCommand::RecheckConfiguration => {
-                if self.snapshot.connection.locks_route() || self.configuration.is_some() {
+                if self.configuration.is_some() {
                     return Err(busy());
                 }
                 self.refresh();
                 return Ok(());
             }
             ControlCommand::SelectSource { source_id } => {
-                if self.snapshot.connection.locks_route() {
-                    return Err(busy());
-                }
-                if !self
-                    .snapshot
-                    .sources
-                    .iter()
-                    .any(|s| s.id == source_id && s.available)
-                {
-                    return Err(error(
-                        ErrorCode::InvalidSelection,
-                        "Select an available audio source.",
-                    ));
-                }
-                self.snapshot.selection.source_id = Some(source_id);
+                let command = self.snapshot.inputs.first().map_or_else(
+                    || ControlCommand::AddSource {
+                        source_id: source_id.clone(),
+                    },
+                    |input| ControlCommand::ReplaceSource {
+                        strip_id: input.strip_id.clone(),
+                        source_id: source_id.clone(),
+                    },
+                );
+                return self.mix_command(command);
             }
             ControlCommand::SelectDestination {
                 server_id,
                 channel_id,
             } => {
-                if self.snapshot.connection.locks_route() {
-                    return Err(busy());
-                }
-                let server = self
-                    .snapshot
-                    .servers
-                    .iter()
-                    .find(|s| s.id == server_id)
-                    .ok_or_else(|| {
-                        error(ErrorCode::InvalidSelection, "Select an available server.")
-                    })?;
-                if channel_id
-                    .as_ref()
-                    .is_some_and(|id| !server.channels.iter().any(|c| c.id == *id))
-                {
-                    return Err(error(
+                let channel_id = channel_id.ok_or_else(|| {
+                    error(
                         ErrorCode::InvalidSelection,
-                        "Select an available voice channel.",
-                    ));
-                }
-                self.snapshot.selection.server_id = Some(server_id);
-                self.snapshot.selection.channel_id = channel_id;
+                        "Select a voice channel for this destination.",
+                    )
+                })?;
+                let command = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                    .map_or_else(
+                        || ControlCommand::AddDestination {
+                            server_id: server_id.clone(),
+                            channel_id: channel_id.clone(),
+                        },
+                        |d| ControlCommand::ChangeDestination {
+                            destination_id: d.destination_id.clone(),
+                            server_id: server_id.clone(),
+                            channel_id: channel_id.clone(),
+                        },
+                    );
+                return self.mix_command(command);
             }
             ControlCommand::SetVolume { percent } => {
                 if percent > 100 {
@@ -1001,8 +931,13 @@ impl Actor {
                         Some(20.0 * (percent as f32 / 100.0).log10())
                     };
                 }
-                if let Some(child) = &self.child {
-                    child.output(self.snapshot.output.clone());
+                if let Some(index) = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .position(|d| d.kind == DestinationKind::Discord)
+                {
+                    self.update_destination_output(index);
                 }
             }
             ControlCommand::SetMuted { muted } => {
@@ -1015,16 +950,29 @@ impl Actor {
                 {
                     d.muted = muted;
                 }
-                if let Some(child) = &self.child {
-                    child.output(self.snapshot.output.clone());
+                if let Some(index) = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .position(|d| d.kind == DestinationKind::Discord)
+                {
+                    self.update_destination_output(index);
                 }
             }
-            ControlCommand::Connect => return self.connect(),
+            ControlCommand::Connect => {
+                let id = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                    .map(|d| d.destination_id.clone())
+                    .ok_or_else(|| error(ErrorCode::InvalidSelection, "Select a Discord room."))?;
+                return self.start_discord(&id);
+            }
             ControlCommand::Disconnect => {
-                self.move_pending = false;
-                self.terminal_error = None;
-                self.retired = None;
-                self.disconnect();
+                self.discord_restart.clear();
+                self.discord.stop_all();
+                self.poll_discord();
                 return Ok(());
             }
             command => return self.mix_command(command),
@@ -1363,42 +1311,28 @@ impl Actor {
                 server_id,
                 channel_id,
             } => {
-                if self.child.is_some() || self.pending {
-                    return Err(busy());
-                }
-                if self.snapshot.destinations.len() >= MAX_DESTINATIONS
-                    || self
-                        .snapshot
-                        .destinations
-                        .iter()
-                        .any(|d| d.kind == DestinationKind::Discord)
-                {
+                if self.snapshot.destinations.len() >= MAX_DESTINATIONS {
                     return Err(error(
                         ErrorCode::InvalidSelection,
-                        "One Discord room is supported.",
+                        "Up to four destinations are supported.",
                     ));
                 }
                 self.validate_destination(&server_id, &channel_id)?;
-                self.snapshot.selection.server_id = Some(server_id.clone());
-                self.snapshot.selection.channel_id = Some(channel_id.clone());
-                self.snapshot.connection = Connection::Disconnected;
+                self.validate_server_slot(&server_id, None)?;
+                let destination_id = format!("discord-{}", self.next_destination);
+                self.next_destination += 1;
                 self.snapshot.destinations.push(DestinationStrip {
                     session_id: 0,
                     kind: DestinationKind::Discord,
                     device_id: None,
                     display_name: None,
-                    destination_id: "discord-1".into(),
+                    destination_id,
                     server_id,
                     channel_id,
                     connection: Connection::Disconnected,
                     volume_db: Some(0.0),
                     muted: false,
                 });
-                self.snapshot.output = Output {
-                    volume_linear: Some(1.0),
-                    volume_percent: 100,
-                    muted: false,
-                };
             }
             ControlCommand::RemoveDestination { destination_id } => {
                 let index = self.destination_index(&destination_id)?;
@@ -1409,10 +1343,14 @@ impl Actor {
                     }
                     self.stop_playback(&destination_id, false);
                 } else {
-                    self.move_pending = false;
-                    self.disconnect();
-                    self.snapshot.selection.server_id = None;
-                    self.snapshot.selection.channel_id = None;
+                    self.discord_restart.remove(&destination_id);
+                    if self.discord.contains(&destination_id) {
+                        self.discord_removing.insert(destination_id.clone());
+                        self.discord.stop(&destination_id, None);
+                        self.poll_discord();
+                        self.publish();
+                        return self.persist();
+                    }
                 }
                 self.snapshot.destinations.remove(index);
             }
@@ -1422,40 +1360,44 @@ impl Actor {
                 channel_id,
             } => {
                 let index = self.destination_index(&destination_id)?;
-                if self.snapshot.destinations[index].kind != DestinationKind::Discord {
+                let destination = &self.snapshot.destinations[index];
+                if destination.kind != DestinationKind::Discord {
                     return Err(error(
                         ErrorCode::InvalidSelection,
                         "Select a playback device for this output.",
                     ));
                 }
                 self.validate_destination(&server_id, &channel_id)?;
-                if self.snapshot.destinations[index].server_id == server_id
-                    && self.snapshot.destinations[index].channel_id == channel_id
-                {
+                if destination.server_id == server_id && destination.channel_id == channel_id {
                     return Ok(());
                 }
-                let reconnect = self.child.is_some()
-                    || self.pending
-                    || matches!(
-                        self.snapshot.connection,
-                        Connection::Connected | Connection::Recovering { .. }
-                    );
-                if reconnect {
-                    self.disconnect();
-                    self.move_pending = true;
+                self.validate_server_slot(&server_id, Some(&destination_id))?;
+                if self
+                    .discord
+                    .rooms
+                    .get(&destination_id)
+                    .is_some_and(|r| !r.wanted)
+                {
+                    return Err(busy());
                 }
-                self.snapshot.selection.server_id = Some(server_id.clone());
-                self.snapshot.selection.channel_id = Some(channel_id.clone());
-                let destination = &mut self.snapshot.destinations[index];
-                destination.server_id = server_id;
-                destination.channel_id = channel_id;
+                if self.discord.contains(&destination_id) {
+                    self.discord_restart.insert(destination_id.clone());
+                    self.discord.stop(&destination_id, None);
+                }
+                let d = &mut self.snapshot.destinations[index];
+                if !self.discord.contains(&destination_id) {
+                    d.connection = Connection::Disconnected;
+                }
+                d.server_id = server_id;
+                d.channel_id = channel_id;
+                self.poll_discord();
             }
             ControlCommand::ConnectDestination { destination_id } => {
                 let index = self.destination_index(&destination_id)?;
                 return if self.snapshot.destinations[index].kind == DestinationKind::Playback {
                     self.start_playback(&destination_id)
                 } else {
-                    self.connect()
+                    self.start_discord(&destination_id)
                 };
             }
             ControlCommand::DisconnectDestination { destination_id } => {
@@ -1463,10 +1405,9 @@ impl Actor {
                 if self.snapshot.destinations[index].kind == DestinationKind::Playback {
                     self.stop_playback(&destination_id, false);
                 } else {
-                    self.move_pending = false;
-                    self.terminal_error = None;
-                    self.retired = None;
-                    self.disconnect();
+                    self.discord_restart.remove(&destination_id);
+                    self.discord.stop(&destination_id, None);
+                    self.poll_discord();
                 }
             }
             ControlCommand::SetDestinationVolume {
@@ -1499,20 +1440,23 @@ impl Actor {
         self.publish();
         self.persist()
     }
-    fn persist(&self) -> Result<(), AppError> {
+    fn persist(&mut self) -> Result<(), AppError> {
+        let mut snapshot = self.snapshot.clone();
+        snapshot
+            .destinations
+            .retain(|d| !self.discord_removing.contains(&d.destination_id));
         #[cfg(windows)]
-        if self.playback.values().any(|runtime| runtime.removing) {
-            // Remember Remove immediately while retaining its visible card and
-            // physical reservation until the worker's exit is confirmed.
-            let mut snapshot = self.snapshot.clone();
-            snapshot.destinations.retain(|destination| {
-                self.playback
-                    .get(&destination.destination_id)
-                    .is_none_or(|runtime| !runtime.removing)
-            });
-            return save_preferences(&self.config, &snapshot);
+        snapshot.destinations.retain(|d| {
+            self.playback
+                .get(&d.destination_id)
+                .is_none_or(|r| !r.removing)
+        });
+        save_preferences(&self.config, &snapshot)?;
+        if self.preferences_error.take().is_some() && self.snapshot.bot.status == BotStatus::Ready {
+            self.snapshot.discovery = Discovery::Ready;
+            self.publish();
         }
-        save_preferences(&self.config, &self.snapshot)
+        Ok(())
     }
     fn destination_index(&self, id: &str) -> Result<usize, AppError> {
         self.snapshot
@@ -1618,10 +1562,13 @@ impl Actor {
             muted: destination.muted,
         };
         if destination.kind == DestinationKind::Discord {
-            self.snapshot.output = output;
-            if let Some(child) = &self.child {
-                child.output(self.snapshot.output.clone());
+            #[cfg(windows)]
+            if let Some((_, host)) = self.voice_hosts.get(&destination.destination_id) {
+                let _ = host.send(crate::discord::protocol::VoiceCommand::Output {
+                    output: output.clone(),
+                });
             }
+            self.snapshot.output = output;
         } else {
             #[cfg(windows)]
             if let Some(runtime) = self.playback.get(&destination.destination_id) {
@@ -1963,7 +1910,7 @@ impl Actor {
                 {
                     return Err(error(
                         ErrorCode::InvalidSelection,
-                        "Up to three playback outputs and one Discord room are supported.",
+                        "Up to four destinations, including three playback outputs, are supported.",
                     ));
                 }
                 let device = self.playback_device(&device_id, None)?;
@@ -2026,10 +1973,9 @@ impl Actor {
                 }
             }
             ControlCommand::DisconnectAllDestinations => {
-                self.move_pending = false;
-                self.terminal_error = None;
-                self.retired = None;
-                self.disconnect();
+                self.discord_restart.clear();
+                self.discord.stop_all();
+                self.poll_discord();
                 let local: Vec<_> = self
                     .snapshot
                     .destinations
@@ -2046,46 +1992,257 @@ impl Actor {
         self.publish();
         self.persist()
     }
-    fn connect(&mut self) -> Result<(), AppError> {
-        if self.child.is_some() || self.pending || self.snapshot.connection.locks_route() {
-            return Err(busy());
-        }
-        if self.next_launch.is_some_and(|d| Instant::now() < d) {
+    fn validate_server_slot(&self, server: &str, except: Option<&str>) -> Result<(), AppError> {
+        if self.snapshot.destinations.iter().any(|d| {
+            d.kind == DestinationKind::Discord
+                && d.server_id == server
+                && Some(d.destination_id.as_str()) != except
+        }) || self.discord.rooms.values().any(|r| {
+            r.key.server_id == server
+                && (Some(r.key.destination_id.as_str()) != except || !r.wanted)
+        }) {
             return Err(error(
                 ErrorCode::Busy,
-                "Wait before starting another gateway session.",
+                "This bot already has a room selected or finishing cleanup in this server.",
             ));
         }
-        if self.snapshot.bot.status != BotStatus::Ready
+        Ok(())
+    }
+    fn start_discord(&mut self, id: &str) -> Result<(), AppError> {
+        let index = self.destination_index(id)?;
+        let d = &self.snapshot.destinations[index];
+        if d.kind != DestinationKind::Discord {
+            return Err(error(ErrorCode::InvalidSelection, "Select a Discord room."));
+        }
+        if self.discord.rooms.get(id).is_some_and(|r| r.wanted) {
+            return Ok(());
+        }
+        self.validate_destination(&d.server_id, &d.channel_id)?;
+        self.validate_server_slot(&d.server_id, Some(id))?;
+        if self.configuration.is_some()
+            || self.snapshot.bot.status != BotStatus::Ready
             || !matches!(self.snapshot.discovery, Discovery::Ready)
         {
             return Err(Failure::Configuration.error());
         }
+        if self.config.token_file.is_none() {
+            return Err(Failure::Configuration.error());
+        }
         self.sync_audio()?;
-        self.initialization()?;
-        self.snapshot.session_id = self
-            .snapshot
-            .session_id
-            .checked_add(1)
-            .ok_or_else(unavailable)?;
-        self.pending = true;
-        self.terminal_error = None;
-        self.retired = None;
-        self.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Checking,
-        };
-        self.snapshot.capture.phase = CapturePhase::Stopped;
-        self.snapshot.capture.level_dbfs = None;
-        self.snapshot.capture.output_level_dbfs = None;
-        self.deadline = Some(Instant::now() + CONNECT_DEADLINE);
+        self.discord.start(&self.snapshot.destinations[index])?;
+        self.poll_discord();
         self.publish();
-        let generation = self.snapshot.session_id;
-        let config = self.config.clone();
-        let events = self.events.clone();
-        self.start_preflight(generation, async move {
-            start_limit(&config, generation, &events).await
-        });
         Ok(())
+    }
+    fn poll_discord(&mut self) {
+        if !self.discord.busy() && self.discord_restart.is_empty() {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use std::sync::atomic::Ordering;
+            if let Some((generation, host)) = &self.gateway_host {
+                let generation = *generation;
+                for status in host.take_statuses() {
+                    self.discord.gateway_status(generation, status);
+                }
+                host.poll_deadline();
+                let exited = host.exit.load(Ordering::Acquire);
+                if exited != 0 {
+                    self.discord.gateway_exit(generation, exited == 1);
+                    if exited == 1 {
+                        self.gateway_host = None;
+                    }
+                }
+            }
+            let mut exited = Vec::new();
+            for (id, (generation, host)) in &self.voice_hosts {
+                for status in host.take_statuses() {
+                    self.discord.voice_status(id, *generation, status);
+                }
+                host.poll_deadline();
+                let exit = host.exit.load(Ordering::Acquire);
+                if exit != 0 {
+                    self.discord.voice_exit(id, *generation, exit == 1);
+                    if exit == 1 {
+                        exited.push(id.clone());
+                    }
+                }
+            }
+            for id in exited {
+                self.voice_hosts.remove(&id);
+            }
+        }
+        let done = self.discord.advance(!self.discord_restart.is_empty());
+        for (id, connection) in done {
+            if let Some(d) = self
+                .snapshot
+                .destinations
+                .iter_mut()
+                .find(|d| d.destination_id == id)
+            {
+                d.connection = connection;
+            }
+            if self.discord_removing.remove(&id) {
+                self.snapshot
+                    .destinations
+                    .retain(|d| d.destination_id != id);
+            }
+        }
+        let restart = self.discord_restart.iter().cloned().collect::<Vec<_>>();
+        for id in restart {
+            if self.discord.contains(&id) {
+                continue;
+            }
+            if self.shutting_down
+                || !self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .any(|d| d.destination_id == id && d.connection == Connection::Disconnected)
+            {
+                self.discord_restart.remove(&id);
+                continue;
+            }
+            if self.discord.gateway.phase == GatewayPhase::Connected {
+                self.discord_restart.remove(&id);
+                if let Err(error) = self.start_discord(&id)
+                    && let Some(d) = self
+                        .snapshot
+                        .destinations
+                        .iter_mut()
+                        .find(|d| d.destination_id == id)
+                {
+                    d.connection = Connection::Error {
+                        code: error.code,
+                        message: error.message,
+                    };
+                }
+            }
+        }
+        let effects = std::mem::take(&mut self.discord.effects);
+        #[cfg(not(windows))]
+        {
+            let _ = effects;
+        }
+        #[cfg(windows)]
+        for effect in effects {
+            use crate::discord::{control::Effect, protocol::*};
+            use std::os::windows::io::AsRawHandle;
+            match effect {
+                Effect::LaunchGateway { generation } => {
+                    if self.gateway_host.is_some() {
+                        self.discord.gateway_failed(Failure::Protocol);
+                        continue;
+                    }
+                    let Some(token_file) = self.config.token_file.clone() else {
+                        self.discord.gateway_failed(Failure::Configuration);
+                        continue;
+                    };
+                    self.gateway_host = Some((
+                        generation,
+                        GatewayHost::launch(
+                            self.config.executable.clone(),
+                            "--gateway-worker",
+                            generation,
+                            Vec::new(),
+                            GatewayCommand::Init { token_file },
+                            GatewayCommand::Stop,
+                        ),
+                    ));
+                }
+                Effect::StopGateway => {
+                    if let Some((_, host)) = &self.gateway_host {
+                        host.stop();
+                    }
+                }
+                Effect::Gateway(command) => {
+                    if self
+                        .gateway_host
+                        .as_ref()
+                        .is_none_or(|(_, host)| !host.send(command))
+                    {
+                        self.discord.gateway_failed(Failure::Connection);
+                    }
+                }
+                Effect::StopVoice {
+                    destination_id,
+                    generation,
+                } => {
+                    if let Some((current, host)) = self
+                        .voice_hosts
+                        .get(&destination_id)
+                        .filter(|(current, _)| *current == generation)
+                    {
+                        let _ = current;
+                        host.stop();
+                    }
+                }
+                Effect::LaunchVoice {
+                    key,
+                    generation,
+                    revision,
+                    secret,
+                } => {
+                    if self.voice_hosts.contains_key(&key.destination_id) {
+                        self.discord
+                            .stop(&key.destination_id, Some(Failure::Protocol.error()));
+                        continue;
+                    }
+                    let Some(destination) = self
+                        .snapshot
+                        .destinations
+                        .iter()
+                        .find(|d| d.destination_id == key.destination_id)
+                    else {
+                        self.discord.stop(&key.destination_id, None);
+                        continue;
+                    };
+                    let inherited = self
+                        .audio
+                        .as_ref()
+                        .and_then(|audio| audio.bus.inheritable().ok());
+                    let Some(inherited) = inherited else {
+                        self.discord
+                            .stop(&key.destination_id, Some(Failure::Capture.error()));
+                        self.discord
+                            .voice_exit(&key.destination_id, generation, true);
+                        continue;
+                    };
+                    let source_id = format!("mix-handle:{}", inherited.as_raw_handle() as usize);
+                    let command = VoiceCommand::Init {
+                        key: key.clone(),
+                        gateway_epoch: self.discord.gateway.generation,
+                        credential_revision: revision,
+                        source_id,
+                        secret,
+                        output: Output {
+                            volume_percent: 100,
+                            volume_linear: Some(crate::mixing::linear(destination.volume_db)),
+                            muted: destination.muted,
+                        },
+                    };
+                    self.voice_hosts.insert(
+                        key.destination_id,
+                        (
+                            generation,
+                            VoiceHost::launch(
+                                self.config.executable.clone(),
+                                "--voice-worker",
+                                generation,
+                                vec![inherited],
+                                command,
+                                VoiceCommand::Stop,
+                            ),
+                        ),
+                    );
+                }
+            }
+        }
+        if !self.discord.busy() || Instant::now() >= self.next_discord_publish {
+            self.next_discord_publish = Instant::now() + Duration::from_millis(100);
+            self.publish();
+        }
     }
 
     fn configure_token(&mut self, token: String, reply: oneshot::Sender<Result<(), AppError>>) {
@@ -2125,7 +2282,6 @@ impl Actor {
             let _ = reply.send(Err(busy()));
             return;
         }
-        self.retired = None;
         self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
         let epoch = self.catalog_epoch;
         let bot = self.snapshot.bot.clone();
@@ -2156,128 +2312,10 @@ impl Actor {
         });
     }
     fn configuration_busy(&self) -> bool {
-        self.child.is_some()
-            || self.pending
-            || self.snapshot.connection.locks_route()
-            || self.configuration.is_some()
-            || self.shutting_down
-    }
-    fn start_preflight(
-        &mut self,
-        generation: u32,
-        operation: impl std::future::Future<Output = Result<StartLimit, AppError>> + Send + 'static,
-    ) {
-        let events = self.events.clone();
-        self.preflight = Some(tokio::spawn(async move {
-            let result = tokio::time::timeout(Duration::from_secs(15), operation)
-                .await
-                .unwrap_or_else(|_| Err(Failure::Connection.error()));
-            let _ = events.send(Event::Preflight(generation, result)).await;
-        }));
-    }
-    fn initialization(&self) -> Result<Init, AppError> {
-        let selection = &self.snapshot.selection;
-        let server = self
-            .snapshot
-            .servers
-            .iter()
-            .find(|s| Some(&s.id) == selection.server_id.as_ref())
-            .ok_or_else(|| error(ErrorCode::InvalidSelection, "Select an available server."))?;
-        let channel = server
-            .channels
-            .iter()
-            .find(|c| Some(&c.id) == selection.channel_id.as_ref())
-            .ok_or_else(|| {
-                error(
-                    ErrorCode::InvalidSelection,
-                    "Select an available voice channel.",
-                )
-            })?;
-        let init = Init {
-            token_file: self
-                .config
-                .token_file
-                .clone()
-                .ok_or_else(|| Failure::Configuration.error())?,
-            source_id: "shared-mix".into(),
-            server_id: server.id.clone(),
-            channel_id: channel.id.clone(),
-            output: self.snapshot.output.clone(),
-        };
-        protocol::validate_init(&init).map_err(|_| Failure::Configuration.error())?;
-        Ok(init)
-    }
-    fn disconnect(&mut self) {
-        self.snapshot.telemetry.gateway_ping_ms = None;
-        self.pending = false;
-        if let Some(preflight) = self.preflight.take() {
-            preflight.abort();
+        if self.discord.busy() {
+            return true;
         }
-        self.deadline = None;
-        if let Some(child) = &self.child {
-            child.stop();
-            if !matches!(
-                self.snapshot.connection,
-                Connection::CleanupIncomplete { .. }
-            ) {
-                self.snapshot.connection = Connection::Disconnecting;
-            }
-        } else {
-            self.snapshot.connection = Connection::Disconnected;
-            self.snapshot.capture = Capture {
-                phase: CapturePhase::Stopped,
-                ..ControlSnapshot::default().capture
-            };
-        }
-        self.publish();
-    }
-    fn fail(&mut self, error: AppError) {
-        self.terminal_error = Some(error.clone());
-        self.disconnect();
-        if self.child.is_none() {
-            self.snapshot.connection = Connection::Error {
-                code: error.code,
-                message: error.message,
-            };
-            self.publish();
-        }
-    }
-    fn terminal_status(&mut self, generation: u32, code: Failure) {
-        if generation != self.snapshot.session_id || self.shutting_down {
-            return;
-        }
-        let e = code.error();
-        if self.child.is_some() {
-            if matches!(
-                self.snapshot.connection,
-                Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-            ) {
-                // User Stop wins. During failure cleanup only refine a generic cause.
-                if specific_failure(code)
-                    && self
-                        .terminal_error
-                        .as_ref()
-                        .is_some_and(|current| generic_failure(&current.code))
-                {
-                    self.terminal_error = Some(e);
-                }
-            } else {
-                self.fail(e);
-            }
-        } else if specific_failure(code)
-            && self.retired.as_ref().is_some_and(|retired| {
-                retired.generation == generation
-                    && retired.catalog_epoch == self.catalog_epoch
-                    && Instant::now() <= retired.until
-            })
-            && matches!(&self.snapshot.connection, Connection::Error { code, .. } if generic_failure(code))
-        {
-            self.snapshot.connection = Connection::Error {
-                code: e.code,
-                message: e.message,
-            };
-            self.publish();
-        }
+        self.configuration.is_some() || self.shutting_down
     }
     fn event(&mut self, event: Event) {
         match event {
@@ -2416,12 +2454,6 @@ impl Actor {
                 }
                 let _ = configuration.reply.send(result);
             }
-            #[cfg(any(windows, test))]
-            Event::Stage(generation, stage) => {
-                if generation == self.snapshot.session_id && self.pending && !self.shutting_down {
-                    self.connect_stage(stage);
-                }
-            }
             Event::Catalog(epoch, result) => {
                 if epoch != self.catalog_epoch || self.shutting_down {
                     return;
@@ -2462,555 +2494,8 @@ impl Actor {
                 }
                 self.publish();
             }
-            Event::Preflight(generation, result) => {
-                if generation != self.snapshot.session_id || !self.pending || self.shutting_down {
-                    return;
-                }
-                self.pending = false;
-                self.preflight = None;
-                let limit = match result {
-                    Ok(limit) => limit,
-                    Err(e) => {
-                        self.fail(e);
-                        return;
-                    }
-                };
-                if limit.remaining == 0 {
-                    self.next_launch =
-                        Some(Instant::now() + limit.reset_after.max(LAUNCH_COOLDOWN));
-                    self.fail(error(
-                        ErrorCode::Busy,
-                        "Discord's gateway session allowance is exhausted. Wait before connecting.",
-                    ));
-                    return;
-                }
-                let init = match self.initialization() {
-                    Ok(init) => init,
-                    Err(e) => {
-                        self.fail(e);
-                        return;
-                    }
-                };
-                self.next_launch = Some(
-                    Instant::now()
-                        + if limit.remaining == 1 {
-                            limit.reset_after.max(LAUNCH_COOLDOWN)
-                        } else {
-                            LAUNCH_COOLDOWN
-                        },
-                );
-                // Register ownership before process creation can block. Cancel can
-                // stop this mailbox even while the OS is still creating the child.
-                self.child = Some(launch(
-                    self.config.executable.clone(),
-                    generation,
-                    init,
-                    self.events.clone(),
-                    #[cfg(windows)]
-                    self.audio.as_ref().map(|a| a.bus.clone()),
-                ));
-            }
-            Event::LaunchFailed(generation) => {
-                if generation != self.snapshot.session_id || self.child.is_none() {
-                    return;
-                }
-                // Creation failed: there is no process whose exit must be observed.
-                self.child = None;
-                if matches!(
-                    self.snapshot.connection,
-                    Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-                ) {
-                    let terminal = self.terminal_error.take();
-                    self.disconnect();
-                    if let Some(error) = terminal {
-                        self.fail(error);
-                    }
-                } else {
-                    self.fail(error(
-                        ErrorCode::ConnectionFailed,
-                        "The engine could not be started.",
-                    ));
-                }
-            }
-            Event::Status(generation, status) => {
-                if let Status::Failed { code } = status {
-                    self.terminal_status(generation, code);
-                    return;
-                }
-                if generation != self.snapshot.session_id
-                    || self.child.is_none()
-                    || matches!(
-                        self.snapshot.connection,
-                        Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-                    )
-                {
-                    return;
-                }
-                match status {
-                    Status::Connecting { stage } => {
-                        self.connect_stage(stage);
-                        return;
-                    }
-                    Status::Connected => {
-                        self.snapshot.connection = Connection::Connected;
-                        self.deadline = None;
-                    }
-                    Status::Recovering => {
-                        if !matches!(self.snapshot.connection, Connection::Recovering { .. }) {
-                            self.deadline = Some(Instant::now() + RECOVERY_DEADLINE);
-                        }
-                        self.snapshot.connection = Connection::Recovering {
-                            attempt: 1,
-                            message: "Recovering the existing voice session.".into(),
-                        };
-                    }
-                    Status::DeviceMissing => {
-                        if !matches!(self.snapshot.connection, Connection::Recovering { .. }) {
-                            self.deadline = Some(Instant::now() + RECOVERY_DEADLINE);
-                        }
-                        self.snapshot.connection = Connection::Recovering {
-                            attempt: 1,
-                            message: "Waiting for the selected recording source.".into(),
-                        };
-                        // The pipe reader coalesces samples separately from
-                        // status events. Discard an earlier running sample so
-                        // the next meter tick cannot undo the missing state.
-                        if let Some(child) = &self.child {
-                            child.take_meter();
-                        }
-                        self.snapshot.capture.phase = CapturePhase::Missing;
-                        self.snapshot.capture.level_dbfs = None;
-                        self.snapshot.capture.output_level_dbfs = None;
-                    }
-                    Status::GatewayLatency { milliseconds } => {
-                        self.snapshot.telemetry.gateway_ping_ms = milliseconds
-                            .filter(|value| value.is_finite() && (0.0..=60_000.0).contains(value));
-                    }
-                    Status::Meter { capture } => {
-                        self.snapshot.capture = protocol::clean_capture(capture)
-                    }
-                    Status::Failed { .. } => unreachable!("terminal status handled above"),
-                    Status::Stopped => {
-                        self.fail(Failure::Connection.error());
-                        return;
-                    }
-                }
-                self.publish();
-            }
-            Event::ProtocolFailed(generation) => {
-                if generation == self.snapshot.session_id
-                    && self.child.is_some()
-                    && !matches!(
-                        self.snapshot.connection,
-                        Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-                    )
-                {
-                    self.fail(Failure::Protocol.error());
-                }
-            }
-            Event::Exited(generation, success) => {
-                if generation != self.snapshot.session_id || self.child.is_none() {
-                    return;
-                }
-                let stopping = matches!(
-                    self.snapshot.connection,
-                    Connection::Disconnecting | Connection::CleanupIncomplete { .. }
-                );
-                self.retired = if !stopping || self.terminal_error.is_some() {
-                    Some(RetiredSession {
-                        generation,
-                        catalog_epoch: self.catalog_epoch,
-                        until: Instant::now() + DIAGNOSTIC_GRACE,
-                    })
-                } else {
-                    None
-                };
-                self.child = None;
-                self.deadline = None;
-                self.snapshot.capture = ControlSnapshot::default().capture;
-                self.snapshot.connection = if let Some(e) = self.terminal_error.take() {
-                    Connection::Error {
-                        code: e.code,
-                        message: e.message,
-                    }
-                } else if stopping {
-                    Connection::Disconnected
-                } else {
-                    let e = if success {
-                        Failure::Connection.error()
-                    } else {
-                        error(
-                            ErrorCode::ConnectionFailed,
-                            "The engine exited unexpectedly.",
-                        )
-                    };
-                    Connection::Error {
-                        code: e.code,
-                        message: e.message,
-                    }
-                };
-                self.publish();
-            }
-            Event::CleanupIncomplete(generation) => {
-                if generation != self.snapshot.session_id || self.child.is_none() {
-                    return;
-                }
-                self.snapshot.connection = Connection::CleanupIncomplete {
-                    message: cleanup_error().message,
-                };
-                self.deadline = None;
-                self.publish();
-            }
         }
     }
-
-    fn connect_stage(&mut self, stage: ConnectStage) {
-        // A buffered stage cannot revive a cancelled/connected/recovering session
-        // or move progress backwards. Stage updates never extend the deadline.
-        if let Connection::Connecting { stage: current } = &mut self.snapshot.connection
-            && stage > *current
-        {
-            *current = stage;
-            if stage == ConnectStage::Capture {
-                self.snapshot.capture.phase = CapturePhase::Opening;
-                self.snapshot.capture.level_dbfs = None;
-                self.snapshot.capture.output_level_dbfs = None;
-            }
-            self.publish();
-        }
-    }
-}
-
-struct Mailbox {
-    output: Option<Output>,
-    stopped_at: Option<Instant>,
-    meter: Option<Capture>,
-}
-#[derive(Clone)]
-struct ChildControl(Arc<(Mutex<Mailbox>, Condvar)>);
-impl ChildControl {
-    fn new() -> Self {
-        Self(Arc::new((
-            Mutex::new(Mailbox {
-                output: None,
-                stopped_at: None,
-                meter: None,
-            }),
-            Condvar::new(),
-        )))
-    }
-    fn output(&self, output: Output) {
-        let (lock, wake) = &*self.0;
-        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.stopped_at.is_none() {
-            mail.output = Some(output);
-            wake.notify_one();
-        }
-    }
-    fn stop(&self) {
-        let (lock, wake) = &*self.0;
-        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.stopped_at.is_none() {
-            mail.stopped_at = Some(Instant::now());
-            mail.output = None;
-            wake.notify_one();
-        }
-    }
-    fn stopped_at(&self) -> Option<Instant> {
-        self.0
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stopped_at
-    }
-    fn meter(&self, capture: Capture) {
-        self.0.0.lock().unwrap_or_else(|e| e.into_inner()).meter = Some(capture);
-    }
-    fn take_meter(&self) -> Option<Capture> {
-        self.0
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .meter
-            .take()
-    }
-}
-
-#[cfg(windows)]
-type OwnedProcess = crate::process::EngineProcess;
-#[cfg(not(windows))]
-struct OwnedProcess(std::process::Child);
-#[cfg(not(windows))]
-impl OwnedProcess {
-    // Portable supervision implementation for offline regression tests.
-    fn spawn(executable: &std::path::Path, args: &[std::ffi::OsString]) -> std::io::Result<Self> {
-        use std::process::{Command, Stdio};
-        Command::new(executable)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map(Self)
-    }
-    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
-        self.0.stdin.take()
-    }
-    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
-        self.0.stdout.take()
-    }
-    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
-        self.0.stderr.take()
-    }
-    fn try_wait(&mut self) -> std::io::Result<Option<u32>> {
-        self.0
-            .try_wait()
-            .map(|s| s.map(|s| s.code().unwrap_or(1) as u32))
-    }
-    fn terminate(&mut self) -> std::io::Result<()> {
-        self.0.kill()
-    }
-}
-#[cfg(not(windows))]
-impl Drop for OwnedProcess {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn launch(
-    executable: PathBuf,
-    generation: u32,
-    init: Init,
-    events: mpsc::Sender<Event>,
-    #[cfg(windows)] bus: Option<Arc<crate::mix_bus::BusHandle>>,
-) -> ChildControl {
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::{AsHandle, AsRawHandle};
-        let inherited = bus
-            .ok_or_else(|| std::io::Error::other("Audio mix unavailable"))
-            .and_then(|bus| bus.inheritable());
-        let mut init = init;
-        if let Ok(handle) = &inherited {
-            init.source_id = format!("mix-handle:{}", handle.as_raw_handle() as usize);
-        }
-        launch_with(generation, init, events, move || {
-            let handle = inherited?;
-            OwnedProcess::spawn_with_handles(
-                &executable,
-                &["--engine-worker".into()],
-                &[handle.as_handle()],
-            )
-        })
-    }
-    #[cfg(not(windows))]
-    launch_with(generation, init, events, move || {
-        OwnedProcess::spawn(&executable, &["--engine-worker".into()])
-    })
-}
-
-fn launch_with(
-    generation: u32,
-    init: Init,
-    events: mpsc::Sender<Event>,
-    spawn: impl FnOnce() -> std::io::Result<OwnedProcess> + Send + 'static,
-) -> ChildControl {
-    let control = ChildControl::new();
-    let launch_control = control.clone();
-    let runtime = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || match spawn() {
-        Ok(process) => {
-            let _runtime = runtime.enter();
-            supervise(process, generation, init, events, launch_control);
-        }
-        Err(_) => {
-            let _ = events.blocking_send(Event::LaunchFailed(generation));
-        }
-    });
-    control
-}
-
-fn supervise(
-    mut process: OwnedProcess,
-    generation: u32,
-    init: Init,
-    events: mpsc::Sender<Event>,
-    control: ChildControl,
-) {
-    {
-        let mail = control.0.0.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.stopped_at.is_some() {
-            // Never initialize a worker created after Cancel. Its OS lifetime is
-            // still supervised, using the original 750 ms stop deadline.
-            drop(mail);
-            supervise_exit(process, generation, events, control);
-            return;
-        }
-    }
-    let pipes = (
-        process.take_stdin(),
-        process.take_stdout(),
-        process.take_stderr(),
-    );
-    let (Some(mut stdin), Some(stdout), Some(mut stderr)) = pipes else {
-        control.stop();
-        let _ = events.blocking_send(Event::ProtocolFailed(generation));
-        supervise_exit(process, generation, events, control);
-        return;
-    };
-    let writer_control = control.clone();
-    let writer_events = events.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = write_commands(&mut stdin, generation, init, &writer_control);
-        if result.is_err() {
-            let _ = writer_events.blocking_send(Event::ProtocolFailed(generation));
-        }
-    });
-    let reader_events = events.clone();
-    let reader_control = control.clone();
-    tokio::task::spawn_blocking(move || {
-        let mut reader = BufReader::with_capacity(protocol::MAX_LINE_BYTES, stdout);
-        let mut validator = Validator::new(generation).expect("nonzero generation");
-        loop {
-            match protocol::read::<Status>(&mut reader) {
-                Ok(Some(frame)) if validator.accept(&frame).is_ok() => {
-                    if let Status::Meter { capture } = frame.body {
-                        reader_control.meter(capture);
-                    } else if reader_events
-                        .blocking_send(Event::Status(generation, frame.body))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    if reader_control.stopped_at().is_none() {
-                        let _ = reader_events.blocking_send(Event::ProtocolFailed(generation));
-                    }
-                    break;
-                }
-                _ => {
-                    let _ = reader_events.blocking_send(Event::ProtocolFailed(generation));
-                    break;
-                }
-            }
-        }
-    });
-    // stderr is drained concurrently and discarded, including library diagnostics.
-    tokio::task::spawn_blocking(move || {
-        let mut bytes = [0_u8; 4096];
-        loop {
-            match stderr.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-        }
-    });
-    supervise_exit(process, generation, events, control);
-}
-
-fn write_commands(
-    writer: &mut impl std::io::Write,
-    generation: u32,
-    mut init: Init,
-    control: &ChildControl,
-) -> Result<(), protocol::ProtocolError> {
-    let (lock, wake) = &*control.0;
-    {
-        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if mail.stopped_at.is_some() {
-            return Ok(());
-        }
-        if let Some(output) = mail.output.take() {
-            init.output = output;
-        }
-        // Commit Init here, inside the executing writer, serialized with Stop.
-        // Release the mailbox before pipe I/O so an already committed write
-        // cannot prevent cancellation or the independent exit deadline.
-    }
-    let mut sequence = 1;
-    protocol::write(
-        writer,
-        &Frame {
-            version: protocol::VERSION,
-            generation,
-            sequence,
-            body: Command::Init(init),
-        },
-    )?;
-    loop {
-        let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
-        while mail.output.is_none() && mail.stopped_at.is_none() {
-            mail = wake.wait(mail).unwrap_or_else(|e| e.into_inner());
-        }
-        let stop = mail.stopped_at.is_some();
-        let body = if stop {
-            Command::Stop
-        } else {
-            Command::Output {
-                output: mail.output.take().expect("output exists"),
-            }
-        };
-        drop(mail);
-        sequence += 1;
-        protocol::write(
-            writer,
-            &Frame {
-                version: protocol::VERSION,
-                generation,
-                sequence,
-                body,
-            },
-        )?;
-        if stop {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn supervise_exit(
-    mut process: OwnedProcess,
-    generation: u32,
-    events: mpsc::Sender<Event>,
-    supervisor_control: ChildControl,
-) {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(25));
-        let mut terminated_at = None;
-        let mut cleanup_reported = false;
-        loop {
-            tick.tick().await;
-            match process.try_wait() {
-                Ok(Some(code)) => {
-                    supervisor_control.stop();
-                    let _ = events.send(Event::Exited(generation, code == 0)).await;
-                    break;
-                }
-                Err(_) => supervisor_control.stop(),
-                Ok(None) => {}
-            }
-            if supervisor_control
-                .stopped_at()
-                .is_some_and(|t| Instant::now() >= t + STOP_GRACE)
-                && terminated_at.is_none()
-            {
-                let _ = process.terminate();
-                terminated_at = Some(Instant::now());
-            }
-            if terminated_at.is_some_and(|t| Instant::now() >= t + EXIT_GRACE) && !cleanup_reported
-            {
-                cleanup_reported = true;
-                let _ = events.send(Event::CleanupIncomplete(generation)).await;
-            }
-            if events.is_closed() {
-                let _ = process.terminate();
-                break;
-            }
-        }
-    });
 }
 
 #[cfg(not(windows))]
@@ -3072,14 +2557,6 @@ async fn configure_bot_token(
     )
     .await
 }
-#[cfg(not(windows))]
-async fn start_limit(
-    _: &ControllerConfig,
-    _: u32,
-    _: &mpsc::Sender<Event>,
-) -> Result<StartLimit, AppError> {
-    Err(Failure::Configuration.error())
-}
 
 #[cfg(windows)]
 fn http(config: &ControllerConfig) -> Result<serenity::http::Http, AppError> {
@@ -3102,29 +2579,6 @@ pub(crate) fn rest_error(e: serenity::Error) -> AppError {
         }
         _ => Failure::Connection.error(),
     }
-}
-#[cfg(windows)]
-async fn start_limit(
-    config: &ControllerConfig,
-    generation: u32,
-    events: &mpsc::Sender<Event>,
-) -> Result<StartLimit, AppError> {
-    let config = config.clone();
-    let http = tokio::task::spawn_blocking(move || http(&config))
-        .await
-        .map_err(|_| unavailable())??;
-    let _ = events
-        .send(Event::Stage(generation, ConnectStage::Preflight))
-        .await;
-    let data = http
-        .get_bot_gateway()
-        .await
-        .map_err(rest_error)?
-        .session_start_limit;
-    Ok(StartLimit {
-        remaining: data.remaining,
-        reset_after: Duration::from_millis(data.reset_after),
-    })
 }
 #[cfg(windows)]
 async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
@@ -3201,16 +2655,6 @@ mod tests {
             token_file: Some(synthetic_missing),
             settings_file: None,
         }
-    }
-    fn child() -> ChildControl {
-        ChildControl(Arc::new((
-            Mutex::new(Mailbox {
-                output: None,
-                stopped_at: None,
-                meter: None,
-            }),
-            Condvar::new(),
-        )))
     }
     fn actor() -> Actor {
         let (snapshots, _) = watch::channel(ControlSnapshot::default());
@@ -3318,234 +2762,6 @@ mod tests {
         tokio::spawn(actor.run_requests(receiver, event_rx));
         controller
     }
-    async fn responsive_output_and_cancel(controller: &Controller) {
-        // A blocked actor makes these acknowledgements time out, even though
-        // snapshot() itself can return the previous watch value immediately.
-        for command in [
-            ControlCommand::SetMuted { muted: true },
-            ControlCommand::SetVolume { percent: 37 },
-            ControlCommand::Disconnect,
-        ] {
-            tokio::time::timeout(Duration::from_millis(250), controller.dispatch(command))
-                .await
-                .expect("long operations must not block command acknowledgements")
-                .unwrap();
-        }
-        assert!(controller.snapshot().output.muted);
-        assert_eq!(controller.snapshot().output.volume_percent, 37);
-    }
-    #[tokio::test]
-    async fn delayed_preflight_keeps_commands_responsive_and_cancel_rejects_late_result() {
-        let mut a = actor();
-        let (events, event_rx) = mpsc::channel(32);
-        a.events = events.clone();
-        a.pending = true;
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Checking,
-        };
-        let (started, start_rx) = oneshot::channel();
-        let (mut release, release_rx) = oneshot::channel();
-        a.start_preflight(4, async move {
-            let _ = started.send(());
-            let _ = release_rx.await;
-            Ok(StartLimit {
-                remaining: 10,
-                reset_after: Duration::from_secs(60),
-            })
-        });
-        let controller = running_actor_on(a, event_rx);
-        start_rx.await.unwrap();
-        events
-            .send(Event::Stage(4, ConnectStage::Preflight))
-            .await
-            .unwrap();
-        let mut snapshots = controller.subscribe();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while controller.snapshot().connection
-                != (Connection::Connecting {
-                    stage: ConnectStage::Preflight,
-                })
-            {
-                snapshots.changed().await.unwrap();
-            }
-        })
-        .await
-        .unwrap();
-        responsive_output_and_cancel(&controller).await;
-        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
-        // Aborting preflight drops its in-flight future, without waiting for REST.
-        tokio::time::timeout(Duration::from_millis(250), release.closed())
-            .await
-            .unwrap();
-        assert!(release.send(()).is_err());
-        events
-            .send(Event::Preflight(
-                4,
-                Ok(StartLimit {
-                    remaining: 10,
-                    reset_after: Duration::ZERO,
-                }),
-            ))
-            .await
-            .unwrap();
-        controller
-            .dispatch(ControlCommand::SetMuted { muted: true })
-            .await
-            .unwrap();
-        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
-        controller.shutdown().await.unwrap();
-    }
-    #[tokio::test]
-    async fn delayed_join_keeps_commands_responsive_and_stays_locked_until_exit() {
-        let mut a = actor();
-        a.child = Some(child());
-        let child = a.child.as_ref().unwrap().clone();
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Join,
-        };
-        let (controller, events) = running_actor(a);
-        responsive_output_and_cancel(&controller).await;
-        assert!(child.stopped_at().is_some());
-        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
-        events
-            .send(Event::Status(
-                4,
-                Status::Connecting {
-                    stage: ConnectStage::Capture,
-                },
-            ))
-            .await
-            .unwrap();
-        events
-            .send(Event::Status(4, Status::Connected))
-            .await
-            .unwrap();
-        controller
-            .dispatch(ControlCommand::SetMuted { muted: true })
-            .await
-            .unwrap();
-        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
-        assert_eq!(
-            controller
-                .dispatch(ControlCommand::Connect)
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::Busy
-        );
-        events.send(Event::Exited(4, true)).await.unwrap();
-        controller.shutdown().await.unwrap();
-        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn delayed_process_creation_keeps_actor_responsive_and_owns_cancelled_late_child() {
-        let mut a = actor();
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Preflight,
-        };
-        let (events, mut event_rx) = mpsc::channel(32);
-        let (started, start_rx) = oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let (created, created_rx) = oneshot::channel();
-        let init = a.initialization().unwrap();
-        let control = launch_with(4, init, events, move || {
-            let _ = started.send(());
-            release_rx.recv().unwrap(); // Represents a blocked CreateProcessW.
-            let process = OwnedProcess::spawn(
-                std::path::Path::new("/usr/bin/python3"),
-                &[
-                    "-c".into(),
-                    // Ignore both stdin EOF and Stop; the parent must terminate it.
-                    "import time; time.sleep(30)".into(),
-                ],
-            )?;
-            let _ = created.send(());
-            Ok(process)
-        });
-        a.child = Some(control.clone());
-        let (controller, actor_events) = running_actor(a);
-        start_rx.await.unwrap();
-        responsive_output_and_cancel(&controller).await;
-        assert_eq!(controller.snapshot().connection, Connection::Disconnecting);
-        assert_eq!(
-            controller
-                .dispatch(ControlCommand::Connect)
-                .await
-                .unwrap_err()
-                .code,
-            ErrorCode::Busy
-        );
-        let stopped = control.stopped_at().unwrap();
-        // Ensure the original grace has expired *before* the late child exists.
-        tokio::time::sleep(STOP_GRACE + Duration::from_millis(25)).await;
-        assert_eq!(control.stopped_at(), Some(stopped));
-        release.send(()).unwrap();
-        created_rx.await.unwrap();
-        tokio::time::timeout(Duration::from_millis(500), async {
-            loop {
-                let event = event_rx.recv().await.unwrap();
-                let exited = matches!(event, Event::Exited(4, _));
-                actor_events.send(event).await.unwrap();
-                if exited {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("late child must use the original stop deadline and report real exit");
-        controller.shutdown().await.unwrap();
-        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
-    }
-    #[test]
-    fn stages_are_monotonic_generation_scoped_and_do_not_extend_connect_deadline() {
-        let mut a = actor();
-        a.pending = true;
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Checking,
-        };
-        a.deadline = Some(Instant::now() + CONNECT_DEADLINE);
-        let deadline = a.deadline;
-        a.event(Event::Stage(3, ConnectStage::Preflight));
-        assert_eq!(
-            a.snapshot.connection,
-            Connection::Connecting {
-                stage: ConnectStage::Checking
-            }
-        );
-        a.event(Event::Stage(4, ConnectStage::Preflight));
-        for stage in [
-            ConnectStage::Gateway,
-            ConnectStage::Join,
-            ConnectStage::Capture,
-        ] {
-            a.event(Event::Status(4, Status::Connecting { stage }));
-            assert_eq!(a.snapshot.connection, Connection::Connecting { stage });
-            assert_eq!(a.deadline, deadline);
-        }
-        assert_eq!(a.snapshot.capture.phase, CapturePhase::Opening);
-        a.event(Event::Status(
-            4,
-            Status::Connecting {
-                stage: ConnectStage::Gateway,
-            },
-        ));
-        assert_eq!(
-            a.snapshot.connection,
-            Connection::Connecting {
-                stage: ConnectStage::Capture
-            }
-        );
-        a.event(Event::Status(4, Status::Connected));
-        a.event(Event::Status(
-            4,
-            Status::Connecting {
-                stage: ConnectStage::Capture,
-            },
-        ));
-        assert_eq!(a.snapshot.connection, Connection::Connected);
-    }
     #[tokio::test]
     async fn private_token_check_is_serialized_responsive_and_restores_previous_configuration() {
         let mut a = actor();
@@ -3623,42 +2839,6 @@ mod tests {
         assert_eq!(controller.snapshot().bot, previous);
         assert_eq!(controller.snapshot().discovery, Discovery::Ready);
         controller.shutdown().await.unwrap();
-    }
-    #[tokio::test]
-    async fn configuration_rejects_active_pending_and_cleanup_sessions_without_running_operation() {
-        for (connection, pending, has_child) in [
-            (Connection::Disconnected, true, false),
-            (
-                Connection::Connecting {
-                    stage: ConnectStage::Join,
-                },
-                false,
-                true,
-            ),
-            (Connection::Connected, false, true),
-            (
-                Connection::CleanupIncomplete {
-                    message: "Pending exit".into(),
-                },
-                false,
-                true,
-            ),
-        ] {
-            let mut a = actor();
-            a.snapshot.connection = connection;
-            a.pending = pending;
-            if has_child {
-                a.child = Some(child());
-            }
-            let before = a.snapshot.clone();
-            let (reply, result) = oneshot::channel();
-            a.start_configuration(reply, |_| async {
-                panic!("rejected configuration must not validate or save")
-            });
-            assert_eq!(result.await.unwrap().unwrap_err().code, ErrorCode::Busy);
-            assert_eq!(a.snapshot, before);
-            assert!(a.configuration.is_none());
-        }
     }
     #[tokio::test]
     async fn malformed_private_token_requests_do_not_replace_saved_configuration() {
@@ -3957,509 +3137,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::Internal);
     }
-    #[test]
-    fn queued_writer_rechecks_cancellation_and_latest_output_before_init_commit() {
-        struct StopAfterWrite {
-            bytes: Vec<u8>,
-            control: ChildControl,
-        }
-        impl std::io::Write for StopAfterWrite {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.bytes.extend_from_slice(bytes);
-                // Cancellation after commitment must also be able to take the
-                // mailbox lock while pipe I/O is in progress.
-                self.control.stop();
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        for cancelled in [true, false] {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .max_blocking_threads(1)
-                .build()
-                .unwrap();
-            runtime.block_on(async {
-                let (started, started_rx) = oneshot::channel();
-                let (release, release_rx) = std::sync::mpsc::channel();
-                let blocker = tokio::task::spawn_blocking(move || {
-                    let _ = started.send(());
-                    let _ = release_rx.recv();
-                });
-                started_rx.await.unwrap();
-                let control = child();
-                let writer_control = control.clone();
-                let init = actor().initialization().unwrap();
-                let writer = tokio::task::spawn_blocking(move || {
-                    let mut sink = StopAfterWrite {
-                        bytes: Vec::new(),
-                        control: writer_control.clone(),
-                    };
-                    write_commands(&mut sink, 4, init, &writer_control).unwrap();
-                    sink.bytes
-                });
-                // The sole blocking thread is occupied: this writer is queued.
-                control.output(Output {
-                    volume_linear: None,
-                    muted: true,
-                    volume_percent: 37,
-                });
-                if cancelled {
-                    control.stop();
-                }
-                release.send(()).unwrap();
-                blocker.await.unwrap();
-                let bytes = writer.await.unwrap();
-                if cancelled {
-                    assert!(
-                        bytes.is_empty(),
-                        "queued Cancel must suppress Init entirely"
-                    );
-                } else {
-                    let mut reader = std::io::Cursor::new(bytes);
-                    let frame = protocol::read::<Command>(&mut reader).unwrap().unwrap();
-                    let Command::Init(init) = frame.body else {
-                        panic!("Init expected");
-                    };
-                    assert!(init.output.muted);
-                    assert_eq!(init.output.volume_percent, 37);
-                    assert!(matches!(
-                        protocol::read::<Command>(&mut reader)
-                            .unwrap()
-                            .unwrap()
-                            .body,
-                        Command::Stop
-                    ));
-                    assert!(protocol::read::<Command>(&mut reader).unwrap().is_none());
-                }
-            });
-        }
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn late_worker_initialization_uses_output_changes_made_during_process_creation() {
-        let mut a = actor();
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Preflight,
-        };
-        let (events, event_rx) = mpsc::channel(32);
-        a.events = events.clone();
-        let (started, started_rx) = oneshot::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let init = a.initialization().unwrap();
-        a.child = Some(launch_with(4, init, events, move || {
-            let _ = started.send(());
-            release_rx.recv().unwrap();
-            // The only emitted stage proves the *initial* frame already had the
-            // latest output controls; no real capture or network is involved.
-            let script = "import sys,json\nf=json.loads(sys.stdin.readline())\nassert f['body']['output']=={'muted':True,'volumePercent':37}\nprint(json.dumps({'version':1,'generation':4,'sequence':1,'body':{'type':'connecting','stage':'join'}}),flush=True)\nfor line in sys.stdin:\n if json.loads(line)['body']['type']=='stop': break\n";
-            OwnedProcess::spawn(
-                std::path::Path::new("/usr/bin/python3"),
-                &["-c".into(), script.into()],
-            )
-        }));
-        let controller = running_actor_on(a, event_rx);
-        started_rx.await.unwrap();
-        controller
-            .dispatch(ControlCommand::SetMuted { muted: true })
-            .await
-            .unwrap();
-        controller
-            .dispatch(ControlCommand::SetVolume { percent: 37 })
-            .await
-            .unwrap();
-        release.send(()).unwrap();
-        let mut snapshots = controller.subscribe();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while controller.snapshot().connection
-                != (Connection::Connecting {
-                    stage: ConnectStage::Join,
-                })
-            {
-                snapshots.changed().await.unwrap();
-            }
-        })
-        .await
-        .expect("late Init must carry the most recent output controls");
-        controller.shutdown().await.unwrap();
-        assert_eq!(controller.snapshot().connection, Connection::Disconnected);
-    }
-    #[test]
-    fn disconnect_during_join_or_recovery_requires_observed_exit() {
-        for phase in [
-            Connection::Connecting {
-                stage: ConnectStage::Join,
-            },
-            Connection::Connected,
-            Connection::Recovering {
-                attempt: 1,
-                message: "Recovering".into(),
-            },
-        ] {
-            let mut a = actor();
-            a.child = Some(child());
-            a.snapshot.connection = phase;
-            a.command(ControlCommand::Disconnect).unwrap();
-            assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-            a.event(Event::Status(4, Status::Connected));
-            a.event(Event::Status(4, Status::Recovering));
-            a.event(Event::Status(4, Status::Stopped));
-            assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-            assert_eq!(
-                a.command(ControlCommand::Connect).unwrap_err().code,
-                ErrorCode::Busy
-            );
-            a.event(Event::Exited(4, false));
-            assert!(matches!(a.snapshot.connection, Connection::Disconnected));
-            assert_eq!(a.snapshot.capture.phase, CapturePhase::Stopped);
-        }
-    }
-    #[test]
-    fn stale_callbacks_never_change_current_session_or_cleanup() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Join,
-        };
-        let before = a.snapshot.clone();
-        a.event(Event::Status(3, Status::Connected));
-        a.event(Event::Exited(3, true));
-        a.event(Event::CleanupIncomplete(3));
-        a.event(Event::ProtocolFailed(3));
-        assert_eq!(a.snapshot, before);
-        assert!(a.child.is_some());
-        a.pending = false;
-        a.event(Event::Preflight(
-            4,
-            Ok(StartLimit {
-                remaining: 1,
-                reset_after: Duration::from_secs(60),
-            }),
-        ));
-        assert_eq!(a.snapshot, before);
-    }
-    #[test]
-    fn incomplete_cleanup_locks_connect_and_route_until_exit() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.disconnect();
-        a.event(Event::CleanupIncomplete(4));
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::CleanupIncomplete { .. }
-        ));
-        assert_eq!(
-            a.command(ControlCommand::Connect).unwrap_err().code,
-            ErrorCode::Busy
-        );
-        assert_eq!(
-            a.command(ControlCommand::SelectSource {
-                source_id: "recording".into()
-            })
-            .unwrap_err()
-            .code,
-            ErrorCode::Busy
-        );
-        a.disconnect();
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::CleanupIncomplete { .. }
-        ));
-        a.event(Event::Exited(4, false));
-        assert!(matches!(a.snapshot.connection, Connection::Disconnected));
-    }
-    #[test]
-    fn terminal_failure_waits_for_exit_and_never_respawns() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Recovering {
-            attempt: 1,
-            message: "Recovering".into(),
-        };
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Permission,
-            },
-        ));
-        assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-        a.event(Event::Exited(4, true));
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::Error {
-                code: ErrorCode::PermissionDenied,
-                ..
-            }
-        ));
-        assert!(a.child.is_none());
-        assert!(!a.pending);
-    }
-    #[test]
-    fn specific_terminal_cause_survives_either_exit_status_order() {
-        for (failure, expected) in [
-            (Failure::Capture, ErrorCode::CaptureFailed),
-            (Failure::Permission, ErrorCode::PermissionDenied),
-            (Failure::Authentication, ErrorCode::Authentication),
-        ] {
-            for exit_first in [false, true] {
-                let mut a = actor();
-                a.child = Some(child());
-                a.snapshot.connection = Connection::Connected;
-                if exit_first {
-                    a.event(Event::Exited(4, false));
-                }
-                a.event(Event::Status(4, Status::Failed { code: failure }));
-                if !exit_first {
-                    assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-                    a.event(Event::Exited(4, false));
-                }
-                assert!(
-                    matches!(&a.snapshot.connection, Connection::Error { code, .. } if *code == expected)
-                );
-                let before = a.snapshot.clone();
-                a.event(Event::Status(4, Status::Connected));
-                a.event(Event::Status(4, Status::Recovering));
-                a.event(Event::Status(4, Status::Stopped));
-                assert_eq!(a.snapshot, before);
-                assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
-                assert!(a.child.is_none());
-                assert!(!a.pending);
-            }
-        }
-    }
-    #[test]
-    fn device_loss_clears_both_signal_readings_before_another_meter_event() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.snapshot.capture.phase = CapturePhase::Running;
-        a.snapshot.capture.level_dbfs = Some(-6.0);
-        a.snapshot.capture.output_level_dbfs = Some(-12.0);
-        a.child.as_ref().unwrap().meter(a.snapshot.capture.clone());
-        a.event(Event::Status(4, Status::DeviceMissing));
-        assert_eq!(a.snapshot.capture.phase, CapturePhase::Missing);
-        assert_eq!(a.snapshot.capture.level_dbfs, None);
-        assert_eq!(a.snapshot.capture.output_level_dbfs, None);
-        assert!(a.child.as_ref().unwrap().take_meter().is_none());
-    }
 
-    #[test]
-    fn buffered_specific_failure_refines_generic_protocol_cleanup() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.event(Event::ProtocolFailed(4));
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Capture,
-            },
-        ));
-        a.event(Event::Exited(4, false));
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::Error {
-                code: ErrorCode::CaptureFailed,
-                ..
-            }
-        ));
-    }
-    #[tokio::test(start_paused = true)]
-    async fn retired_failure_window_is_bounded_and_cannot_fault_fresh_configuration_or_session() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.event(Event::Exited(4, false));
-        tokio::time::advance(DIAGNOSTIC_GRACE + Duration::from_millis(1)).await;
-        let before = a.snapshot.clone();
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Authentication,
-            },
-        ));
-        assert_eq!(a.snapshot, before);
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.event(Event::Exited(4, false));
-        a.refresh();
-        let catalog = Catalog {
-            id: None,
-            avatar_url: None,
-            servers: a.snapshot.servers.clone(),
-            name: "Rechecked Bot".into(),
-        };
-        a.event(Event::Catalog(a.catalog_epoch, Ok(catalog)));
-        let rechecked = a.snapshot.clone();
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Authentication,
-            },
-        ));
-        assert_eq!(a.snapshot, rechecked);
-        a.connect().unwrap();
-        let next = a.snapshot.clone();
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Authentication,
-            },
-        ));
-        a.event(Event::Status(4, Status::Connected));
-        assert_eq!(a.snapshot, next);
-        assert_eq!(a.snapshot.session_id, 5);
-        assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
-    }
-    #[test]
-    fn requested_disconnect_rejects_failure_before_and_after_exit() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.command(ControlCommand::Disconnect).unwrap();
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Authentication,
-            },
-        ));
-        a.event(Event::Exited(4, false));
-        a.event(Event::Status(
-            4,
-            Status::Failed {
-                code: Failure::Permission,
-            },
-        ));
-        assert!(matches!(a.snapshot.connection, Connection::Disconnected));
-        assert_eq!(a.snapshot.bot.status, BotStatus::Ready);
-    }
-    #[tokio::test(start_paused = true)]
-    async fn cooldown_and_gateway_limits_survive_worker_exit() {
-        let mut a = actor();
-        a.pending = true;
-        a.event(Event::Preflight(
-            4,
-            Ok(StartLimit {
-                remaining: 0,
-                reset_after: Duration::from_secs(60),
-            }),
-        ));
-        assert!(a.child.is_none());
-        assert_eq!(a.connect().unwrap_err().code, ErrorCode::Busy);
-        tokio::time::advance(Duration::from_secs(59)).await;
-        assert_eq!(a.connect().unwrap_err().code, ErrorCode::Busy);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(a.connect().is_ok());
-        a.disconnect();
-        a.pending = true;
-        a.event(Event::Preflight(
-            5,
-            Ok(StartLimit {
-                remaining: 10,
-                reset_after: Duration::from_secs(60),
-            }),
-        ));
-        // Even a failed launch retains a parent-owned five-second cooldown.
-        assert_eq!(a.connect().unwrap_err().code, ErrorCode::Busy);
-        a.event(Event::LaunchFailed(5));
-        tokio::time::advance(Duration::from_secs(5)).await;
-        assert!(a.connect().is_ok());
-    }
-    #[tokio::test(start_paused = true)]
-    async fn repeated_recovery_status_cannot_extend_parent_deadline() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.snapshot.output = Output {
-            volume_linear: None,
-            volume_percent: 40,
-            muted: true,
-        };
-        a.event(Event::Status(4, Status::Recovering));
-        tokio::time::advance(RECOVERY_DEADLINE - Duration::from_secs(1)).await;
-        a.event(Event::Status(4, Status::Recovering));
-        a.poll_deadline();
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::Recovering { .. }
-        ));
-        tokio::time::advance(Duration::from_secs(1)).await;
-        a.poll_deadline();
-        assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-        a.event(Event::Status(4, Status::Connected));
-        assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-        a.event(Event::Exited(4, true));
-        assert!(matches!(
-            a.snapshot.connection,
-            Connection::Error {
-                code: ErrorCode::ConnectionFailed,
-                ..
-            }
-        ));
-        assert!(a.snapshot.output.muted);
-        assert_eq!(a.snapshot.output.volume_percent, 40);
-    }
-    #[test]
-    fn output_and_meter_mailboxes_are_bounded_and_stop_wins() {
-        let child = child();
-        for i in 0..10000 {
-            child.output(Output {
-                volume_linear: None,
-                volume_percent: (i % 101) as u8,
-                muted: i % 2 == 0,
-            });
-            let capture = Capture {
-                queued_frames: i,
-                ..ControlSnapshot::default().capture
-            };
-            child.meter(capture);
-        }
-        assert_eq!(child.take_meter().unwrap().queued_frames, 9999);
-        assert!(child.take_meter().is_none());
-        child.stop();
-        let stopped = child.stopped_at();
-        child.output(Output {
-            volume_linear: None,
-            volume_percent: 100,
-            muted: false,
-        });
-        child.stop();
-        assert!(child.0.0.lock().unwrap().output.is_none());
-        assert_eq!(stopped, child.stopped_at());
-    }
-    #[test]
-    fn validates_selection_volume_and_keeps_private_paths_out_of_snapshots() {
-        let mut a = actor();
-        a.snapshot.selection.channel_id = None;
-        assert_eq!(
-            a.initialization().unwrap_err().code,
-            ErrorCode::InvalidSelection
-        );
-        assert_eq!(
-            a.command(ControlCommand::SetVolume { percent: 101 })
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidVolume
-        );
-        assert_eq!(
-            a.command(ControlCommand::SelectSource {
-                source_id: "unknown".into()
-            })
-            .unwrap_err()
-            .code,
-            ErrorCode::InvalidSelection
-        );
-        assert!(
-            !serde_json::to_string(&a.snapshot)
-                .unwrap()
-                .contains("echocord-runtime-test-missing-token")
-        );
-        assert!(!format!("{:?}", config()).contains("echocord-runtime-test-missing-token"));
-    }
     #[test]
     fn preference_load_failure_survives_discovery_until_preferences_are_saved() {
         let mut a = actor();
@@ -4516,202 +3194,6 @@ mod tests {
         config.token_file = config.settings_file.clone();
         assert!(save_preferences(&config, &a.snapshot).is_err());
         std::fs::remove_dir_all(directory).unwrap();
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn blocked_stdin_cannot_delay_termination_and_exit_receipt() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory =
-            std::env::temp_dir().join(format!("echocord-supervision-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let executable = directory.join("worker.py");
-        // No credentials/network. Both pipes flood with stdin completely ignored.
-        let frame = Frame {
-            version: protocol::VERSION,
-            generation: 1,
-            sequence: 1,
-            body: Status::Meter {
-                capture: ControlSnapshot::default().capture,
-            },
-        };
-        let fixture = serde_json::to_string(&frame).unwrap();
-        let script = format!(
-            "#!/usr/bin/python3\nimport os,time,json\nframe=json.loads({fixture:?})\nfor i in range(128):\n frame['sequence']=i+1\n frame['body']['capture']['queuedFrames']=i\n os.write(1,(json.dumps(frame)+'\\n').encode())\n os.write(2,b'x'*4096)\nwhile True: time.sleep(1)\n"
-        );
-        std::fs::write(&executable, script).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (events, mut receiver) = mpsc::channel(32);
-        let init = Init {
-            token_file: "private".into(),
-            source_id: "recording".into(),
-            server_id: "1".into(),
-            channel_id: "2".into(),
-            output: ControlSnapshot::default().output,
-        };
-        let child = launch_with(1, init, events.clone(), move || {
-            OwnedProcess::spawn(
-                std::path::Path::new("/usr/bin/python3"),
-                &[executable.into_os_string()],
-            )
-        });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if child.take_meter().is_some_and(|c| c.queued_frames == 127) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("stdout and stderr must drain concurrently");
-        // Repeated writes eventually fill the pipe; the deadline uses no pipe locks.
-        let mut blocked = false;
-        for _ in 0..1024 {
-            child.output(Output {
-                volume_linear: None,
-                volume_percent: 50,
-                muted: true,
-            });
-            if tokio::time::timeout(Duration::from_millis(50), async {
-                while child.0.0.lock().unwrap().output.is_some() {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .is_err()
-            {
-                blocked = true;
-                break;
-            }
-        }
-        child.stop();
-        let result =
-            tokio::time::timeout(STOP_GRACE + EXIT_GRACE + Duration::from_secs(1), async {
-                while let Some(event) = receiver.recv().await {
-                    if matches!(event, Event::Exited(1, _)) {
-                        return;
-                    }
-                }
-                panic!("exit receipt missing");
-            })
-            .await;
-        std::fs::remove_dir_all(directory).unwrap();
-        result.expect("termination must be independent of pipe writes");
-        assert!(blocked, "the regression must actually block a stdin write");
-    }
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn unsolicited_stdout_eof_stops_live_child_but_does_not_prove_exit() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory =
-            std::env::temp_dir().join(format!("echocord-stdout-eof-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let executable = directory.join("worker.py");
-        let frame = Frame {
-            version: protocol::VERSION,
-            generation: 4,
-            sequence: 1,
-            body: Status::Connected,
-        };
-        let fixture = serde_json::to_string(&frame).unwrap();
-        let script = format!(
-            "#!/usr/bin/python3\nimport os,time,sys\nsys.stdin.readline()\nos.write(1,({fixture:?}+'\\n').encode())\nos.close(1)\nwhile True: time.sleep(1)\n"
-        );
-        std::fs::write(&executable, script).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let (events, mut receiver) = mpsc::channel(32);
-        let mut a = actor();
-        let init = a.initialization().unwrap();
-        let child = launch_with(4, init, events.clone(), move || {
-            OwnedProcess::spawn(
-                std::path::Path::new("/usr/bin/python3"),
-                &[executable.into_os_string()],
-            )
-        });
-        a.child = Some(child);
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Gateway,
-        };
-        let mut connected = false;
-        let mut eof = false;
-        tokio::time::timeout(STOP_GRACE + EXIT_GRACE + Duration::from_secs(1), async {
-            while let Some(event) = receiver.recv().await {
-                let exited = matches!(event, Event::Exited(4, _));
-                if matches!(event, Event::Status(4, Status::Connected)) {
-                    connected = true;
-                }
-                if matches!(event, Event::ProtocolFailed(4)) {
-                    eof = true;
-                }
-                a.event(event);
-                if eof && !exited {
-                    assert!(matches!(a.snapshot.connection, Connection::Disconnecting));
-                    assert!(a.child.is_some());
-                }
-                if exited {
-                    assert!(connected && eof);
-                    assert!(a.child.is_none());
-                    assert!(matches!(
-                        a.snapshot.connection,
-                        Connection::Error {
-                            code: ErrorCode::Internal,
-                            ..
-                        }
-                    ));
-                    return;
-                }
-            }
-            panic!("exit receipt missing");
-        })
-        .await
-        .expect("stdout EOF must initiate bounded stop of a live worker");
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-    #[cfg(not(windows))]
-    #[test]
-    fn targeted_source_controls_leave_live_destination_owned_and_running() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.snapshot.sources.push(RecordingSource {
-            id: "second".into(),
-            name: "Second".into(),
-            kind: SourceKind::Recording,
-            available: true,
-            detail: None,
-        });
-        a.command(ControlCommand::AddSource {
-            source_id: "recording".into(),
-        })
-        .unwrap();
-        a.command(ControlCommand::AddSource {
-            source_id: "second".into(),
-        })
-        .unwrap();
-        let first = a.snapshot.inputs[0].strip_id.clone();
-        a.command(ControlCommand::SetSourceGain {
-            strip_id: first.clone(),
-            gain_db: Some(-59.5),
-        })
-        .unwrap();
-        a.command(ControlCommand::SetSourceMuted {
-            strip_id: first.clone(),
-            muted: true,
-        })
-        .unwrap();
-        a.command(ControlCommand::StopCapture {
-            strip_id: first.clone(),
-        })
-        .unwrap();
-        a.command(ControlCommand::StartCapture {
-            strip_id: first.clone(),
-        })
-        .unwrap();
-        a.command(ControlCommand::RemoveSource { strip_id: first })
-            .unwrap();
-        assert_eq!(a.snapshot.connection, Connection::Connected);
-        assert!(a.child.as_ref().unwrap().stopped_at().is_none());
-        assert_eq!(a.snapshot.inputs.len(), 1);
     }
     #[cfg(not(windows))]
     #[test]
@@ -4871,75 +3353,6 @@ mod tests {
         .unwrap();
         assert!(a.snapshot.inputs.is_empty());
     }
-    #[test]
-    fn gateway_latency_is_measured_sanitized_session_scoped_and_cleared_on_stop() {
-        let mut a = actor();
-        a.child = Some(child());
-        a.snapshot.connection = Connection::Connected;
-        a.event(Event::Status(
-            3,
-            Status::GatewayLatency {
-                milliseconds: Some(12.0),
-            },
-        ));
-        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
-        a.event(Event::Status(
-            4,
-            Status::GatewayLatency {
-                milliseconds: Some(-1.0),
-            },
-        ));
-        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
-        a.event(Event::Status(
-            4,
-            Status::GatewayLatency {
-                milliseconds: Some(12.5),
-            },
-        ));
-        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, Some(12.5));
-        a.disconnect();
-        a.event(Event::Status(
-            4,
-            Status::GatewayLatency {
-                milliseconds: Some(15.0),
-            },
-        ));
-        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
-    }
-    #[test]
-    fn selecting_or_starting_the_current_active_source_is_idempotent() {
-        for phase in [InputPhase::Opening, InputPhase::Capturing] {
-            let mut a = actor();
-            a.child = Some(child());
-            a.snapshot.connection = Connection::Connected;
-            a.snapshot.inputs.push(InputStrip {
-                strip_id: "input-1".into(),
-                source_id: "recording".into(),
-                kind: SourceKind::Recording,
-                display_name: "Recording".into(),
-                detail: None,
-                phase,
-                fault: None,
-                gain_db: Some(-13.4),
-                muted: true,
-                colour_slot: 2,
-                restored: false,
-            });
-            let before = a.snapshot.clone();
-            a.command(ControlCommand::ReplaceSource {
-                strip_id: "input-1".into(),
-                source_id: "recording".into(),
-            })
-            .unwrap();
-            assert_eq!(a.snapshot, before);
-            a.command(ControlCommand::StartCapture {
-                strip_id: "input-1".into(),
-            })
-            .unwrap();
-            assert_eq!(a.snapshot, before);
-            assert!(a.child.as_ref().unwrap().stopped_at().is_none());
-        }
-    }
 
     #[cfg(not(windows))]
     #[test]
@@ -4979,73 +3392,6 @@ mod tests {
                 detail: None,
             });
         }
-    }
-    #[test]
-    fn playback_controls_are_independent_of_discord_and_credentials() {
-        let mut a = actor();
-        add_playback_catalog(&mut a);
-        a.command(ControlCommand::AddDestination {
-            server_id: "1".into(),
-            channel_id: "2".into(),
-        })
-        .unwrap();
-        a.snapshot.bot.status = BotStatus::Unconfigured;
-        a.snapshot.discovery = Discovery::Error {
-            message: "No network".into(),
-        };
-        a.snapshot.connection = Connection::Connecting {
-            stage: ConnectStage::Gateway,
-        };
-        a.child = Some(child());
-        a.command(ControlCommand::AddPlaybackDestination {
-            device_id: "wasapi:owned-output-0".into(),
-        })
-        .unwrap();
-        let local = a.snapshot.destinations[1].destination_id.clone();
-        assert_eq!(
-            a.snapshot.destinations[1].connection,
-            Connection::Disconnected
-        );
-        assert_eq!(a.snapshot.destinations[1].session_id, 0);
-        a.command(ControlCommand::SetDestinationVolume {
-            destination_id: local.clone(),
-            volume_db: Some(-59.5),
-        })
-        .unwrap();
-        a.command(ControlCommand::SetDestinationMuted {
-            destination_id: local.clone(),
-            muted: true,
-        })
-        .unwrap();
-        assert_eq!(a.snapshot.destinations[0].volume_db, Some(0.0));
-        assert!(!a.snapshot.destinations[0].muted);
-        assert!(!a.snapshot.output.muted);
-        assert!(a.child.as_ref().unwrap().stopped_at().is_none());
-        assert!(
-            a.command(ControlCommand::ChangeDestination {
-                destination_id: local.clone(),
-                server_id: "1".into(),
-                channel_id: "2".into()
-            })
-            .is_err()
-        );
-        assert!(
-            a.command(ControlCommand::ChangePlaybackDestination {
-                destination_id: "discord-1".into(),
-                device_id: "wasapi:owned-output-1".into()
-            })
-            .is_err()
-        );
-        a.command(ControlCommand::SetAllDestinationsMuted { muted: true })
-            .unwrap();
-        assert!(a.snapshot.destinations.iter().all(|d| d.muted));
-        a.command(ControlCommand::DisconnectAllDestinations)
-            .unwrap();
-        assert!(a.child.as_ref().unwrap().stopped_at().is_some());
-        assert_eq!(
-            a.snapshot.destinations[1].connection,
-            Connection::Disconnected
-        );
     }
     #[test]
     fn playback_selection_limits_and_discovery_identity_are_enforced() {
@@ -5093,7 +3439,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             a.snapshot.destinations.last().unwrap().destination_id,
-            "playback-4"
+            "playback-5"
         );
         assert!(
             a.snapshot
@@ -5123,7 +3469,7 @@ mod tests {
         a.snapshot.destinations[0].muted = true;
         save_preferences(&config, &a.snapshot).unwrap();
         let restored = load_preferences(&config).unwrap();
-        assert_eq!(restored.version, 3);
+        assert_eq!(restored.version, 4);
         assert_eq!(restored.destinations[0].kind, DestinationKind::Playback);
         assert_eq!(
             restored.destinations[0].connection,
@@ -5150,37 +3496,251 @@ mod tests {
         assert_eq!(legacy.destinations[0].connection, Connection::Disconnected);
         std::fs::remove_dir_all(directory).unwrap();
     }
+    fn simulated_room(
+        a: &mut Actor,
+        id: &str,
+        guild: &str,
+    ) -> (crate::discord::protocol::RoomKey, u32) {
+        use crate::discord::protocol::*;
+        if !a.snapshot.servers.iter().any(|s| s.id == guild) {
+            let mut server = a.snapshot.servers[0].clone();
+            server.id = guild.into();
+            a.snapshot.servers.push(server);
+        }
+        let d = DestinationStrip {
+            destination_id: id.into(),
+            kind: DestinationKind::Discord,
+            session_id: 0,
+            device_id: None,
+            display_name: None,
+            server_id: guild.into(),
+            channel_id: "2".into(),
+            connection: Connection::Disconnected,
+            volume_db: Some(0.0),
+            muted: false,
+        };
+        a.snapshot.destinations.push(d.clone());
+        a.discord.start(&d).unwrap();
+        a.discord.gateway_status(1, GatewayStatus::Ready);
+        let key = a.discord.rooms[id].key.clone();
+        a.discord.gateway_status(
+            1,
+            GatewayStatus::Credentials {
+                key: key.clone(),
+                revision: 1,
+                secret: VoiceSecret {
+                    endpoint: "private-endpoint-canary".into(),
+                    session_id: "private-session-canary".into(),
+                    token: "private-token-canary".into(),
+                    user_id: "3".into(),
+                },
+            },
+        );
+        a.discord.advance(true);
+        let generation = a.discord.rooms[id].voice.unwrap();
+        a.discord
+            .voice_status(id, generation, VoiceStatus::Connected);
+        a.discord.effects.clear();
+        a.publish();
+        (key, generation)
+    }
     #[test]
-    fn selecting_the_current_discord_room_preserves_its_worker_and_session() {
-        for phase in [
-            Connection::Connecting {
-                stage: ConnectStage::Gateway,
+    fn controller_publication_never_exports_room_credentials_and_preserves_peers() {
+        let mut a = actor();
+        simulated_room(&mut a, "discord-1", "1");
+        simulated_room(&mut a, "discord-2", "4");
+        a.snapshot.destinations.push(DestinationStrip {
+            destination_id: "playback-3".into(),
+            kind: DestinationKind::Playback,
+            device_id: Some("explicit-device".into()),
+            display_name: Some("Playback".into()),
+            server_id: String::new(),
+            channel_id: String::new(),
+            session_id: 27,
+            connection: Connection::Connected,
+            volume_db: Some(-22.5),
+            muted: false,
+        });
+        let playback = a.snapshot.destinations[2].clone();
+        let sources = a.snapshot.inputs.clone();
+        let peer = a.snapshot.destinations[1].clone();
+        a.command(ControlCommand::SetDestinationVolume {
+            destination_id: "discord-1".into(),
+            volume_db: Some(-37.5),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetDestinationMuted {
+            destination_id: "discord-1".into(),
+            muted: true,
+        })
+        .unwrap();
+        let key = a.discord.rooms["discord-1"].key.clone();
+        a.discord.gateway_status(
+            1,
+            crate::discord::protocol::GatewayStatus::RoomFailed {
+                key,
+                code: Failure::Permission,
             },
-            Connection::Connected,
-            Connection::Recovering {
-                attempt: 1,
-                message: "Recovering".into(),
-            },
+        );
+        a.publish();
+        assert_eq!(a.snapshot.inputs, sources);
+        assert_eq!(a.snapshot.destinations[1], peer);
+        assert_eq!(a.snapshot.destinations[2], playback);
+        let published = a.snapshots.borrow().clone();
+        let json = serde_json::to_string(&published).unwrap();
+        let debug = format!("{published:?}");
+        for canary in [
+            "private-token-canary",
+            "private-session-canary",
+            "private-endpoint-canary",
         ] {
-            let mut a = actor();
-            a.command(ControlCommand::AddDestination {
-                server_id: "1".into(),
-                channel_id: "2".into(),
+            assert!(!json.contains(canary));
+            assert!(!debug.contains(canary));
+        }
+    }
+    #[test]
+    fn remove_keeps_the_card_and_persists_intent_until_both_receipts() {
+        let mut a = actor();
+        let (key, generation) = simulated_room(&mut a, "discord-1", "1");
+        simulated_room(&mut a, "discord-2", "4");
+        let directory =
+            std::env::temp_dir().join(format!("echocord-room-removal-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        a.config.settings_file = Some(directory.join("prefs.json"));
+        a.command(ControlCommand::RemoveDestination {
+            destination_id: "discord-1".into(),
+        })
+        .unwrap();
+        assert!(
+            a.snapshot
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == "discord-1")
+        );
+        assert!(
+            !load_preferences(&a.config)
+                .unwrap()
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == "discord-1")
+        );
+        assert!(
+            a.command(ControlCommand::DisconnectDestination {
+                destination_id: "discord-1".into()
             })
-            .unwrap();
-            a.child = Some(child());
-            a.snapshot.connection = phase;
-            a.publish();
-            let before = a.snapshot.clone();
+            .is_ok()
+        );
+        a.discord
+            .gateway_status(1, crate::discord::protocol::GatewayStatus::Left { key });
+        a.poll_discord();
+        assert!(
+            a.snapshot
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == "discord-1")
+        );
+        a.discord.voice_exit("discord-1", generation, true);
+        a.poll_discord();
+        assert!(
+            !a.snapshot
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == "discord-1")
+        );
+        assert_eq!(a.snapshot.destinations[0].connection, Connection::Connected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn current_room_is_noop_and_old_target_reservation_retains_actual_channel() {
+        for same_server in [false, true] {
+            let mut a = actor();
+            let (_, generation) = simulated_room(&mut a, "discord-1", "1");
             a.command(ControlCommand::ChangeDestination {
                 destination_id: "discord-1".into(),
                 server_id: "1".into(),
                 channel_id: "2".into(),
             })
             .unwrap();
-            assert_eq!(a.snapshot, before);
-            assert!(!a.move_pending);
-            assert!(a.child.as_ref().unwrap().stopped_at().is_none());
+            assert_eq!(a.discord.rooms["discord-1"].voice, Some(generation));
+            assert!(a.discord.effects.is_empty());
+            let mut server = a.snapshot.servers[0].clone();
+            server.id = if same_server { "1" } else { "4" }.into();
+            server.channels[0].id = "5".into();
+            if same_server {
+                a.snapshot.servers[0].channels.extend(server.channels);
+            } else {
+                a.snapshot.servers.push(server);
+            }
+            a.command(ControlCommand::ChangeDestination {
+                destination_id: "discord-1".into(),
+                server_id: if same_server { "1" } else { "4" }.into(),
+                channel_id: "5".into(),
+            })
+            .unwrap();
+            assert_eq!(a.snapshot.server_reservations.len(), 2);
+            assert!(
+                a.snapshot
+                    .server_reservations
+                    .iter()
+                    .any(|r| r.server_id == "1"
+                        && r.channel_id == "2"
+                        && r.phase == ReservationPhase::Leaving)
+            );
+            assert!(
+                a.snapshot
+                    .server_reservations
+                    .iter()
+                    .any(|r| r.channel_id == "5" && r.phase == ReservationPhase::Selected)
+            );
         }
+    }
+    #[test]
+    fn v4_multiple_rooms_restore_idle_and_older_formats_keep_their_limits() {
+        let mut a = actor();
+        for (id, guild) in [("discord-1", "1"), ("discord-2", "4"), ("discord-3", "7")] {
+            simulated_room(&mut a, id, guild);
+        }
+        let directory =
+            std::env::temp_dir().join(format!("echocord-multi-preferences-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        a.config.settings_file = Some(directory.join("prefs.json"));
+        save_preferences(&a.config, &a.snapshot).unwrap();
+        let restored = load_preferences(&a.config).unwrap();
+        assert_eq!(restored.version, 4);
+        assert_eq!(restored.destinations.len(), 3);
+        assert!(
+            restored
+                .destinations
+                .iter()
+                .all(|d| d.session_id == 0 && d.connection == Connection::Disconnected)
+        );
+        let path = a.config.settings_file.as_ref().unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        json["version"] = 3.into();
+        std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(load_preferences(&a.config).is_err());
+        json["destinations"] = serde_json::Value::Array(vec![json["destinations"][0].clone()]);
+        std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
+        assert_eq!(load_preferences(&a.config).unwrap().destinations.len(), 1);
+        json["version"] = 5.into();
+        let future = serde_json::to_vec(&json).unwrap();
+        std::fs::write(path, &future).unwrap();
+        assert!(save_preferences(&a.config, &a.snapshot).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), future);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn credentials_cannot_be_replaced_during_any_room_or_gateway_owner() {
+        let mut a = actor();
+        let (_, generation) = simulated_room(&mut a, "discord-1", "1");
+        simulated_room(&mut a, "discord-2", "4");
+        assert!(a.configuration_busy());
+        a.discord.stop("discord-1", None);
+        a.discord.voice_exit("discord-1", generation, true);
+        a.poll_discord();
+        assert!(a.configuration_busy());
+        a.snapshot.destinations.clear();
+        assert!(a.configuration_busy());
     }
 }

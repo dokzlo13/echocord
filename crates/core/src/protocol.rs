@@ -1,12 +1,11 @@
 //! Private, bounded backend protocol. Never log frames or parser errors.
-use crate::model::{AppError, Capture, ConnectStage, ErrorCode, Output};
+use crate::model::{AppError, Capture, ErrorCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(windows)]
 use std::path::Path;
 use std::{
     fmt,
     io::{BufRead, Write},
-    path::PathBuf,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
@@ -31,43 +30,6 @@ impl<T> fmt::Debug for Frame<T> {
             .field("sequence", &self.sequence)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Init {
-    pub token_file: PathBuf,
-    pub source_id: String,
-    pub server_id: String,
-    pub channel_id: String,
-    pub output: Output,
-}
-
-impl fmt::Debug for Init {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Init { .. }")
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Command {
-    Init(Init),
-    Output { output: Output },
-    Stop,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum Status {
-    Connecting { stage: ConnectStage },
-    Connected,
-    Recovering,
-    DeviceMissing,
-    Failed { code: Failure },
-    Stopped,
-    Meter { capture: Capture },
-    GatewayLatency { milliseconds: Option<f32> },
 }
 
 // Closed vocabulary: no library error strings or remote payloads cross stdout.
@@ -249,23 +211,6 @@ pub async fn read_async<T: DeserializeOwned>(
     }
 }
 
-pub fn validate_init(init: &Init) -> Result<(), ProtocolError> {
-    if init.token_file.as_os_str().is_empty()
-        || init.source_id.is_empty()
-        || init.source_id.len() > 1024
-        || init.output.volume_percent > 100
-        || init
-            .output
-            .volume_linear
-            .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
-        || discord_id(&init.server_id).is_none()
-        || discord_id(&init.channel_id).is_none()
-    {
-        return Err(ProtocolError::Invalid);
-    }
-    Ok(())
-}
-
 pub fn discord_id(value: &str) -> Option<u64> {
     if value.is_empty() || value.len() > 20 || !value.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -295,6 +240,7 @@ fn clean_level(level: Option<f32>) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discord::protocol::{GatewayCommand as Command, VoiceStatus as Status};
     use std::io::Cursor;
 
     #[test]
@@ -361,31 +307,6 @@ mod tests {
         assert!(v.accept(&frame(3)).is_ok());
     }
     #[test]
-    fn stage_events_are_bounded_and_reject_unknown_remote_payloads() {
-        let frame = Frame {
-            version: VERSION,
-            generation: 7,
-            sequence: 1,
-            body: Status::Connecting {
-                stage: ConnectStage::Join,
-            },
-        };
-        let encoded = encode(&frame).unwrap();
-        let decoded = read::<Status>(&mut Cursor::new(encoded)).unwrap().unwrap();
-        assert_eq!(decoded.body, frame.body);
-        for body in [
-            serde_json::json!({"type":"connecting", "stage":"private-remote-payload"}),
-            serde_json::json!({"type":"connecting", "stage":"join", "percent":50}),
-        ] {
-            let value =
-                serde_json::json!({"version":VERSION, "generation":7,"sequence":2,"body":body});
-            assert_eq!(
-                decode::<Status>(&serde_json::to_vec(&value).unwrap()).unwrap_err(),
-                ProtocolError::Malformed
-            );
-        }
-    }
-    #[test]
     fn malformed_oversized_partial_and_unknown_are_redacted() {
         for bytes in [
             b"private-token\n".to_vec(),
@@ -415,16 +336,8 @@ mod tests {
     }
     #[test]
     fn private_paths_never_appear_in_debug() {
-        let init = Init {
+        let init = Command::Init {
             token_file: "/private/secret".into(),
-            source_id: "source".into(),
-            server_id: "1".into(),
-            channel_id: "2".into(),
-            output: Output {
-                volume_linear: None,
-                volume_percent: 100,
-                muted: false,
-            },
         };
         assert!(
             !format!(
@@ -433,12 +346,11 @@ mod tests {
                     version: VERSION,
                     generation: 1,
                     sequence: 1,
-                    body: Command::Init(init.clone())
+                    body: init.clone()
                 }
             )
             .contains("secret")
         );
-        assert!(validate_init(&init).is_ok());
         assert!(discord_id("+1").is_none());
         assert!(discord_id("0").is_none());
     }

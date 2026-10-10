@@ -145,6 +145,24 @@ fn parse_options() -> Result<(ControllerConfig, Option<PathBuf>), &'static str> 
 
 fn main() {
     #[cfg(windows)]
+    if let Some(mode) = std::env::args()
+        .nth(1)
+        .filter(|mode| mode == "--gateway-worker" || mode == "--voice-worker")
+    {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("worker runtime");
+        let result = runtime.block_on(async {
+            if mode == "--gateway-worker" {
+                echocord_core::discord::gateway::run_worker().await
+            } else {
+                echocord_core::discord::voice::run_worker().await
+            }
+        });
+        // The parent observes actual process exit; library task cancellation alone is insufficient.
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     if std::env::args().nth(1).as_deref() == Some("--audio-worker") {
         let result = std::env::args()
             .nth(2)
@@ -174,22 +192,6 @@ fn main() {
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
 
-    // The engine must never initialize a second WebView or tray icon.
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--engine-worker")) {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("Cannot initialize engine runtime");
-        if runtime
-            .block_on(echocord_core::engine::run_worker())
-            .is_err()
-        {
-            eprintln!("Echocord engine stopped with an error");
-            std::process::exit(1);
-        }
-        return;
-    }
     let (configuration, smoke_report) = parse_options().unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(2);
@@ -471,6 +473,9 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
             visible.store(true, Ordering::SeqCst);
         }
     });
+    if !restored_outputs_idle(app) {
+        return false;
+    }
     let result = async {
         if window.minimize().is_err() || !wait_visibility(app, false).await {
             return false;
@@ -507,7 +512,15 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     }
     .await;
     app.unlisten(listener);
-    result
+    result && restored_outputs_idle(app)
+}
+
+fn restored_outputs_idle(app: &tauri::AppHandle) -> bool {
+    let snapshot = app.state::<ShellState>().controller.snapshot();
+    snapshot.gateway.phase == echocord_core::model::GatewayPhase::Disconnected
+        && snapshot.destinations.iter().all(|d| {
+            d.connection == echocord_core::model::Connection::Disconnected && d.session_id == 0
+        })
 }
 
 async fn wait_window_size(window: &tauri::WebviewWindow, width: u32, height: u32) -> bool {

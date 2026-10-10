@@ -2,23 +2,17 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
-## Active multi-room epoch
+## Delivered multiple-room epoch
 
-The owner requests planning and implementation of multiple room targets. EC-030 owns native design/contracts/implementation, EC-031 the existing UI extension, EC-032 independent review and EC-033 integration. The owner confirmed different-server rooms with the existing bot. Design/review covers one shared gateway, independent room workers and one room per server. The delivered playback build remains the baseline and must stay undisturbed while the new version is staged.
-
-Next owner priority: EC-034 completed research on a Discord room as an aggregate participant-audio source for live playback/cross-server relay; EC-035 queues the bounded native proof and reviewed design after this delivery. Per-participant mute is later scope. Receive support and feedback/lifecycle design need their own checkpoint.
-
-## Delivered destination continuation
-
-The shared mix now feeds one Discord room and up to three explicit Windows playback devices. Each output has independent gain/mute/start/stop, session-fenced telemetry and native lifetime. Outputs restore idle; no driver or automatic playback is introduced. EC-027 also restores the actual prototype's wide two-source histories, compact measured sparklines and completed-change notices, with four-output control containment at all five supported sizes. EC-020/027–029 are integrated and independently reviewed.
+EC-030–033 are integrated and independently reviewed. Four total destinations can include multiple Discord rooms in distinct servers under the existing bot and at most three playback devices. Controls, reservations, cleanup and histories are independent; all outputs restore idle. Final integrated checks passed 120 portable library, nine probe, 132 Windows library and 111 UI checks plus staged build/native shell/worker gates. The native empty-source/four-room overlap is corrected and verified at 125% scaling. Live cross-server listening remains unmeasured.
 
 ## Next pickup order
 
-1. **Owner feedback:** review the corrected UI; choose Add destination → Playback, then Play; test independent output gain/mute/Stop alongside source capture. The real native test covered one unused endpoint, not concurrent distinct hardware or live Discord listening.
-2. **EC-030:** focused shared-gateway/disposable-voice-driver design for multiple Discord rooms, with a design/review checkpoint before implementation. Different-guild calls are feasible; same-guild simultaneous rooms need distinct bot identities.
-3. **EC-006:** coordinated live Discord-plus-playback listening, physical endpoint/network/sleep recovery, independent clocks/resources and five-hour stability.
+1. **Owner manual review:** add rooms in different servers and Connect each; check independent gain/mute/Disconnect/Cancel alongside source capture and optional playback. The normal reviewed app is open. Do not terminate an owner session as cleanup.
+2. **EC-035:** bounded proof and reviewed design for a Discord room as one aggregate participant-audio source. EC-034 established a feasible receive seam and identified encryption, packet timing, resource and feedback constraints. Per-participant mute follows later; no room-source control ships yet.
+3. **EC-006:** coordinated live delivery, recovery/resource/latency measurements and five-hour acceptance. Earlier source/playback native observations and owner listening feedback do not close these new-room gates.
 
-Owner testing confirmed the earlier capture routes and perceived low delay. New automatic results are recorded in STATE and tasks, without replacing live acceptance. Independent original-playback suppression, desktop capture and a new virtual driver remain outside this release. The current app and saved preferences are left for owner review; inspect processes before another test.
+Original application playback remains an OS route; independent local mute, desktop capture and a new virtual driver are outside the release. The approved UI and original owner/prototype artifacts are preserved. Current behavior and exact validation boundaries are in STATE and the task records.
 
 | ID | Task | State | Depends on | Owner / attempt | Branch | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -51,11 +45,11 @@ Owner testing confirmed the earlier capture routes and perceived low delay. New 
 | EC-027 | Prototype fidelity and destination UI | done | EC-024/026; EC-020 contract checkpoint | UI worker / a1; coordinator integration | main | [task](EC-027.md) |
 | EC-028 | Independent destination/fidelity review | done | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
 | EC-029 | Destination continuation integration | done | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
-| EC-030 | Multiple Discord rooms | review | EC-020; gateway/voice design review before code | native worker / a1; coordinator integration | main | [task](EC-030.md), 3c2bad2; combined/native GUI gates pending |
-| EC-031 | Multiple-room control UI | active | approved UI; EC-030 contract checkpoint | UI worker / a1; native empty-state follow-up | agent/EC-031-a1 | [task](EC-031.md), 2a333b2 baseline; four-room/no-source overlap correction |
-| EC-032 | Independent multi-room review | active | owner-authorized epoch | reviewers / r1 gateway, r2 controller | read-only | [task](EC-032.md) |
-| EC-033 | Multiple-room integration | active | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md) |
+| EC-030 | Multiple Discord rooms | done | EC-020; reviewed gateway/voice design | native worker / a1; coordinator integration | main | [task](EC-030.md), 3c2bad2; integrated/native gates passed |
+| EC-031 | Multiple-room control UI | done | approved UI; EC-030 contract | UI worker / a1; coordinator integration | main | [task](EC-031.md), 2a333b2 + 3c6b33d; 111 checks and native correction passed |
+| EC-032 | Independent multi-room review | done | owner-authorized epoch | reviewers / r1 gateway, r2 controller | read-only | [task](EC-032.md); native/UI exact-hash GO and final integration evidence |
+| EC-033 | Multiple-room integration | done | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md); staged release activated and app open |
 | EC-034 | Discord room source feasibility research | done | owner next-priority request | research worker / r1; coordinator verification | read-only | [task](EC-034.md); no receive implementation/live proof |
-| EC-035 | Discord room source proof and lifecycle design | blocked | EC-033 delivery, EC-034 | unassigned | — | [task](EC-035.md) |
+| EC-035 | Discord room source proof and lifecycle design | ready | EC-033 delivery, EC-034 | unassigned | — | [task](EC-035.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

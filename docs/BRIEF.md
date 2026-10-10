@@ -1,5 +1,9 @@
 # Product brief
 
+## Authorized next increment
+
+The owner requests correction of visible differences from the approved prototype and research/implementation of different destinations. The shared mix and existing Discord route remain the baseline. Explicit Windows playback endpoints and concurrent Discord routes are being evaluated through EC-020 design/review; exact implementation scope is recorded there before coding. New outputs must remain explicit, independently controlled and isolated, with no automatic playback/default-device fallback. A new virtual driver stays postponed. The current one-destination requirements below describe the delivered baseline until this increment is integrated.
+
 ## Accepted current requirements
 
 Echocord mixes up to eight explicitly selected application process trees or Windows recording endpoints into one shared native mix and one Discord bot destination. It is a compact utility for 2–5 hour tabletop/voice sessions alongside a browser, player, Discord and other desktop tools. No local monitoring, media player, soundboard, routing matrix or DSP beyond gain/mute is required.

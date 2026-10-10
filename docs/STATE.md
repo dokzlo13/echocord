@@ -2,6 +2,8 @@
 
 The owner now requests multiple room targets and confirms different servers with the existing bot are sufficient. EC-030 owns shared-gateway/independent-voice-worker architecture and implementation; EC-031 extends the existing UI; EC-032 reviews; EC-033 integrates. One room per server, explicit per-card controls and idle restore remain requirements. The delivered playback build below is the preserved baseline until staged integration passes.
 
+The next owner priority is a Discord room as a single aggregate participant-audio source, relayed to playback or another Discord room, with participant mute later. EC-034 records source-backed receive feasibility and the required encryption/feedback/lifecycle design. It does not replace the active multiple-destination delivery.
+
 # Current state
 
 The destination continuation is delivered as a manually testable Windows app. Up to eight explicitly selected application process trees/recording inputs feed one shared native mix, one Discord room and up to three Windows playback devices. Playback selection works without bot setup. New and restored outputs stay idle; Connect or Play is explicit. Each output has independent gain, mute, stop and failure state. Source edits keep outputs alive, and stopping an output leaves capture and its peers running. Tray actions mute all destination cards or stop all outputs.

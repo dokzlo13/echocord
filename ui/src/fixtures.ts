@@ -1,494 +1,414 @@
+/** Development/test control plane only. This module is absent from release builds. */
 import type { Transport } from "./adapter";
-import type { ControlCommand, ControlSnapshot } from "./generated";
-
+import type {
+  ControlCommand,
+  ControlSnapshot,
+  MixTelemetry,
+} from "./generated";
 export const fixtureNames = [
-  "disconnected",
   "first-run",
-  "loading",
-  "empty-devices",
-  "empty-servers",
-  "no-channels",
-  "unavailable-route",
-  "invalid-config",
-  "discovery-error",
-  "connecting",
+  "disconnected",
   "connected",
   "muted",
-  "recovering",
-  "missing-device",
-  "capture-error",
-  "connection-error",
-  "disconnecting",
-  "cleanup-incomplete",
-  "rejected-command",
-  "backend-unavailable",
-  "application-connected",
-  "application-missing",
-  "application-error",
-  "source-discovery-error",
+  "many",
+  "restored",
+  "faults",
+  "connecting",
+  "cleanup",
 ] as const;
 export type FixtureName = (typeof fixtureNames)[number];
-
 export function fixtureSnapshot(
   name: FixtureName = "disconnected",
 ): ControlSnapshot {
-  const snapshot: ControlSnapshot = {
-    revision: 1,
-    sessionId: 0,
-    sources: [
-      {
-        id: "cable",
-        kind: "recording",
-        name: "CABLE Output (VB-Audio Virtual Cable)",
-        available: true,
-        detail: "VB-Audio Virtual Cable",
-      },
-      {
-        id: "cable-b",
-        kind: "recording",
-        name: "CABLE-B Output",
-        available: true,
-        detail: "VB-Audio Virtual Cable",
-      },
-      {
-        id: "fixture-app-player",
-        name: "Ambient player",
-        kind: "application",
-        available: true,
-        detail: "PID 7412 · includes child processes",
-      },
-      {
-        id: "fixture-app-other",
-        name: "Ambient player",
-        kind: "application",
-        available: true,
-        detail: "PID 7612 · includes child processes",
-      },
-      {
-        id: "fixture-app-long",
-        name: "Table Audio — Extended soundtrack and ambience collection",
-        kind: "application",
-        available: true,
-        detail: "PID 7812 · includes child processes",
-      },
-    ],
-    servers: [
-      {
-        id: "1234567890123456789",
-        name: "The Sunday Table",
-        iconUrl: null,
-        channels: [
-          {
-            id: "9876543210987654321",
-            name: "Session room",
-            categoryName: "Game night",
-            position: 0,
-          },
-          {
-            id: "9876543210987654322",
-            name: "Lobby",
-            categoryName: "General",
-            position: 1,
-          },
-        ],
-      },
-      {
-        id: "1234567890123456790",
-        name: "One-shot Club",
-        iconUrl: null,
-        channels: [
-          {
-            id: "9876543210987654323",
-            name: "The tavern",
-            categoryName: null,
-            position: 0,
-          },
-        ],
-      },
-    ],
-    selection: {
-      sourceId: "cable",
-      serverId: "1234567890123456789",
-      channelId: "9876543210987654321",
+  const sources: ControlSnapshot["sources"] = [
+    {
+      id: "app:player:1",
+      kind: "application",
+      name: "Preview player",
+      detail: "Example track · selected process tree",
+      available: true,
     },
-    bot: { status: "ready", name: "Table Audio", message: null },
+    {
+      id: "app:browser:2",
+      kind: "application",
+      name: "Preview browser",
+      detail: "Two windows · selected process tree",
+      available: true,
+    },
+    {
+      id: "rec:cable",
+      kind: "recording",
+      name: "Preview recording input",
+      detail: "48 kHz stereo recording",
+      available: true,
+    },
+    {
+      id: "rec:unsupported",
+      kind: "recording",
+      name: "Unsupported input",
+      detail:
+        "44.1 kHz input is unsupported. Switch this input to 48 kHz in Windows sound settings.",
+      available: false,
+    },
+  ];
+  const servers: ControlSnapshot["servers"] = [
+    {
+      id: "guild:1",
+      name: "Studio group",
+      iconUrl: null,
+      channels: [
+        {
+          id: "room:1",
+          name: "Session room",
+          categoryName: "Game night",
+          position: 0,
+        },
+        {
+          id: "room:2",
+          name: "Lounge",
+          categoryName: "Game night",
+          position: 1,
+        },
+      ],
+    },
+    {
+      id: "guild:2",
+      name: "Вечерняя группа",
+      iconUrl: null,
+      channels: [
+        {
+          id: "room:3",
+          name: "Сессия",
+          categoryName: "Голосовые каналы",
+          position: 0,
+        },
+      ],
+    },
+  ];
+  const inputs: ControlSnapshot["inputs"] =
+    name === "first-run"
+      ? []
+      : [
+          {
+            stripId: "strip:1",
+            sourceId: sources[0]!.id,
+            kind: "application",
+            displayName: sources[0]!.name,
+            detail: sources[0]!.detail,
+            phase: "capturing",
+            gainDb: -3,
+            muted: false,
+            colourSlot: 0,
+            restored: false,
+            fault: null,
+          },
+        ];
+  if (name === "many" || name === "restored" || name === "faults") {
+    inputs.push({
+      stripId: "strip:2",
+      sourceId: sources[1]!.id,
+      kind: "application",
+      displayName: sources[1]!.name,
+      detail: sources[1]!.detail,
+      phase: name === "restored" ? "stopped" : "capturing",
+      gainDb: 0,
+      muted: name === "many",
+      colourSlot: 1,
+      restored: name === "restored",
+      fault: null,
+    });
+    inputs.push({
+      stripId: "strip:3",
+      sourceId: "rec:cable",
+      kind: "recording",
+      displayName: "Preview recording input",
+      detail: "48 kHz stereo",
+      phase: "stopped",
+      gainDb: 0,
+      muted: false,
+      colourSlot: 2,
+      restored: false,
+      fault: null,
+    });
+  }
+  let connection: ControlSnapshot["connection"] =
+    name === "connected" || name === "muted" || name === "many"
+      ? { phase: "connected" }
+      : name === "connecting"
+        ? { phase: "connecting", stage: "join" }
+        : name === "cleanup"
+          ? {
+              phase: "cleanup-incomplete",
+              message: "Audio cleanup has not finished. Retry disconnect.",
+            }
+          : { phase: "disconnected" };
+  if (name === "faults") {
+    inputs[0]!.phase = "fault";
+    inputs[0]!.fault = {
+      code: "capture-failed",
+      message:
+        "The selected application closed. Pick its current process again.",
+    };
+    connection = {
+      phase: "error",
+      code: "permission-denied",
+      message: "The bot cannot speak in this room. Allow Connect and Speak.",
+    };
+  }
+  const telemetry: MixTelemetry = {
+    inputs: inputs.map((s) => ({
+      stripId: s.stripId,
+      levelDbfs: s.phase === "capturing" ? -18 : null,
+      preClip: false,
+      queuedFrames: 0,
+      droppedFrames: 0,
+      underrunFrames: 0,
+    })),
+    outputLevelDbfs:
+      connection.phase === "connected" && name !== "muted" ? -24 : null,
+    queuedFrames: connection.phase === "connected" ? 480 : 0,
+    droppedFrames: 0,
+    underrunFrames: 0,
+    gatewayPingMs: null,
+  };
+  return {
+    revision: 1,
+    sessionId: 1,
+    sources,
+    servers,
+    inputs,
+    destinations:
+      name === "first-run"
+        ? []
+        : [
+            {
+              destinationId: "dest:1",
+              serverId: "guild:1",
+              channelId: "room:1",
+              connection,
+              volumeDb: -6,
+              muted: name === "muted",
+            },
+          ],
+    settings: { meterStyle: "simple", restoreSetup: true, keepInTray: true },
+    telemetry,
+    selection: {
+      sourceId: inputs[0]?.sourceId ?? null,
+      serverId: name === "first-run" ? null : "guild:1",
+      channelId: name === "first-run" ? null : "room:1",
+    },
+    bot: {
+      status: name === "first-run" ? "unconfigured" : "ready",
+      name: name === "first-run" ? null : "Preview bot",
+      message: null,
+    },
     discovery: { phase: "ready" },
     sourceDiscovery: { phase: "ready" },
-    connection: { phase: "disconnected" },
+    connection,
     capture: {
-      phase: "stopped",
-      levelDbfs: null,
-      outputLevelDbfs: null,
+      phase: "running",
+      levelDbfs: -18,
+      outputLevelDbfs: telemetry.outputLevelDbfs,
       message: null,
       droppedFrames: 0,
       underrunFrames: 0,
-      queuedFrames: 0,
+      queuedFrames: telemetry.queuedFrames,
     },
-    output: { volumePercent: 80, muted: false },
+    output: { volumePercent: 50, muted: name === "muted" },
   };
-  if (
-    [
-      "connecting",
-      "connected",
-      "muted",
-      "recovering",
-      "missing-device",
-      "capture-error",
-      "disconnecting",
-      "cleanup-incomplete",
-      "application-connected",
-      "application-missing",
-      "application-error",
-    ].includes(name)
-  )
-    snapshot.sessionId = 1;
-  if (
-    [
-      "connected",
-      "muted",
-      "recovering",
-      "missing-device",
-      "capture-error",
-      "application-connected",
-      "application-missing",
-      "application-error",
-    ].includes(name)
-  ) {
-    snapshot.connection = { phase: "connected" };
-    snapshot.capture = {
-      ...snapshot.capture,
-      phase: "running",
-      levelDbfs: -21,
-      outputLevelDbfs: -22.9,
-    };
-  }
-  switch (name) {
-    case "application-connected":
-      snapshot.selection.sourceId = "fixture-app-player";
-      break;
-    case "application-missing":
-      snapshot.selection.sourceId = "fixture-app-player";
-      snapshot.sources = snapshot.sources.map((source) =>
-        source.id === snapshot.selection.sourceId
-          ? { ...source, available: false }
-          : source,
-      );
-      snapshot.capture = {
-        ...snapshot.capture,
-        phase: "missing",
-        levelDbfs: null,
-        outputLevelDbfs: null,
-        message:
-          "The selected application exited. Refresh sources and select the new instance after restarting.",
-      };
-      break;
-    case "application-error":
-      snapshot.selection.sourceId = "fixture-app-player";
-      snapshot.connection = {
-        phase: "error",
-        code: "capture-failed",
-        message: "Application capture could not start.",
-      };
-      snapshot.capture = {
-        ...snapshot.capture,
-        phase: "error",
-        levelDbfs: null,
-        outputLevelDbfs: null,
-        message:
-          "This Windows version does not support application audio capture. Use a recording input.",
-      };
-      break;
-    case "source-discovery-error":
-      snapshot.sourceDiscovery = {
-        phase: "error",
-        message:
-          "Could not enumerate application windows. Refresh sources to retry.",
-      };
-      break;
-    case "first-run":
-      snapshot.sources = [];
-      snapshot.servers = [];
-      snapshot.selection = { sourceId: null, serverId: null, channelId: null };
-      snapshot.bot = {
-        status: "unconfigured",
-        name: null,
-        message: "Bot configuration has not been supplied to the app.",
-      };
-      snapshot.discovery = { phase: "idle" };
-      snapshot.sourceDiscovery = { phase: "idle" };
-      break;
-    case "loading":
-      snapshot.discovery = { phase: "loading" };
-      snapshot.bot.status = "checking";
-      break;
-    case "empty-devices":
-      snapshot.sources = [];
-      snapshot.selection.sourceId = null;
-      break;
-    case "empty-servers":
-      snapshot.servers = [];
-      snapshot.selection.serverId = null;
-      snapshot.selection.channelId = null;
-      break;
-    case "no-channels":
-      snapshot.servers = snapshot.servers.map((server, index) =>
-        index === 0 ? { ...server, channels: [] } : server,
-      );
-      snapshot.selection.channelId = null;
-      break;
-    case "unavailable-route":
-      snapshot.selection = {
-        sourceId: "saved-device",
-        serverId: "saved-server",
-        channelId: "saved-channel",
-      };
-      break;
-    case "invalid-config":
-      snapshot.bot = {
-        status: "invalid",
-        name: null,
-        message: "Bot configuration is invalid. Check the token, then recheck.",
-      };
-      break;
-    case "discovery-error":
-      snapshot.discovery = {
-        phase: "error",
-        message: "Could not load Discord servers. Refresh to try again.",
-      };
-      break;
-    case "connecting":
-      snapshot.connection = { phase: "connecting", stage: "gateway" };
-      snapshot.capture.phase = "opening";
-      break;
-    case "muted":
-      snapshot.output.muted = true;
-      snapshot.capture.outputLevelDbfs = -96;
-      break;
-    case "recovering":
-      snapshot.connection = {
-        phase: "recovering",
-        attempt: 1,
-        message:
-          "Restoring the same voice channel. Disconnect cancels recovery.",
-      };
-      snapshot.output.muted = true;
-      break;
-    case "missing-device":
-      snapshot.capture = {
-        ...snapshot.capture,
-        phase: "missing",
-        levelDbfs: null,
-        outputLevelDbfs: null,
-        message:
-          "The selected device is missing. Restore that device or disconnect to choose another.",
-      };
-      snapshot.sources = snapshot.sources.map((source, index) =>
-        index === 0 ? { ...source, available: false } : source,
-      );
-      break;
-    case "capture-error":
-      snapshot.capture = {
-        ...snapshot.capture,
-        phase: "error",
-        levelDbfs: null,
-        outputLevelDbfs: null,
-        message:
-          "Could not open the selected input at 48 kHz. Check its Windows sound settings.",
-      };
-      break;
-    case "connection-error":
-      snapshot.connection = {
-        phase: "error",
-        code: "permission-denied",
-        message:
-          "The bot cannot join this channel. Check its Connect and Speak permissions.",
-      };
-      break;
-    case "disconnecting":
-      snapshot.connection = { phase: "disconnecting" };
-      break;
-    case "cleanup-incomplete":
-      snapshot.connection = {
-        phase: "cleanup-incomplete",
-        message:
-          "The session has not exited. Retry disconnect or quit from the tray before reconnecting.",
-      };
-      break;
-  }
-  return snapshot;
 }
-
-/** Included only by an explicit development import; never a native failure fallback. */
 export class FixtureTransport implements Transport {
-  readonly names = fixtureNames;
-  private snapshot: ControlSnapshot;
-  private readonly listeners = new Set<(snapshot: ControlSnapshot) => void>();
-  private timer: ReturnType<typeof setTimeout> | undefined;
-  private sourceTimer: ReturnType<typeof setTimeout> | undefined;
-  readonly commands: ControlCommand[] = [];
-
-  constructor(public name: FixtureName = "disconnected") {
-    this.snapshot = fixtureSnapshot(name);
+  current: ControlSnapshot;
+  commands: ControlCommand[] = [];
+  reject: unknown = null;
+  rejectSave = false;
+  holdConnect = false;
+  holdDisconnect = false;
+  minimized = 0;
+  closed = 0;
+  dragged = 0;
+  private listeners = new Set<(s: ControlSnapshot) => void>();
+  private visibility = new Set<(v: boolean) => void>();
+  constructor(name: FixtureName = "disconnected") {
+    this.current = fixtureSnapshot(name);
   }
-
-  listen = async (receive: (snapshot: ControlSnapshot) => void) => {
-    if (this.name === "backend-unavailable")
-      throw {
-        code: "internal",
-        message: "Fixture backend unavailable. Retry loading status.",
-      };
-    this.listeners.add(receive);
-    return () => this.listeners.delete(receive);
+  listen = async (f: (s: ControlSnapshot) => void) => {
+    this.listeners.add(f);
+    return () => this.listeners.delete(f);
   };
-  getSnapshot = async () => this.snapshot;
-
-  private update(patch: Partial<ControlSnapshot>) {
-    this.snapshot = {
-      ...this.snapshot,
+  getSnapshot = async () => structuredClone(this.current);
+  getVisible = async () => true;
+  listenVisibility = async (f: (v: boolean) => void) => {
+    this.visibility.add(f);
+    return () => this.visibility.delete(f);
+  };
+  visible(v: boolean) {
+    for (const f of this.visibility) f(v);
+  }
+  emit(patch: Partial<ControlSnapshot>) {
+    this.current = {
+      ...this.current,
       ...patch,
-      revision: this.snapshot.revision + 1,
+      revision: this.current.revision + 1,
     };
-    for (const receive of this.listeners) receive(this.snapshot);
+    for (const f of this.listeners) f(structuredClone(this.current));
   }
-
-  preview = (name: FixtureName) => {
-    clearTimeout(this.timer);
-    this.name = name;
-    this.update(fixtureSnapshot(name));
-  };
-
-  configureBot = async (token: string): Promise<void> => {
-    if (!token.trim() || token.length > 4096)
-      throw { code: "configuration", message: "Token could not be saved." };
-    // Do not retain the token or add it to command/snapshot evidence.
-    this.update({ bot: { status: "checking", name: null, message: null } });
-    await new Promise<void>((resolve) => setTimeout(resolve, 500));
-    this.update({
-      bot: { status: "ready", name: "Table Audio", message: null },
+  configureBot = async (_token: string) => {
+    if (this.rejectSave) throw Error("Fixture credential failure");
+    this.emit({
+      bot: { status: "ready", name: "Configured bot", message: null },
     });
   };
-
-  dispatch = async (command: ControlCommand) => {
-    this.commands.push(command);
-    switch (command.type) {
-      case "refresh-sources":
-        this.update({ sourceDiscovery: { phase: "loading" } });
-        clearTimeout(this.sourceTimer);
-        this.sourceTimer = setTimeout(() => {
-          this.update({
-            sources: fixtureSnapshot().sources,
-            sourceDiscovery: { phase: "ready" },
+  minimize = async () => {
+    this.minimized++;
+  };
+  close = async () => {
+    this.closed++;
+  };
+  startDragging = async () => {
+    this.dragged++;
+  };
+  dispatch = async (c: ControlCommand) => {
+    this.commands.push(c);
+    if (this.reject) throw this.reject;
+    const input = (id: string) =>
+      this.current.inputs.find((s) => s.stripId === id);
+    const dest = (id: string) =>
+      this.current.destinations.find((d) => d.destinationId === id);
+    switch (c.type) {
+      case "add-source": {
+        const s = this.current.sources.find((s) => s.id === c.sourceId);
+        if (s) {
+          const colour =
+            Math.max(-1, ...this.current.inputs.map((s) => s.colourSlot)) + 1;
+          this.current.inputs.push({
+            stripId: `strip:${Date.now()}`,
+            sourceId: s.id,
+            kind: s.kind,
+            displayName: s.name,
+            detail: s.detail,
+            phase: "capturing",
+            fault: null,
+            gainDb: 0,
+            muted: false,
+            colourSlot: Math.min(5, colour),
+            restored: false,
           });
-        }, 300);
-        break;
-      case "set-volume":
-        this.update({
-          output: { ...this.snapshot.output, volumePercent: command.percent },
-        });
-        break;
-      case "set-muted":
-        this.update({
-          capture: {
-            ...this.snapshot.capture,
-            outputLevelDbfs:
-              this.snapshot.capture.phase === "running" && command.muted
-                ? -96
-                : null,
-          },
-          output: { ...this.snapshot.output, muted: command.muted },
-        });
-        break;
-      case "select-source":
-        this.update({
-          selection: { ...this.snapshot.selection, sourceId: command.sourceId },
-        });
-        break;
-      case "select-destination":
-        this.update({
-          selection: {
-            ...this.snapshot.selection,
-            serverId: command.serverId,
-            channelId: command.channelId,
-          },
-        });
-        break;
-      case "connect": {
-        if (this.name === "rejected-command")
-          throw {
-            code: "permission-denied",
-            message:
-              "The bot was denied permission to connect. Review channel permissions.",
-          };
-        clearTimeout(this.timer);
-        const sessionId = this.snapshot.sessionId + 1;
-        this.update({
-          sessionId,
-          connection: { phase: "connecting", stage: "gateway" },
-          capture: {
-            ...this.snapshot.capture,
-            phase: "opening",
-            levelDbfs: null,
-            outputLevelDbfs: null,
-          },
-        });
-        this.timer = setTimeout(() => {
-          if (
-            this.snapshot.sessionId === sessionId &&
-            this.snapshot.connection.phase === "connecting"
-          )
-            this.update({
-              connection: { phase: "connected" },
-              capture: {
-                ...this.snapshot.capture,
-                phase: "running",
-                levelDbfs: -21,
-                outputLevelDbfs: -22.9,
-              },
-            });
-        }, 700);
+        }
         break;
       }
-      case "disconnect":
-        clearTimeout(this.timer);
-        this.update({
-          connection: { phase: "disconnecting" },
-          capture: {
-            ...this.snapshot.capture,
-            phase: "stopped",
-            levelDbfs: null,
-            outputLevelDbfs: null,
-          },
-        });
-        this.timer = setTimeout(
-          () => this.update({ connection: { phase: "disconnected" } }),
-          400,
+      case "remove-source":
+        this.current.inputs = this.current.inputs.filter(
+          (s) => s.stripId !== c.stripId,
         );
         break;
-      case "recheck-configuration":
-        this.update({
-          bot: { ...this.snapshot.bot, status: "checking", message: null },
-        });
-        clearTimeout(this.timer);
-        this.timer = setTimeout(
-          () =>
-            this.update({
-              bot: { status: "ready", name: "Table Audio", message: null },
-            }),
-          500,
-        );
+      case "replace-source": {
+        const s = input(c.stripId);
+        const next = this.current.sources.find((s) => s.id === c.sourceId);
+        if (s && next)
+          Object.assign(s, {
+            sourceId: next.id,
+            kind: next.kind,
+            displayName: next.name,
+            detail: next.detail,
+            phase: "capturing",
+            fault: null,
+            restored: false,
+          });
+        break;
+      }
+      case "start-capture": {
+        const s = input(c.stripId);
+        if (s) {
+          s.phase = "capturing";
+          s.restored = false;
+        }
+        break;
+      }
+      case "stop-capture": {
+        const s = input(c.stripId);
+        if (s) s.phase = "stopped";
+        break;
+      }
+      case "set-source-muted": {
+        const s = input(c.stripId);
+        if (s) s.muted = c.muted;
+        break;
+      }
+      case "set-source-gain": {
+        const s = input(c.stripId);
+        if (s) s.gainDb = c.gainDb;
+        break;
+      }
+      case "add-destination":
+        this.current.destinations = [
+          {
+            destinationId: "dest:1",
+            serverId: c.serverId,
+            channelId: c.channelId,
+            connection: { phase: "disconnected" },
+            volumeDb: 0,
+            muted: false,
+          },
+        ];
+        break;
+      case "remove-destination":
+        this.current.destinations = [];
+        break;
+      case "change-destination": {
+        const d = dest(c.destinationId);
+        if (d) {
+          d.serverId = c.serverId;
+          d.channelId = c.channelId;
+        }
+        break;
+      }
+      case "connect-destination": {
+        const d = dest(c.destinationId);
+        if (d)
+          d.connection = this.holdConnect
+            ? { phase: "connecting", stage: "gateway" }
+            : { phase: "connected" };
+        break;
+      }
+      case "disconnect-destination": {
+        const d = dest(c.destinationId);
+        if (d)
+          d.connection = this.holdDisconnect
+            ? {
+                phase: "cleanup-incomplete",
+                message: "Audio cleanup has not finished.",
+              }
+            : { phase: "disconnected" };
+        break;
+      }
+      case "set-destination-volume": {
+        const d = dest(c.destinationId);
+        if (d) d.volumeDb = c.volumeDb;
+        break;
+      }
+      case "set-destination-muted": {
+        const d = dest(c.destinationId);
+        if (d) d.muted = c.muted;
+        break;
+      }
+      case "set-settings":
+        this.current.settings = c.settings;
+        break;
+      case "refresh-sources":
+        this.current.sourceDiscovery = { phase: "ready" };
         break;
       case "refresh-catalog":
-        this.update({ discovery: { phase: "loading" } });
-        clearTimeout(this.timer);
-        this.timer = setTimeout(() => {
-          const catalog = fixtureSnapshot();
-          this.update({
-            sources: catalog.sources,
-            servers: catalog.servers,
-            discovery: { phase: "ready" },
-          });
-        }, 500);
+        this.current.discovery = { phase: "ready" };
+        break;
+      case "recheck-configuration":
+        this.current.bot = { ...this.current.bot, status: "ready" };
         break;
     }
+    this.emit({
+      inputs: this.current.inputs,
+      destinations: this.current.destinations,
+      settings: this.current.settings,
+    });
   };
 }

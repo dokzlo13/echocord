@@ -1,0 +1,91 @@
+/* On Air world: slate studio panels, label-paper controls, red reserved for "on air".
+   Badge form borrowed from Precision; level history available as a meter style. */
+.window {
+  --font-ui: "Sofia Sans Variable", "Segoe UI", system-ui, sans-serif;
+  --font-label:
+    "Sofia Sans Condensed Variable", "Sofia Sans Variable", "Segoe UI",
+    sans-serif;
+  --bg: #1d2226;
+  --chrome: #181c1f;
+  --panel: #262c31;
+  --panel-hi: #313940;
+  --inset: #14181b;
+  --line: #323a40;
+  --line-strong: #47515a;
+  --card-line: #343c43;
+  --ink: #f2efe7;
+  --ink-2: #b4bdc2;
+  --ink-3: #939ca2;
+  --action: #ebe5d5;
+  --action-hi: #fffaf0;
+  --action-ink: #191c1e;
+  --brand: #ff4b3e;
+  --focus: #ebe5d5;
+  --notice: #ebe5d5;
+  --ok: #7bd389;
+  --danger: #b83a30;
+
+  /* status */
+  --live: #ff4b3e;
+  --live-ink: #ff8c82;
+  --live-bg: rgb(255 75 62 / 0.1);
+  --live-bg-hi: rgb(255 75 62 / 0.18);
+  --live-line: rgb(255 75 62 / 0.45);
+  --standby: #f3c552;
+  --standby-line: rgb(243 197 82 / 0.45);
+  --fault: #ff8b4a;
+  --fault-bg: #33241b;
+  --fault-line: #6b4128;
+
+  /* source identity (validated dark categorical order) + neutral overflow slot */
+  --c0: #3987e5;
+  --c1: #199e70;
+  --c2: #9085e9;
+  --c3: #d55181;
+  --c4: #008300;
+  --c5: #6b757b;
+
+  /* meters */
+  --meter-fill: var(--series, #ebe5d5);
+  --meter-peak: #fffaf0;
+  --meter-hot: #ffd166;
+  --tick: rgb(19 23 26 / 0.85);
+  --thumb: #ebe5d5;
+  --thumb-hi: #fffaf0;
+  --lane-fill: #9aa4aa;
+  --lane-track: #3a434a;
+  --well-guide: rgb(255 255 255 / 0.07);
+
+  /* toggles */
+  --muted-bg: #ebe5d5;
+  --muted-ink: #191c1e;
+  --add-ink: #ebe5d5;
+  --select-line: #ebe5d5;
+  --select-bg: #2b3238;
+  --activity: #7bd389;
+
+  /* telemetry charts (validated slots 1–2) */
+  --net-a: #3987e5;
+  --net-b: #199e70;
+  --grid: rgb(255 255 255 / 0.07);
+  --axis: #939ca2;
+  --crosshair: rgb(255 255 255 / 0.35);
+  --surface: #262c31;
+  --spark: #939ca2;
+  --spark-now: #ebe5d5;
+
+  --r-card: 10px;
+  --r-ctl: 6px;
+}
+.source-card {
+  --meter-fill: var(--series);
+}
+.dest-card {
+  --meter-fill: #ebe5d5;
+}
+.dest-card[data-status="live"] {
+  border-color: #4a3634;
+}
+.titlebar .mark {
+  filter: drop-shadow(0 0 4px rgb(255 75 62 / 0.4));
+}

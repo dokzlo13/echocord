@@ -1,30 +1,30 @@
-import "@mantine/core/styles.css";
-import { MantineProvider } from "@mantine/core";
+import "@fontsource-variable/sofia-sans";
+import "@fontsource-variable/sofia-sans-condensed";
+import "./styles/base.css";
+import "./styles/onair.css";
+import "./styles/native.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { ControlAdapter } from "./adapter";
 import { NativeAdapter } from "./nativeAdapter";
-import { theme } from "./theme";
-import "./global.css";
 
 async function mount() {
   const root = document.getElementById("root");
-  if (!root) throw new Error("Missing application root");
+  if (!root) throw Error("Missing application root");
   let adapter: ControlAdapter = new NativeAdapter();
   if (import.meta.env.DEV && import.meta.env.MODE === "fixture") {
     const { FixtureTransport, fixtureNames } = await import("./fixtures");
     const name = new URLSearchParams(location.search).get("fixture");
-    const fixtures = new FixtureTransport(
-      fixtureNames.find((item) => item === name) ?? "disconnected",
+    adapter = new ControlAdapter(
+      new FixtureTransport(
+        fixtureNames.find((x) => x === name) ?? "disconnected",
+      ),
     );
-    adapter = new ControlAdapter(fixtures);
   }
   createRoot(root).render(
     <StrictMode>
-      <MantineProvider theme={theme} forceColorScheme="dark">
-        <App adapter={adapter} />
-      </MantineProvider>
+      <App adapter={adapter} />
     </StrictMode>,
   );
 }

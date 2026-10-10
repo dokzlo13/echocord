@@ -4,7 +4,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   outputDir: fileURLToPath(
-    new URL("../.trash/ec011/test-results/", import.meta.url),
+    new URL("../.trash/ec024/test-results/", import.meta.url),
   ),
   fullyParallel: true,
   forbidOnly: true,
@@ -12,9 +12,9 @@ export default defineConfig({
   workers: 2,
   reporter: "list",
   use: {
-    baseURL: "http://127.0.0.1:4175",
+    baseURL: "http://127.0.0.1:4184",
     browserName: "chromium",
-    viewport: { width: 480, height: 600 },
+    viewport: { width: 440, height: 640 },
     colorScheme: "dark",
     reducedMotion: "reduce",
     trace: "retain-on-failure",
@@ -22,15 +22,15 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: "npm run dev -- --port 4175 --strictPort",
-      url: "http://127.0.0.1:4175",
+      command: "npm run dev -- --port 4184 --strictPort",
+      url: "http://127.0.0.1:4184",
       reuseExistingServer: false,
       timeout: 30_000,
     },
     {
       command:
-        "npx --no-install vite preview --host 127.0.0.1 --port 4176 --strictPort",
-      url: "http://127.0.0.1:4176",
+        "npx --no-install vite preview --host 127.0.0.1 --port 4185 --strictPort",
+      url: "http://127.0.0.1:4185",
       reuseExistingServer: false,
       timeout: 30_000,
     },

@@ -626,6 +626,11 @@ impl Actor {
             .find(|d| d.kind == DestinationKind::Discord)
         {
             self.snapshot.connection = d.connection.clone();
+            self.snapshot.output = Output {
+                volume_linear: Some(crate::mixing::linear(d.volume_db)),
+                volume_percent: (crate::mixing::linear(d.volume_db) * 100.0).round() as u8,
+                muted: d.muted,
+            };
             self.snapshot.session_id = d.session_id;
             self.snapshot.selection.server_id = Some(d.server_id.clone());
             self.snapshot.selection.channel_id = Some(d.channel_id.clone());
@@ -3872,5 +3877,41 @@ mod tests {
         a.snapshot.inputs.clear();
         a.publish();
         assert!(a.snapshot.selection.source_id.is_none());
+    }
+    #[test]
+    fn legacy_output_alias_follows_the_first_room_across_peer_edits_and_removal() {
+        let mut a = actor();
+        let (key, generation) = simulated_room(&mut a, "discord-1", "1");
+        simulated_room(&mut a, "discord-2", "4");
+        let first = a.snapshot.output.clone();
+        a.command(ControlCommand::SetDestinationVolume {
+            destination_id: "discord-2".into(),
+            volume_db: Some(-37.5),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetDestinationMuted {
+            destination_id: "discord-2".into(),
+            muted: true,
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.output, first);
+        assert_eq!(a.snapshot.selection.server_id.as_deref(), Some("1"));
+        a.command(ControlCommand::RemoveDestination {
+            destination_id: "discord-1".into(),
+        })
+        .unwrap();
+        a.discord
+            .gateway_status(1, crate::discord::protocol::GatewayStatus::Left { key });
+        a.discord.voice_exit("discord-1", generation, true);
+        a.poll_discord();
+        assert_eq!(a.snapshot.selection.server_id.as_deref(), Some("4"));
+        assert!(a.snapshot.output.muted);
+        assert_eq!(a.snapshot.output.volume_percent, 1);
+        assert!(
+            a.snapshot
+                .output
+                .volume_linear
+                .is_some_and(|gain| gain > 0.01 && gain < 0.02)
+        );
     }
 }

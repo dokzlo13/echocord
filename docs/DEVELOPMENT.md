@@ -35,11 +35,11 @@ make check
 | `make check` | Production Rust, bindings, frontend, and Windows checks |
 | `make app-run` | Run the built app; restore capture preferences but never auto-connect Discord |
 | `make app-smoke` | Build and verify native UI/tray/IPC without voice joining |
-| `make engine-smoke` | Exercise owned worker startup with synthetic credentials |
+| `make engine-smoke` | Exercise gateway/voice worker rejection and observed exit with synthetic private setup |
 | `make ui-dev` | Local fixture preview for development |
 | `make bindings` | Regenerate the TypeScript control contract |
 
-`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. App smoke sends no Connect and joins no voice, but normal startup restoration may capture saved recording inputs. Browser tests use fixtures. The frontend uses the adopted On Air source with native controls and self-hosted fonts; Mantine is retired. Worker previews/tests must use distinct ports, and owned previews stop before cleanup. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
+`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic gateway/voice-worker rejection and observed-exit checks. App smoke sends no Connect and joins no voice, but normal startup restoration may capture saved recording inputs. Browser tests use fixtures. The frontend uses the adopted On Air source with native controls and self-hosted fonts; Mantine is retired. Worker previews/tests must use distinct ports, and owned previews stop before cleanup. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
 
 To stage a replacement while an older app is running, set `ECHOCORD_APP_TARGET_DIR` to a separate WSL directory for both `make app-build` and `make app-run`/`make app-smoke`. This explicitly redirects native app artifacts; the default remains the repository's `target/`. Keep the running executable intact until its session ends, then activate the reviewed replacement. The single-instance guard still applies, including smoke runs; a different target or data directory does not bypass it. Native probe commands retain their normal target.
 

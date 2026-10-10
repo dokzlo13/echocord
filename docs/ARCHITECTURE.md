@@ -1,6 +1,6 @@
 # Current architecture
 
-Echocord mixes up to eight selected Windows applications/recording inputs into one Discord destination and up to three explicit Windows playback destinations. Rust owns capture, PCM, mixing, recovery and credentials. Tauri owns window/tray lifecycle; React renders controls and scalar telemetry. Source, dependencies and builds stay in WSL. [REVIEW.md](REVIEW.md) records design decisions and their history; this document describes the current implementation.
+Echocord mixes up to eight selected Windows applications/recording inputs into four total destinations: Discord rooms in different servers under the same bot, and at most three explicit Windows playback devices. Rust owns capture, PCM, mixing, recovery and credentials. Tauri owns window/tray lifecycle; React renders controls and scalar telemetry. Source, dependencies and builds stay in WSL. [REVIEW.md](REVIEW.md) records design decisions and their history; this document describes the current implementation.
 
 ## Control and process ownership
 
@@ -9,12 +9,21 @@ Echocord mixes up to eight selected Windows applications/recording inputs into o
 The executable has three worker modes before WebView initialization:
 
 - Persistent, tokenless `--audio-worker`: owns all capture sessions and the common mix. It runs without a destination and drains sources normally while Discord is idle.
-- Disposable `--engine-worker`: owns Serenity/Songbird and one explicit Discord session. Connect attaches a stable shared-mix reader; Disconnect cancels startup/recovery and waits for observed worker exit. Sources keep capturing.
+- Shared `--gateway-worker`: owns one protected bot credential/gateway and ordered per-server voice negotiation. It receives no PCM handle. Explicit Connect starts network work; room cancellation/leave does not restart another room.
+- Disposable `--voice-worker`: one independent native reader and Songbird voice driver per room. It receives private, revision-fenced voice credentials rather than the bot token. Disconnect cancels startup/recovery and waits for observed worker exit. Sources and peers keep running.
 - Disposable, tokenless `--playback-worker`: one selected render endpoint per worker. Its native callback reads an independent bus cursor, applies atomic gain/mute and reports post-control callback samples. Play/Stop, open failure and cleanup affect that output.
 
 All workers are parent-owned Windows jobs with kill-on-close. Bounded typed control/status JSON carries no PCM. The parent creates an unnamed pagefile-backed shared-memory ring but never maps its samples. Only narrowly inherited handles reach the audio/Discord/playback workers. Launch, capture open and cleanup work stay outside the controller loop; generations/revisions fence late results. Graceful stop, forced termination and exit confirmation are bounded. Unconfirmed cleanup stays visible and prevents unsafe reuse.
 
 The audio ring contains 1,920 stereo frames with aligned atomic samples and per-slot sequence checks. Destination attachment starts at the current producer cursor; a stale producer yields silence. The Discord reader owns its pacing; playback is paced by the actual device callback. No filesystem audio transport or frontend PCM is introduced.
+
+## Discord room ownership
+
+One configured or retiring room reserves a server under the existing bot; multiple bot accounts and simultaneous same-server rooms are outside this increment. The gateway uses gated generic Songbird Calls and Serenity's ordered voice-manager hook. It does not buffer disconnected join commands. Bounded REST checks reconcile existing bot membership and fence voice credentials against current room/session state before handing them to a driver. A pre-existing unrelated bot session is not silently taken over.
+
+Room intent, gateway epoch, credential revision and local worker/session generations fence late results. Both handshake orders are supported. Cancel disarms intent immediately; an incomplete issued join retains a tombstone so late responses cannot resurrect it. A late non-null own state invalidates an earlier leave receipt. Within an active gateway epoch, server reservations persist through observed remote leave and actual voice-worker exit; ambiguous cleanup stays visible and blocks unsafe reuse. When every Discord room is stopped, the entire gateway may be disposed to reset that ambiguity; the status explicitly says remote departure is unconfirmed, and a later explicit Connect must reconcile current membership again. Live removal keeps its card/retry controls until cleanup while persisting removal intent immediately. Same-room selection is a no-op; room changes dispose the affected reader before replacement.
+
+The gateway bounds pending work, including canceled tasks until their completion is observed. Saturation defers existing room checks without extending their recovery deadlines or failing healthy peers. A fresh gateway session or terminal gateway failure stops its Discord cohort and requires explicit reconnect, preserving local capture/playback. Local gateway exit is not presented as proof of remote departure. Private voice tokens, endpoints and Discord session strings remain backend-only and fully redacted; public session/generation values are local counters. The old combined engine entrypoint is retired.
 
 `model.rs` generates committed `ui/src/generated.ts`. The shell exposes snapshot/command IPC, independent scalar telemetry/visibility events and a private credential command. Tokens never appear in snapshots or shared card commands. Connection stages and elapsed UI logs describe observed transitions, not estimated completion or listener delivery.
 
@@ -42,9 +51,9 @@ Per-output session identifiers fence telemetry and let the frontend clear a rest
 
 ## Settings and credentials
 
-Normal launches use platform-local data. The versioned settings format migrates prior recording/destination/output preferences without changing credentials. Restore setup defaults on: recording cards reopen, application cards remain stopped until explicit Capture validates their exact identity, and all destinations restore stopped/disconnected. Playback never starts on add or restore. Stale app identities require selection; executable-name/PID reuse matching is forbidden. Disabling restore starts with empty cards. Future-version settings are preserved rather than overwritten. Window geometry is a small separate shell sidecar, persisted on close/quit.
+Normal launches use platform-local data. Version-4 settings migrate prior recording/destination/output preferences without changing credentials. Restore setup defaults on: recording cards reopen, application cards remain stopped until explicit Capture validates their exact identity, and all destinations restore stopped/disconnected. Playback never starts on add or restore. Stale app identities require selection; executable-name/PID reuse matching is forbidden. Disabling restore starts with empty cards. Future-version settings are preserved rather than overwritten. Window geometry is a small separate shell sidecar, persisted on close/quit.
 
-Current-user Windows DPAPI protects tokens in a bounded versioned envelope with atomic replacement. Plaintext/malformed runtime credential files are rejected. In-app setup validates before saving and is serialized against a voice session; no automatic Connect follows setup or launch. Restored capture activation occurs after the desktop single-instance gate, so a rejected second launch cannot open duplicate captures.
+Current-user Windows DPAPI protects tokens in a bounded versioned envelope with atomic replacement. Plaintext/malformed runtime credential files are rejected. In-app setup validates before saving and is serialized against all gateway, voice, startup and retiring ownership; no automatic Connect follows setup or launch. Restored capture activation occurs after the desktop single-instance gate, so a rejected second launch cannot open duplicate captures.
 
 ## Frontend and shell
 
@@ -58,4 +67,4 @@ The custom window defaults to 440×640 with a 420×420 minimum, remembers safe s
 
 Portable tests cover control, protocol, persistence, mixing and ownership logic. Credential-free native fixtures cover source-tree/browser isolation, stereo, silence, source lifecycle, bounded queues and two-source common mixing with gain/mute/replacement through a stable reader. UI checks cover targeted controls, restore, failure/cleanup, size/focus and telemetry isolation. Current commands/results are in EC-020/023–029 and STATE; native device evidence and live/long-session acceptance are distinguished.
 
-Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. That does not establish live mixed delivery, numeric listener latency, physical endpoint removal/sleep-resume, comprehensive resource/recovery behavior or five-hour stability. [QUALITY.md](QUALITY.md) and EC-006 retain those gates. Multiple Discord rooms, desktop capture and a custom driver remain future work. The current fan-out uses independent shared-bus readers and one independently disposable playback worker per device.
+Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. That does not establish live mixed delivery, numeric listener latency, physical endpoint removal/sleep-resume, comprehensive resource/recovery behavior or five-hour stability. [QUALITY.md](QUALITY.md) and EC-006 retain those gates. Discord room capture/relay is the next researched priority; desktop capture and a custom driver remain future work. The current fan-out uses independent shared-bus readers and one independently disposable playback worker per device.

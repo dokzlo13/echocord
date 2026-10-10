@@ -1,6 +1,6 @@
 # Active multi-room epoch
 
-The owner now requests multiple room targets and confirms different servers with the existing bot are sufficient. EC-030 owns shared-gateway/independent-voice-worker architecture and implementation; EC-031 extends the existing UI; EC-032 reviews; EC-033 integrates. One room per server, explicit per-card controls and idle restore remain requirements. The delivered playback build below is the preserved baseline until staged integration passes.
+The owner requests multiple room targets in different servers under the existing bot. The reviewed native chain is integrated through `3c2bad2`; the reviewed UI is integrated through `2a333b2`. Worker checks passed 120 portable library tests, nine probe tests, 132 Windows library tests and 91 UI checks. EC-030–032 have scoped implementation review approval; EC-033 is running final combined checks, staged build, native UI/protocol validation and documentation reconciliation. One room per server, explicit per-card controls and idle restore remain requirements. The delivered playback executable below stays unchanged until final staging passes. Do not mistake the preliminary staged build for the final test subject.
 
 The next owner priority is a Discord room as a single aggregate participant-audio source, relayed to playback or another Discord room, with participant mute later. EC-034 records source-backed receive feasibility and the required encryption/feedback/lifecycle design. It does not replace the active multiple-destination delivery.
 

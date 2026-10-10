@@ -1,12 +1,8 @@
 # Product brief
 
-## Authorized multi-room increment
-
-The owner now requests planning and implementation of multiple Discord room targets. EC-030 will review shared gateway/per-room voice ownership before implementation; EC-031 preserves the approved UI while exposing independently controlled rooms. The owner confirms different-server destinations using the current bot, with one room per server. Multiple bot identities and simultaneous rooms in one server are not part of this increment. The current shared mix and Windows playback routes remain independent. No automatic joins/output starts, silent room replacement, secret-bearing frontend data or weakened teardown are permitted. Requirements below describe the delivered baseline until the new increment is integrated.
-
 ## Accepted current requirements
 
-Echocord mixes up to eight explicitly selected application process trees or Windows recording endpoints into one shared native mix, one Discord bot destination and up to three Windows playback destinations. It is a compact utility for 2–5 hour tabletop/voice sessions alongside a browser, player, Discord and other desktop tools. Playback is explicit per destination. No automatic monitor, media player, soundboard, routing matrix or DSP beyond gain/mute is required.
+Echocord mixes up to eight explicitly selected application process trees or Windows recording endpoints into one shared native mix and four total destinations: Discord rooms in distinct servers under the existing bot, and at most three Windows playback devices. It is a compact utility for 2–5 hour tabletop/voice sessions alongside a browser, player, Discord and other desktop tools. Playback is explicit per destination. No automatic monitor, media player, soundboard, routing matrix or DSP beyond gain/mute is required.
 
 Adding a source starts capture and metering before any voice connection. Each source has Capture/Stop, mix-only Mute and precise dB gain; Discord has Connect/Cancel/Disconnect, Mute and volume; playback devices have Play/Stop, Mute and volume. Source add/change/remove/stop and ordinary faults do not leave Discord or silence surviving sources. Room changes are targeted and currently briefly disconnect/reconnect, including within the same server. There is no global Apply or queued-route workflow. Gain has no boost; users can lower individual sources when the shared mix overload indicator lights.
 
@@ -34,13 +30,13 @@ Native fixtures establish selected process-tree/browser isolation, stereo/silenc
 - Validate sustained resources, broad recovery, physical endpoint removal, sleep/resume, native accessibility/display scaling and a separate five-hour normal session.
 - Keep measurement boundaries and uncertainty explicit; local queue occupancy or pre-Discord meters do not measure listener delay.
 
-[QUALITY.md](QUALITY.md) owns the applicable gates. The current executable is the test subject; integration results and remaining acceptance are recorded in STATE and EC-006/023–026.
+[QUALITY.md](QUALITY.md) owns the applicable gates. The current executable is the test subject; integration results and remaining acceptance are recorded in STATE and EC-006/023–033.
 
 ## Future scope
 
-The owner identifies a Discord voice room as the next input priority after multiple destinations: aggregate participants into one source stream and relay it to Windows playback or another Discord room; individual participant mute can follow later. Live capture/relay is requested, not persisted recordings. EC-034 owns receive/DAVE feasibility and a reviewed design for shared server reservations, bounded native audio input and feedback prevention. This capability is not implemented in the delivered baseline.
+The owner identifies a Discord voice room as the next input priority after multiple destinations: aggregate participants into one source stream and relay it to Windows playback or another Discord room; individual participant mute can follow later. Live capture/relay is requested, not persisted recordings. EC-034 completed receive/DAVE feasibility research; EC-035 queues a bounded native proof and reviewed design for shared server reservations, native audio input and feedback prevention. This capability is not implemented.
 
-The common mix already feeds independently controlled Discord and playback readers. Multiple Discord rooms need a reviewed shared-gateway/disposable-voice-driver lifecycle. One Discord bot can be in only one voice channel per server at a time; distinct same-server destinations require a reviewed identity/lifecycle design. Desktop/endpoint loopback capture, a custom virtual endpoint/driver, other receivers and later operating-system support are separate work. No inactive future-routing controls ship.
+The common mix already feeds independently controlled Discord and playback readers. Multiple Discord rooms use a reviewed shared gateway with independently disposable voice drivers. One Discord bot can be in only one voice channel per server at a time; distinct same-server destinations require a reviewed identity/lifecycle design. Desktop/endpoint loopback capture, a custom virtual endpoint/driver, other receivers and later operating-system support are separate work. No inactive future-routing controls ship.
 
 ## Historical MVP and superseded decisions
 

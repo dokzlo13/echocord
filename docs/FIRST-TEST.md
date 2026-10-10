@@ -23,19 +23,25 @@ For the existing cable route, send the music application's playback to VB-Cable 
 
 Add more sources as needed, up to eight. Capture/Stop controls each capture lifetime. Source Mute removes it from the shared mix while its meter continues under hatching. Gain uses −60…0 dB or Off, with no boost. Source identity changes take effect on that card, and duplicate/identifiable overlapping captures are rejected. Source exit/restart requires refresh and selection of the new instance.
 
-## Discord destination and live controls
+## Discord destinations and live controls
 
 For Discord, set up the bot once from the bot chip or the Discord tab in Add destination. Paste its token into Test & save; Rust validates before protected persistence and never returns the token in snapshots. Then choose the Discord tab in Add destination and pick the voice room. Connect belongs to its card and remains explicit. A destination can connect with no capturing source, but the room receives silence.
 
 Listen through the regular Discord client. Check individual source gain/Mute/Stop and destination volume/Mute separately. Source edits and ordinary source faults should keep the destination connected and surviving sources audible. Destination Mute keeps the connection but its measured post-volume/mute meter falls silent. If the amber mix overload indicator lights, lower source gains; there is no automatic normalization.
 
-Cancel during joining/recovery and Disconnect leave voice without stopping capture. Cleanup-incomplete requires Retry disconnect before another Connect. Changing a room briefly reconnects, even within the same server; follow the actual leaving/joining state. Live removal of the destination asks for confirmation. There is one Discord destination and up to three playback destinations, with no global Apply or queued changes.
+Add more Discord destinations in different servers using the same bot. Up to four destinations can be configured in total, including at most three playback devices. Discord allows one voice room per bot per server, so another card cannot select a server already reserved by a configured or retiring room. Adding a room leaves it idle; press Connect separately on each card. Selecting its current room is a no-op.
+
+For a coordinated live test, connect two rooms in different servers and listen in each. Change one room's gain/Mute, then Disconnect it; the other room, source capture and any local playback should continue. Cancel a second room while it is joining and verify it stays stopped. Test a targeted room change and live removal, then relaunch and confirm all destination cards return idle. No live multi-room listening has been performed by the automated checks.
+
+Cancel during joining/recovery and Disconnect leave voice without stopping capture. Cleanup-incomplete keeps Retry disconnect available and blocks another Connect. A removed live card remains visible until cleanup completes. If Discord departure remains uncertain, stop the other Discord rooms individually so the shared gateway can reset; local playback can continue. A later explicit Connect rechecks current membership. Local worker exit alone is not reported as confirmed remote departure. Changing a room briefly reconnects only that card, including within the same server. Live removal asks for confirmation; there is no global Apply or queued change.
+
+The bot chip/details show the shared Discord connection separately from each room's state. A terminal shared gateway failure stops the Discord rooms and requires explicit reconnect; source capture and local playback remain independent. Token replacement waits for every Discord lifetime, including pending cleanup, to end.
 
 The On air badge and native output meter do not prove listener receipt. Gateway is Discord control-connection RTT, unavailable until measured; buffer is local queued audio. Neither is listener delay. Connection details expose available native counters and truthful unavailable states.
 
 ## Windows playback destinations
 
-Open Add destination → Playback. Choose a specific Windows playback device, then press Play on its new card. Bot setup is unnecessary. Headphones, speakers and already installed virtual-cable playback endpoints are ordinary choices. Up to three device outputs can run alongside the Discord room, each with its own gain, Mute, Stop and status. An unavailable or unsupported device stays stopped with a reason; Echocord never switches to a default device. Initial support requires 48 kHz stereo PCM.
+Open Add destination → Playback. Choose a specific Windows playback device, then press Play on its new card. Bot setup is unnecessary. Headphones, speakers and already installed virtual-cable playback endpoints are ordinary choices. Up to three device outputs can be included within the four-destination limit, alongside Discord rooms, each with its own gain, Mute, Stop and status. An unavailable or unsupported device stays stopped with a reason; Echocord never switches to a default device. Initial support requires 48 kHz stereo PCM.
 
 Source edits affect the common mix; muting/stopping one destination affects only that output. Test two different output cards, then stop one while the other continues. A failed output should leave other outputs and capture intact. A device card's meter measures samples submitted by its callback before Windows/device processing; it does not prove physical audibility.
 
@@ -57,4 +63,6 @@ Owner testing confirmed the earlier recording and application-to-Discord routes 
 
 The new mix still needs coordinated listening. Quantitative listener delay, participant-change/DAVE behavior, physical endpoint removal/sleep-resume, broad recovery/resource behavior and five-hour stability remain open. Clean-machine packaging, signing/installer and comprehensive native accessibility are separate work. WebView2 and Visual C++ runtime availability are distribution requirements; a Linux check cannot prove Windows audio behavior.
 
-`make check` checks production code and fixture UI behavior without joining voice. `make app-smoke` rebuilds and tests native UI/IPC/tray without sending Connect or joining voice; normal startup restoration may reopen saved recording inputs. `make engine-smoke` checks actual disposable-worker startup using synthetic empty credentials. `make ui-dev` is explicitly a fixture preview. Native mixing regression helpers use owned synthetic sources and remain developer tools, not app setup steps.
+`make check` checks production code and fixture UI behavior without joining voice. `make app-smoke` rebuilds and tests native UI/IPC/tray without sending Connect or joining voice; normal startup restoration may reopen saved recording inputs. It also verifies that destinations and the gateway remain idle. `make engine-smoke` checks the actual gateway/voice worker modes with synthetic invalid private setup, redacted diagnostics and observed exit. `make ui-dev` is explicitly a fixture preview. Native mixing regression helpers use owned synthetic sources and remain developer tools, not app setup steps.
+
+Discord room audio as an input is the next priority. Receive feasibility is researched in EC-034; EC-035 queues the bounded native proof and reviewed source design. This build does not capture participants or save room recordings.

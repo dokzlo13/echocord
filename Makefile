@@ -67,7 +67,7 @@ app-check: core-check ## Check production UI and Windows Rust integration
 	npm --prefix ui run check
 	bash scripts/build-app.sh --check
 
-engine-smoke: app-build ## Verify actual GUI engine mode rejects empty credentials before capture
+engine-smoke: app-build ## Verify gateway/voice workers reject invalid private setup and exit
 	bash scripts/build-native-tool.sh engine-probe
 	app_target_dir="$$(realpath -m -- "$${ECHOCORD_APP_TARGET_DIR:-$$PWD/target}")"; \
 	  target/x86_64-pc-windows-msvc/release/engine-probe.exe "$$(wslpath -w "$$app_target_dir/x86_64-pc-windows-msvc/release/echocord.exe")" "$$(wslpath -w "$$PWD/.trash/app/engine-probe")"

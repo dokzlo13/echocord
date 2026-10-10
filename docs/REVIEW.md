@@ -1,4 +1,12 @@
-# Destination continuation review
+# Multiple-room review
+
+EC-032 accepts one shared gateway with independently disposable per-room voice drivers, retaining the four-output total and one selected/retiring room per server under the existing bot. Gated generic Songbird calls, ordered Serenity voice intake, bounded REST/state-counter reconciliation, canceled-join tombstones and per-worker/credential revisions protect current intent. Parent/frontend remain PCM-free; private voice secrets are fully redacted. The old combined engine owner is retired.
+
+Independent review resolved late REST re-arming, incomplete leave barriers, retired credential reuse, canceled background-task ownership, healthy-peer behavior under task-budget saturation, live removal/retry visibility with immediate removal-intent persistence, compatibility aliases and diagnostic secret checks. A whole-gateway reset ends every local Discord lifetime, reports unconfirmed remote departure honestly and requires fresh reconciliation on explicit reconnect. It does not stop capture or playback.
+
+The existing approved UI now exposes independent rooms and authoritative server reservations, invalidates stale picker choices, and shows shared gateway state without inventing room failures. Exact native/UI review hashes and integrated gates are in EC-030–033 and STATE. These reviews and automated results do not establish live cross-server listener receipt.
+
+# Prior destination continuation review
 
 EC-028 accepts one Discord output plus up to three explicit Windows playback outputs, each with its own tokenless disposable worker, independent native reader/device clock, controls and observed teardown. Startup/restoration stays idle; only Play opens a playback stream. The callback must remain nonblocking, Playing follows a real callback, and each output has a session generation for stale-result/history isolation. Endpoint identity is opaque, duplicates retain reservations through cleanup, and no missing endpoint falls back to a default.
 

@@ -2,7 +2,7 @@
 
 ## Current accepted direction
 
-The production interface directly adopts the approved On Air Stack prototype: actionable source/destination cards, independently scrolling lists, full-window sheets, combined dB faders/meters and a custom compact title bar. Native controls and local Sofia Sans fonts preserve its actual components/styles. Source capture precedes Discord Connect; edits are targeted, with one destination and no global Apply. [DESIGN.md](../DESIGN.md) and [UI.md](UI.md) describe current behavior; EC-024 records implementation and independent reference review.
+The production interface directly adopts the approved On Air Stack prototype: actionable source/destination cards, independently scrolling lists, full-window sheets, combined dB faders/meters and a custom compact title bar. Native controls and local Sofia Sans fonts preserve its actual components/styles. Source capture precedes Discord Connect; edits are targeted, with one Discord room, up to three playback devices and no global Apply. [DESIGN.md](../DESIGN.md) and [UI.md](UI.md) describe current behavior; EC-024 records initial adoption; EC-027 records the subsequent equivalent-state comparison and corrections for wide two-source history, compact trends and completed-change notices.
 
 ## Historical first-alpha evaluation
 

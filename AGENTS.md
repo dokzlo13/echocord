@@ -4,7 +4,7 @@ Start with `docs/STATE.md`, `tasks/BOARD.md`, and your assigned task. Read `docs
 
 ## Product and environment
 
-- Current scope: up to eight explicit Windows recording/application inputs feeding one shared mix and one Discord bot destination, with independent capture controls and no local monitoring. Preserve audio isolation. Future destination fan-out needs its own review.
+- Current scope: up to eight explicit Windows recording/application inputs feeding one shared mix, one Discord destination and up to three explicitly selected Windows playback outputs. Preserve independent controls, audio isolation and idle output restoration. Additional Discord rooms need a separate gateway/voice-lifecycle review.
 - Source, dependencies, builds, and agent worktrees stay in WSL. Keep Windows additions small and runtime-focused. Do not introduce a Windows source checkout or full development toolchain as an assumed prerequisite.
 - Rust owns audio and recovery. The UI is a control surface; do not move sample buffers through frontend IPC.
 - Keep the committed tree public-ready. Store personal notes, machine inventory, local paths, session transcripts, credentials, and raw test evidence in ignored `.trash/`. Publish only generic requirements and sanitized evidence. Never force-add private files or treat `.trash/` as permission to delete its contents. Ignoring a file does not remove it from existing history; review staged changes and commit identity before committing.

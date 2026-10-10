@@ -536,6 +536,8 @@ type VoiceHost = crate::discord::worker::Worker<
 >;
 
 struct Actor {
+    #[cfg(test)]
+    simulated_discord: bool,
     discord: crate::discord::control::Manager,
     next_discord_publish: Instant,
     discord_restart: std::collections::BTreeSet<String>,
@@ -572,6 +574,8 @@ impl Actor {
         events: mpsc::Sender<Event>,
     ) -> Self {
         Self {
+            #[cfg(test)]
+            simulated_discord: false,
             discord: crate::discord::control::Manager::default(),
             next_discord_publish: Instant::now(),
             discord_restart: std::collections::BTreeSet::new(),
@@ -603,6 +607,11 @@ impl Actor {
         }
     }
     fn publish(&mut self) {
+        self.snapshot.selection.source_id = self
+            .snapshot
+            .inputs
+            .first()
+            .map(|input| input.source_id.clone());
         self.discord.publish(&mut self.snapshot);
         self.snapshot.telemetry.destinations.retain(|meter| {
             self.snapshot
@@ -626,6 +635,8 @@ impl Actor {
                 .get(&d.destination_id)
                 .map_or_else(|| ControlSnapshot::default().capture, |r| r.capture.clone());
         } else {
+            self.snapshot.selection.server_id = None;
+            self.snapshot.selection.channel_id = None;
             self.snapshot.connection = Connection::Disconnected;
             self.snapshot.capture = ControlSnapshot::default().capture;
         }
@@ -2121,6 +2132,13 @@ impl Actor {
             }
         }
         let effects = std::mem::take(&mut self.discord.effects);
+        #[cfg(test)]
+        if self.simulated_discord {
+            let _ = effects;
+            self.publish();
+            return;
+        }
+
         #[cfg(not(windows))]
         {
             let _ = effects;
@@ -2131,6 +2149,11 @@ impl Actor {
             use std::os::windows::io::AsRawHandle;
             match effect {
                 Effect::LaunchGateway { generation } => {
+                    if self.discord.rooms.values().all(|r| !r.wanted) {
+                        self.discord.gateway_exit(generation, true);
+                        continue;
+                    }
+
                     if self.gateway_host.is_some() {
                         self.discord.gateway_failed(Failure::Protocol);
                         continue;
@@ -2157,6 +2180,16 @@ impl Actor {
                     }
                 }
                 Effect::Gateway(command) => {
+                    if let GatewayCommand::Join { key } = &command
+                        && !self
+                            .discord
+                            .rooms
+                            .get(&key.destination_id)
+                            .is_some_and(|r| r.key == *key && r.wanted)
+                    {
+                        continue;
+                    }
+
                     if self
                         .gateway_host
                         .as_ref()
@@ -2184,6 +2217,16 @@ impl Actor {
                     revision,
                     secret,
                 } => {
+                    if !self
+                        .discord
+                        .rooms
+                        .get(&key.destination_id)
+                        .is_some_and(|r| r.key == key && r.wanted && r.voice == Some(generation))
+                    {
+                        self.discord
+                            .voice_exit(&key.destination_id, generation, true);
+                        continue;
+                    }
                     if self.voice_hosts.contains_key(&key.destination_id) {
                         self.discord
                             .stop(&key.destination_id, Some(Failure::Protocol.error()));
@@ -2693,6 +2736,21 @@ mod tests {
     fn source_discovery_is_independent_and_preserves_selected_descriptor() {
         let mut a = actor();
         a.source_epoch = 7;
+        a.snapshot.inputs.push(InputStrip {
+            strip_id: "input-1".into(),
+            source_id: "recording".into(),
+            kind: SourceKind::Recording,
+            display_name: "Recording".into(),
+            detail: None,
+            phase: InputPhase::Stopped,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        });
+        a.snapshot.selection.server_id = None;
+        a.snapshot.selection.channel_id = None;
         let selected = a.snapshot.selection.clone();
         let bot = a.snapshot.bot.clone();
         a.event(Event::Sources(6, Ok(Vec::new())));
@@ -3502,6 +3560,7 @@ mod tests {
         guild: &str,
     ) -> (crate::discord::protocol::RoomKey, u32) {
         use crate::discord::protocol::*;
+        a.simulated_discord = true;
         if !a.snapshot.servers.iter().any(|s| s.id == guild) {
             let mut server = a.snapshot.servers[0].clone();
             server.id = guild.into();
@@ -3742,5 +3801,76 @@ mod tests {
         assert!(a.configuration_busy());
         a.snapshot.destinations.clear();
         assert!(a.configuration_busy());
+    }
+    #[test]
+    fn legacy_destination_selection_updates_the_authoritative_first_card() {
+        let mut a = actor();
+        let mut server = a.snapshot.servers[0].clone();
+        server.id = "4".into();
+        server.channels[0].id = "5".into();
+        a.snapshot.servers.push(server);
+        a.command(ControlCommand::SelectDestination {
+            server_id: "1".into(),
+            channel_id: Some("2".into()),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations.len(), 1);
+        a.command(ControlCommand::SelectDestination {
+            server_id: "4".into(),
+            channel_id: Some("5".into()),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations[0].server_id, "4");
+        assert_eq!(a.snapshot.destinations[0].channel_id, "5");
+        assert_eq!(a.snapshot.selection.server_id.as_deref(), Some("4"));
+        assert!(
+            a.command(ControlCommand::SelectDestination {
+                server_id: "1".into(),
+                channel_id: None
+            })
+            .is_err()
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn a_missing_native_gateway_host_contains_every_discord_room() {
+        let mut a = actor();
+        simulated_room(&mut a, "discord-1", "1");
+        simulated_room(&mut a, "discord-2", "4");
+        a.simulated_discord = false;
+        a.command(ControlCommand::DisconnectDestination {
+            destination_id: "discord-1".into(),
+        })
+        .unwrap();
+        assert!(a.discord.rooms.values().all(|r| !r.wanted));
+        assert_eq!(a.discord.gateway.phase, GatewayPhase::Error);
+    }
+    #[test]
+    fn legacy_source_alias_tracks_the_first_input_and_clears_when_removed() {
+        let mut a = actor();
+        a.snapshot.inputs.push(InputStrip {
+            strip_id: "input-1".into(),
+            source_id: "first".into(),
+            kind: SourceKind::Recording,
+            display_name: "Recording".into(),
+            detail: None,
+            phase: InputPhase::Stopped,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        });
+        a.publish();
+        assert_eq!(a.snapshot.selection.source_id.as_deref(), Some("first"));
+        a.snapshot.inputs[0].source_id = "replacement".into();
+        a.publish();
+        assert_eq!(
+            a.snapshot.selection.source_id.as_deref(),
+            Some("replacement")
+        );
+        a.snapshot.inputs.clear();
+        a.publish();
+        assert!(a.snapshot.selection.source_id.is_none());
     }
 }

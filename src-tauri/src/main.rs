@@ -518,6 +518,7 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
 fn restored_outputs_idle(app: &tauri::AppHandle) -> bool {
     let snapshot = app.state::<ShellState>().controller.snapshot();
     snapshot.gateway.phase == echocord_core::model::GatewayPhase::Disconnected
+        && snapshot.gateway.generation == 0
         && snapshot.destinations.iter().all(|d| {
             d.connection == echocord_core::model::Connection::Disconnected && d.session_id == 0
         })

@@ -13,3 +13,6 @@ pub mod control;
 
 #[cfg(windows)]
 mod permissions;
+
+#[cfg(any(windows, test))]
+mod work;

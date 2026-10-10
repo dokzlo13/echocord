@@ -134,7 +134,22 @@ fn rejection(
         }
         Ok(rejected)
     });
-    let drain = std::thread::spawn(move || std::io::copy(&mut diagnostics, &mut std::io::sink()));
+    let drain = std::thread::spawn(move || -> Result<(), std::io::Error> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        diagnostics.by_ref().take(65537).read_to_end(&mut bytes)?;
+        let leaked = [
+            b"private-token-canary".as_slice(),
+            b"private-session-canary",
+            b"private-endpoint-canary",
+        ]
+        .iter()
+        .any(|canary| bytes.windows(canary.len()).any(|window| window == *canary));
+        if bytes.len() > 65536 || leaked {
+            return Err(std::io::Error::other("Private diagnostic boundary failed"));
+        }
+        Ok(())
+    });
     protocol::write(
         &mut input,
         &Frame {

@@ -29,6 +29,7 @@ struct Timing {
 }
 struct Inner {
     correlation: Correlator,
+    jobs: super::work::TaskBudget,
     calls: BTreeMap<String, Call>,
     times: BTreeMap<String, Timing>,
     sender: Option<UnboundedSender<ShardRunnerMessage>>,
@@ -56,6 +57,7 @@ impl Inner {
             .collect::<Vec<_>>();
         for key in keys {
             self.correlation.cancel(&key);
+            self.jobs.cancel(&key);
         }
         self.emit(GatewayStatus::Failed { code });
         self.stops.send_replace(true);
@@ -97,6 +99,7 @@ impl Inner {
                 code,
             });
         }
+        self.jobs.cancel(key);
         let left = self.correlation.cancel(key);
         if let Some(time) = self.times.get_mut(&key.server_id) {
             time.leaving.get_or_insert_with(Instant::now);
@@ -256,6 +259,47 @@ async fn membership(
     .await
     .unwrap_or(Err(Failure::Connection))
 }
+enum WorkKind {
+    Initial,
+    Verification,
+    Permission,
+}
+async fn spawn_room(
+    inner: Arc<Mutex<Inner>>,
+    key: RoomKey,
+    kind: WorkKind,
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    let mut i = inner.lock().await;
+    if !i.correlation.slot(&key).is_some_and(|slot| slot.wanted) {
+        return;
+    }
+    if !i.jobs.spawn(key.clone(), work) {
+        if matches!(kind, WorkKind::Initial) {
+            i.cancel(&key, Some(Failure::Connection));
+        } else {
+            if matches!(kind, WorkKind::Verification)
+                && let Some(slot) = i.correlation.slot_mut(&key)
+            {
+                slot.verifying = None;
+            }
+            if let Some(time) = i.times.get_mut(&key.server_id) {
+                if matches!(kind, WorkKind::Permission) {
+                    time.checking = false;
+                }
+                let since = *time.failed_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_secs(30) {
+                    i.cancel(&key, Some(Failure::Connection));
+                    return;
+                }
+            }
+            i.emit(GatewayStatus::Health {
+                key,
+                recovering: true,
+            });
+        }
+    }
+}
 async fn verify(inner: Arc<Mutex<Inner>>, key: RoomKey) {
     let request = {
         let mut i = inner.lock().await;
@@ -269,48 +313,56 @@ async fn verify(inner: Arc<Mutex<Inner>>, key: RoomKey) {
         };
         (counter, secret, i.http.clone(), user)
     };
-    tokio::spawn(async move {
-        let (counter, secret, http, user) = request;
-        let result = membership(&http, &key, user).await;
-        let mut i = inner.lock().await;
-        let Some(slot) = i.correlation.slot(&key) else {
-            return;
-        };
-        if !slot.wanted {
-            return;
-        }
-        if !i.connected || slot.counter != counter {
-            if let Some(slot) = i.correlation.slot_mut(&key) {
-                slot.verifying = None;
+    spawn_room(
+        inner.clone(),
+        key.clone(),
+        WorkKind::Verification,
+        async move {
+            let (counter, secret, http, user) = request;
+            let result = membership(&http, &key, user).await;
+            let mut i = inner.lock().await;
+            let Some(slot) = i.correlation.slot(&key) else {
+                return;
+            };
+            if !slot.wanted {
+                return;
             }
-            return;
-        }
-        match result {
-            Ok(Some(state))
-                if state.channel_id.map(|c| c.to_string()).as_deref() == Some(&key.channel_id)
-                    && state.session_id == secret.session_id
-                    && !state.mute
-                    && !state.suppress =>
-            {
-                if let Some(revision) = i.correlation.verify(
-                    &key,
-                    counter,
-                    &secret,
-                    Some(&key.channel_id),
-                    Some(&state.session_id),
-                    true,
-                ) {
-                    i.emit(GatewayStatus::Credentials {
-                        key,
-                        revision,
-                        secret,
-                    });
+            if !i.connected || slot.counter != counter {
+                if let Some(slot) = i.correlation.slot_mut(&key) {
+                    slot.verifying = None;
                 }
+                return;
             }
-            Ok(_) => i.cancel(&key, Some(Failure::Permission)),
-            Err(code) => i.cancel(&key, Some(code)),
-        }
-    });
+            match result {
+                Ok(Some(state))
+                    if state.channel_id.map(|c| c.to_string()).as_deref()
+                        == Some(&key.channel_id)
+                        && state.session_id == secret.session_id
+                        && !state.mute
+                        && !state.suppress
+                        && !state.self_mute =>
+                {
+                    if let Some(revision) = i.correlation.verify(
+                        &key,
+                        counter,
+                        &secret,
+                        Some(&key.channel_id),
+                        Some(&state.session_id),
+                        true,
+                    ) {
+                        i.emit(GatewayStatus::Credentials {
+                            key,
+                            revision,
+                            secret,
+                        });
+                    }
+                }
+                Ok(_) => i.cancel(&key, Some(Failure::Permission)),
+                Err(code) => i.cancel(&key, Some(code)),
+            }
+        },
+    )
+    .await;
 }
 async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
     let request = {
@@ -334,7 +386,7 @@ async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
         );
         (i.http.clone(), i.user)
     };
-    tokio::spawn(async move {
+    spawn_room(inner.clone(), key.clone(), WorkKind::Initial, async move {
         let (http, user) = request;
         let guild = GuildId::new(protocol::discord_id(&key.server_id).expect("validated"));
         let channel = serenity::all::ChannelId::new(
@@ -413,7 +465,8 @@ async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
             return;
         }
         inner.lock().await.cancel(&key, Some(Failure::Connection));
-    });
+    })
+    .await;
 }
 async fn maintenance(inner: Arc<Mutex<Inner>>) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -472,48 +525,54 @@ async fn maintenance(inner: Arc<Mutex<Inner>>) {
                 (i.http.clone(), key.clone())
             };
             let inner = inner.clone();
-            tokio::spawn(async move {
-                let (http, key) = request;
-                let result = super::permissions::permissions(
-                    &http,
-                    GuildId::new(protocol::discord_id(&key.server_id).expect("valid")),
-                    serenity::all::ChannelId::new(
-                        protocol::discord_id(&key.channel_id).expect("valid"),
-                    ),
-                )
-                .await;
-                // No more than one check per room every five seconds.
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let mut i = inner.lock().await;
-                if !i.correlation.slot(&key).is_some_and(|s| s.wanted) {
-                    return;
-                }
-                let Some(time) = i.times.get_mut(&key.server_id) else {
-                    return;
-                };
-                time.checking = false;
-                match result {
-                    Ok(()) => {
-                        time.failed_since = None;
-                        i.emit(GatewayStatus::Health {
-                            key,
-                            recovering: false,
-                        });
+            spawn_room(
+                inner.clone(),
+                key.clone(),
+                WorkKind::Permission,
+                async move {
+                    let (http, key) = request;
+                    let result = super::permissions::permissions(
+                        &http,
+                        GuildId::new(protocol::discord_id(&key.server_id).expect("valid")),
+                        serenity::all::ChannelId::new(
+                            protocol::discord_id(&key.channel_id).expect("valid"),
+                        ),
+                    )
+                    .await;
+                    // No more than one check per room every five seconds.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let mut i = inner.lock().await;
+                    if !i.correlation.slot(&key).is_some_and(|s| s.wanted) {
+                        return;
                     }
-                    Err(Failure::Connection) => {
-                        let since = *time.failed_since.get_or_insert_with(Instant::now);
-                        if since.elapsed() > Duration::from_secs(30) {
-                            i.cancel(&key, Some(Failure::Connection));
-                        } else {
+                    let Some(time) = i.times.get_mut(&key.server_id) else {
+                        return;
+                    };
+                    time.checking = false;
+                    match result {
+                        Ok(()) => {
+                            time.failed_since = None;
                             i.emit(GatewayStatus::Health {
                                 key,
-                                recovering: true,
+                                recovering: false,
                             });
                         }
+                        Err(Failure::Connection) => {
+                            let since = *time.failed_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() > Duration::from_secs(30) {
+                                i.cancel(&key, Some(Failure::Connection));
+                            } else {
+                                i.emit(GatewayStatus::Health {
+                                    key,
+                                    recovering: true,
+                                });
+                            }
+                        }
+                        Err(code) => i.cancel(&key, Some(code)),
                     }
-                    Err(code) => i.cancel(&key, Some(code)),
-                }
-            });
+                },
+            )
+            .await;
         }
     }
 }
@@ -603,6 +662,7 @@ pub async fn run_worker() -> Result<(), Failure> {
         }
         let inner = Arc::new(Mutex::new(Inner {
             correlation: Correlator::default(),
+            jobs: crate::discord::work::TaskBudget::default(),
             calls: BTreeMap::new(),
             times: BTreeMap::new(),
             sender: None,
@@ -639,7 +699,7 @@ pub async fn run_worker() -> Result<(), Failure> {
                     Some(command)=command_rx.recv()=>match command {
                         GatewayCommand::Join {key}=>join(inner.clone(),key).await,
                         GatewayCommand::Leave {key}=>inner.lock().await.cancel(&key,None),
-                        GatewayCommand::Forget {key}=>{let mut i=inner.lock().await;if i.correlation.forget(&key){i.calls.remove(&key.server_id);i.times.remove(&key.server_id);}},_=>break},
+                        GatewayCommand::Forget {key}=>{let mut i=inner.lock().await;if i.correlation.forget(&key){i.jobs.cancel(&key);i.calls.remove(&key.server_id);i.times.remove(&key.server_id);}},_=>break},
                     _=ping.tick()=>{let (connected,milliseconds)={let runners=manager.runners.lock().await;let runner=runners.values().next();let connected=runner.is_some_and(|r|r.stage==serenity::gateway::ConnectionStage::Connected);(connected,runner.filter(|_|connected).and_then(|r|r.latency.map(|latency|latency.as_secs_f32()*1000.0)))};
                     let mut i=inner.lock().await;
                     if i.registered {
@@ -695,6 +755,7 @@ mod tests {
         (
             Arc::new(Mutex::new(Inner {
                 correlation: Correlator::default(),
+                jobs: crate::discord::work::TaskBudget::default(),
                 calls: BTreeMap::new(),
                 times: BTreeMap::new(),
                 sender: Some(sender),
@@ -776,6 +837,47 @@ mod tests {
             statuses.try_recv(),
             Ok(GatewayStatus::Failed {
                 code: Failure::Connection
+            })
+        ));
+        assert!(statuses.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn saturated_cancelled_work_defers_a_healthy_peers_background_check() {
+        let (inner, _, mut statuses) = inner();
+        let key = key();
+        {
+            let mut i = inner.lock().await;
+            i.correlation.reserve(key.clone()).unwrap();
+            i.correlation.preflight(&key, 0, true);
+            i.correlation.mark_join_sent(&key);
+            i.times.insert(
+                key.server_id.clone(),
+                Timing {
+                    started: Instant::now(),
+                    leaving: None,
+                    failed_since: None,
+                    checking: true,
+                },
+            );
+            for intent in 2..14 {
+                let mut cancelled = key.clone();
+                cancelled.intent = intent;
+                assert!(i.jobs.spawn(cancelled.clone(), std::future::pending()));
+                i.jobs.cancel(&cancelled);
+            }
+        }
+        spawn_room(inner.clone(), key.clone(), WorkKind::Permission, async {
+            panic!("over-budget work must not execute")
+        })
+        .await;
+        let i = inner.lock().await;
+        assert!(i.correlation.slot(&key).unwrap().wanted);
+        assert!(!i.times[&key.server_id].checking);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::Health {
+                recovering: true,
+                ..
             })
         ));
         assert!(statuses.try_recv().is_err());

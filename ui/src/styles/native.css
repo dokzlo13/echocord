@@ -198,3 +198,8 @@ body {
   min-width: 0;
   white-space: nowrap;
 }
+
+/* The weighted Stack split must reserve the complete empty copy and action. */
+.window .src-slot:has(.empty) {
+  min-height: auto;
+}

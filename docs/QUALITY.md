@@ -57,6 +57,14 @@ Native signal tests use an explicitly verified unused endpoint and owned output 
 
 Browser checks cover bot-free Playback selection, restored idle output, independent controls, four-card fit, type-change guards, one output's restart without resetting other histories, unavailable devices and concrete routing notes. Compare wide two-source expansion and compact measured sparklines to the actual approved prototype; completed-change notices must follow observed identity changes. Test output lifecycles at the native shell boundary as well as mocked IPC where feasible, preserving an active owner session.
 
+### Multiple-room increment gate
+
+Before accepting the active EC-030 increment, prove one shared credential-bearing gateway and independently disposable per-room voice workers, with no PCM in the parent/frontend and no private voice credentials in public contracts, Debug output or diagnostics. Keep one selected/retiring room per server, four total outputs and the existing playback limit. Versioned migration must preserve earlier setup and restore every destination idle.
+
+Exercise both voice handshake orders, cancellation before/after join transmission and driver startup, late state/server events, unexpected moves/removal, stale gateway epochs, worker generations and credential revisions, and leave receipt before/after local worker exit. A late owed non-null state must invalidate an earlier null receipt; ambiguous cleanup must retain the reservation. Gateway failure must stop its Discord cohort without stopping capture or playback. Cancelling or changing one room must not reset another room's reader, history or controls. Token changes must remain blocked by any gateway/voice/startup/retiring ownership, including faulted cards.
+
+Browser gates cover several room cards, independent operations/faults/meters, same-server selection conflicts, retiring old-server reservations, an open picker's changing capacity, explicit idle restoration, shared gateway status and playback during Discord work. Preserve the approved five-size geometry and keyboard/focus behavior. Native gates cover the actual process/protocol boundary and Windows build/shell. Live listening in different servers and fault isolation during real delivery require a coordinated acceptance run; mock state or local submitted-sample meters do not establish listener receipt.
+
 ### Pipeline and session targets
 
 Proposed targets, to calibrate against the first working prototype:

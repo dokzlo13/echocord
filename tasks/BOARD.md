@@ -4,7 +4,7 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 ## Active destination continuation
 
-The owner reports visible drift from the approved prototype and authorizes research plus implementation of different destinations. EC-027 compares and restores fidelity, EC-020 owns native destination research/architecture/contracts/implementation, EC-028 reviews independently, and EC-029 integrates. The delivered build remains the working baseline; playback outputs and concurrent Discord routing are researched scope until their design checkpoint is accepted. Preserve the running owner app/capture during development.
+The owner reports visible drift from the approved prototype and authorizes research plus implementation of different destinations. EC-027 compares and restores fidelity, EC-020 owns native destination research/architecture/contracts/implementation, EC-028 reviews independently, and EC-029 integrates. The delivered build remains the working baseline. The bounded deliverable is one Discord room plus up to three explicit Windows playback outputs; multiple Discord rooms remain a researched architecture follow-on. Native design review precedes implementation. Preserve the running owner app/capture during development.
 
 ## Delivered mixing epoch
 

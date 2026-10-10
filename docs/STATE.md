@@ -1,3 +1,7 @@
+# Active destination continuation
+
+The owner reports visible differences from the approved prototype and authorizes research/implementation of different destinations. EC-027 owns the fidelity comparison and output UI; EC-020 owns native architecture/contracts/implementation; EC-028 reviews; EC-029 integrates. The selected increment adds up to three explicit Windows playback outputs alongside the Discord destination, all using the shared mix. Multiple Discord rooms require a separately reviewed gateway/voice lifecycle. The existing owner app/capture stays running during development. The prior delivered baseline follows.
+
 # Current state
 
 The mixing epoch is delivered as a manually testable Windows release. The owner-approved On Air Stack prototype's actual components and styles are adopted. Up to eight explicitly selected application process trees or Windows recording inputs feed one shared native mix and one Discord destination. Adding a source starts capture and live metering before Discord Connect. Each source has independent capture/stop, fractional-dB gain and mute; changing or removing a source leaves the destination connected. Destination gain/mute and Connect/Cancel/Disconnect are independent. Global Apply is retired.

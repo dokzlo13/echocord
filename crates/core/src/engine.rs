@@ -26,6 +26,15 @@ enum StopCause {
     Failed(Failure),
 }
 
+#[cfg(any(windows, test))]
+fn capture_handoff_stop(cause: StopCause) -> Option<Result<(), Failure>> {
+    match cause {
+        StopCause::Running => None,
+        StopCause::Requested => Some(Ok(())),
+        StopCause::Failed(failure) => Some(Err(failure)),
+    }
+}
+
 /// Repeated recovery notifications cannot extend an episode indefinitely.
 #[cfg(any(windows, test))]
 struct RecoveryWindow {
@@ -790,18 +799,20 @@ async fn capture_loop(
                             let guard = CaptureGuard(session.control, cleanup_failed.clone());
                             let output = output.borrow_and_update().clone();
                             guard.0.set_output(output.volume_percent, output.muted);
-                            if *stop_rx.borrow() != StopCause::Running { return Ok(()); }
+                            if let Some(result) = capture_handoff_stop(*stop_rx.borrow()) { return result; }
                             let mut call = call.lock().await;
                             if call.current_channel().map(|id| id.0.get()) != Some(signals.channel.get()) { return Err(Failure::Permission); }
-                            if *stop_rx.borrow() != StopCause::Running { return Ok(()); }
+                            if let Some(result) = capture_handoff_stop(*stop_rx.borrow()) { return result; }
                             call.play_only_input(songbird::input::RawAdapter::new(session.input, 48000, 2).into());
                             capture = Some(guard); missing.reset();
                             if !recovering.active() { let _ = statuses.send(Status::Connected).await; }
                         }
-                        Err(_) if *stop_rx.borrow() != StopCause::Running => return Ok(()),
-                        Err(_) if missing.active() => {},
-                        Err(_) if crate::audio::application::is_application_id(&init.source_id) => return Err(Failure::ApplicationCapture),
-                        Err(_) => return Err(Failure::Capture),
+                        Err(_) => {
+                            if let Some(result) = capture_handoff_stop(*stop_rx.borrow()) { return result; }
+                            if !missing.active() {
+                                return Err(if crate::audio::application::is_application_id(&init.source_id) { Failure::ApplicationCapture } else { Failure::Capture });
+                            }
+                        },
                     }
                 }
                 if let Some(capture) = &capture { meters.send_replace(Some(protocol::clean_capture(capture.0.snapshot()))); }
@@ -813,6 +824,36 @@ async fn capture_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn capture_open_handoff_preserves_failure_after_outer_cancel_polled_pending() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+        for cause in [
+            StopCause::Failed(Failure::Connection),
+            StopCause::Failed(Failure::Protocol),
+            StopCause::Requested,
+        ] {
+            let (stops, receiver) = watch::channel(StopCause::Running);
+            let mut outer = receiver.clone();
+            let mut cancellation = Box::pin(cancelled(&mut outer));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                cancellation.as_mut().poll(&mut context),
+                Poll::Pending
+            ));
+            // The blocking open finishes in this same outer poll after stop arrived.
+            // Its handoff guard must preserve failure before outer cancellation is repolled.
+            stops.send_replace(cause);
+            let result = capture_handoff_stop(*receiver.borrow()).unwrap();
+            match cause {
+                StopCause::Failed(failure) => assert_eq!(result, Err(failure)),
+                StopCause::Requested => assert_eq!(result, Ok(())),
+                StopCause::Running => unreachable!(),
+            }
+        }
+    }
     fn frame(sequence: u64, body: Command) -> Vec<u8> {
         protocol::encode(&Frame {
             version: protocol::VERSION,

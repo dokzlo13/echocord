@@ -2,7 +2,7 @@
 
 ## Agreed requirements
 
-The current iteration supports one explicitly selected application process tree or one Windows recording endpoint, feeding one Discord bot destination, with no local monitoring. The paragraphs below retain the original MVP context; the current application-capture and compact-UI decisions are detailed under post-alpha priorities.
+The owner-authorized mixing epoch supports multiple explicitly selected application/recording sources feeding one shared native mix and one Discord destination, with no local monitoring. Capture runs independently of connecting. The original MVP context below is historical; current mixing-era decisions supersede its single-source and global-Apply behavior.
 
 Echocord replaces a general-purpose audio bot client for tabletop gaming sessions. Target sessions last 2–5 hours alongside a virtual tabletop, browser, Discord, and other desktop tools.
 
@@ -50,3 +50,11 @@ Application process capture is implemented with recording inputs retained. Nativ
 Signal Bridge is implemented with compact polish; broader visual refinement follows real use. Keep clearly separated input/output areas, slim calibrated meters and useful diagnostics on the main surface beside the signal controls. Source/destination selection uses compact contextual popovers after owner feedback that the previous drawers were oversized. Preserve how the same structure grows to multiple inputs feeding one shared mix and multiple destinations, without implying independent routing matrices or shipping inactive future controls.
 
 The main surface should fit within the compact application window without internal scrolling, including pending/error controls. Source/target selection lists may scroll in their drawers. Prefer clear spatial grouping over literal graph boxes and connector lines.
+
+## Accepted mixing-era direction
+
+Owner testing confirms application-to-Discord capture and low perceived delay. Routing a captured app to an unused existing playback endpoint was also reported to avoid headphone playback while preserving capture; that is an owner-observed routing workaround, not an Echocord local-mute feature. A custom virtual interface/driver is postponed.
+
+Adopt the approved On Air Stack prototype directly. Cards have actionable identities and targeted edits; full-window sheets replace the compact popovers, and independently scrolling lists replace the fixed single-source surface. Remove global Apply, the queued-change band, the Mix bar and the old Audio details sheet. Source gain/mute/capture and destination volume/mute/connection are distinct. Adding a source starts capture and metering before Connect; live source changes keep the destination connected. First launch is empty. Restore setup reopens saved recording inputs, restores app cards with explicit safe reattachment, and restores rooms idle. No source fallback or ambiguous app match is permitted.
+
+The current delivery limit is eight source strips and one Discord destination. One common mix is the extension point for later bounded destination fan-out; no routing matrix or advanced DSP is required. Gain has dB precision and no boost. Network numbers/graphs use measured available telemetry and must not reproduce fictional prototype data. Native worker architecture changes are authorized and independently reviewed; the parent remains PCM-free.

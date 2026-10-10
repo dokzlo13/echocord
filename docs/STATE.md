@@ -1,3 +1,9 @@
+# Active mixing epoch
+
+Owner confirmed the application-capture delivery and approved the On Air Stack redesign. The current epoch adopts the actual private prototype, adds multiple sources feeding one shared native mix, and separates capture from Discord connection. EC-023 owns native contracts/core, EC-024 frontend adoption, EC-025 independent review and EC-026 shell/integration. Previous global Apply, fixed single-source layout and tiny picker decisions are superseded by DESIGN/BRIEF.
+
+The reviewed core uses a persistent tokenless audio worker plus disposable Discord worker, joined by a bounded native shared-memory ring; parent/frontend remain PCM-free. One destination is retained. Implementation and validation are active, so the new behavior is not yet a delivered build. Prior release checks and owner-confirmed behavior follow for context.
+
 # Current state
 
 The capture delivery epoch is complete. The Windows release supports one selected application process tree or one recording input feeding one Discord destination. EC-017/022 add native driver-free application capture and its reviewed source picker; EC-021 adds compact contextual source/room pickers, readable queued changes and meter-bar smoothing. DESIGN.md is the current visual authority. The app starts disconnected; source selection/apply and Connect stay explicit.

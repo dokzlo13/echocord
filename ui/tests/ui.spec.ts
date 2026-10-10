@@ -387,7 +387,7 @@ for (const width of [480, 420]) {
     await page
       .getByRole("button", { name: "Change input", exact: true })
       .click();
-    const sourcePicker = page.getByRole("dialog", { name: "Recording inputs" });
+    const sourcePicker = page.getByRole("dialog", { name: "Audio sources" });
     await expect(page.getByLabel("Search recording inputs")).toBeFocused();
     await expect(
       sourcePicker.getByRole("button", { name: /CABLE Output/ }),
@@ -395,14 +395,14 @@ for (const width of [480, 420]) {
     const fullSourceHeight = await sourcePicker.evaluate(
       (element) => element.getBoundingClientRect().height,
     );
-    expect(fullSourceHeight).toBeLessThan(340);
+    expect(fullSourceHeight).toBeLessThanOrEqual(368);
     await page.getByLabel("Search recording inputs").fill("CABLE-B");
     const filteredSourceHeight = await sourcePicker.evaluate(
       (element) => element.getBoundingClientRect().height,
     );
     expect(filteredSourceHeight).toBeLessThan(fullSourceHeight - 40);
     await sourcePicker
-      .getByRole("button", { name: "Close recording inputs" })
+      .getByRole("button", { name: "Close audio sources" })
       .click();
     await expect(
       page.getByRole("button", { name: "Change input", exact: true }),

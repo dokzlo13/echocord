@@ -22,6 +22,10 @@ export const fixtureNames = [
   "cleanup-incomplete",
   "rejected-command",
   "backend-unavailable",
+  "application-connected",
+  "application-missing",
+  "application-error",
+  "source-discovery-error",
 ] as const;
 export type FixtureName = (typeof fixtureNames)[number];
 
@@ -34,15 +38,38 @@ export function fixtureSnapshot(
     sources: [
       {
         id: "cable",
+        kind: "recording",
         name: "CABLE Output (VB-Audio Virtual Cable)",
         available: true,
         detail: "VB-Audio Virtual Cable",
       },
       {
         id: "cable-b",
+        kind: "recording",
         name: "CABLE-B Output",
         available: true,
         detail: "VB-Audio Virtual Cable",
+      },
+      {
+        id: "fixture-app-player",
+        name: "Ambient player",
+        kind: "application",
+        available: true,
+        detail: "PID 7412 · includes child processes",
+      },
+      {
+        id: "fixture-app-other",
+        name: "Ambient player",
+        kind: "application",
+        available: true,
+        detail: "PID 7612 · includes child processes",
+      },
+      {
+        id: "fixture-app-long",
+        name: "Table Audio — Extended soundtrack and ambience collection",
+        kind: "application",
+        available: true,
+        detail: "PID 7812 · includes child processes",
       },
     ],
     servers: [
@@ -86,6 +113,7 @@ export function fixtureSnapshot(
     },
     bot: { status: "ready", name: "Table Audio", message: null },
     discovery: { phase: "ready" },
+    sourceDiscovery: { phase: "ready" },
     connection: { phase: "disconnected" },
     capture: {
       phase: "stopped",
@@ -108,6 +136,9 @@ export function fixtureSnapshot(
       "capture-error",
       "disconnecting",
       "cleanup-incomplete",
+      "application-connected",
+      "application-missing",
+      "application-error",
     ].includes(name)
   )
     snapshot.sessionId = 1;
@@ -118,6 +149,9 @@ export function fixtureSnapshot(
       "recovering",
       "missing-device",
       "capture-error",
+      "application-connected",
+      "application-missing",
+      "application-error",
     ].includes(name)
   ) {
     snapshot.connection = { phase: "connected" };
@@ -129,6 +163,48 @@ export function fixtureSnapshot(
     };
   }
   switch (name) {
+    case "application-connected":
+      snapshot.selection.sourceId = "fixture-app-player";
+      break;
+    case "application-missing":
+      snapshot.selection.sourceId = "fixture-app-player";
+      snapshot.sources = snapshot.sources.map((source) =>
+        source.id === snapshot.selection.sourceId
+          ? { ...source, available: false }
+          : source,
+      );
+      snapshot.capture = {
+        ...snapshot.capture,
+        phase: "missing",
+        levelDbfs: null,
+        outputLevelDbfs: null,
+        message:
+          "The selected application exited. Refresh sources and select the new instance after restarting.",
+      };
+      break;
+    case "application-error":
+      snapshot.selection.sourceId = "fixture-app-player";
+      snapshot.connection = {
+        phase: "error",
+        code: "capture-failed",
+        message: "Application capture could not start.",
+      };
+      snapshot.capture = {
+        ...snapshot.capture,
+        phase: "error",
+        levelDbfs: null,
+        outputLevelDbfs: null,
+        message:
+          "This Windows version does not support application audio capture. Use a recording input.",
+      };
+      break;
+    case "source-discovery-error":
+      snapshot.sourceDiscovery = {
+        phase: "error",
+        message:
+          "Could not enumerate application windows. Refresh sources to retry.",
+      };
+      break;
     case "first-run":
       snapshot.sources = [];
       snapshot.servers = [];
@@ -139,6 +215,7 @@ export function fixtureSnapshot(
         message: "Bot configuration has not been supplied to the app.",
       };
       snapshot.discovery = { phase: "idle" };
+      snapshot.sourceDiscovery = { phase: "idle" };
       break;
     case "loading":
       snapshot.discovery = { phase: "loading" };
@@ -247,6 +324,7 @@ export class FixtureTransport implements Transport {
   private snapshot: ControlSnapshot;
   private readonly listeners = new Set<(snapshot: ControlSnapshot) => void>();
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private sourceTimer: ReturnType<typeof setTimeout> | undefined;
   readonly commands: ControlCommand[] = [];
 
   constructor(public name: FixtureName = "disconnected") {
@@ -293,6 +371,16 @@ export class FixtureTransport implements Transport {
   dispatch = async (command: ControlCommand) => {
     this.commands.push(command);
     switch (command.type) {
+      case "refresh-sources":
+        this.update({ sourceDiscovery: { phase: "loading" } });
+        clearTimeout(this.sourceTimer);
+        this.sourceTimer = setTimeout(() => {
+          this.update({
+            sources: fixtureSnapshot().sources,
+            sourceDiscovery: { phase: "ready" },
+          });
+        }, 300);
+        break;
       case "set-volume":
         this.update({
           output: { ...this.snapshot.output, volumePercent: command.percent },

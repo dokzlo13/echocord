@@ -4,6 +4,7 @@ import {
   Drawer,
   PasswordInput,
   Popover,
+  Tabs,
   TextInput,
 } from "@mantine/core";
 import {
@@ -15,7 +16,12 @@ import {
 } from "react";
 import styles from "./App.module.css";
 import type { ControlAdapter, ViewState } from "./adapter";
-import type { ControlSnapshot, Selection, Server } from "./generated";
+import type {
+  ControlSnapshot,
+  Selection,
+  Server,
+  SourceKind,
+} from "./generated";
 import { Icon } from "./Icons";
 import { locksRoute } from "./presentation";
 import { CaptureCounters } from "./Telemetry";
@@ -180,27 +186,48 @@ export function SourcePicker({
   snapshot,
   draft,
   busy,
+  refreshing,
   choose,
   refresh,
 }: {
   snapshot: ControlSnapshot;
   draft: Selection;
   busy: boolean;
+  refreshing: boolean;
   choose: (sourceId: string) => void;
   refresh: () => void;
 }) {
   const [search, setSearch] = useState("");
-  const sources = snapshot.sources.filter((source) =>
-    `${source.name} ${source.detail ?? ""}`
-      .toLocaleLowerCase()
-      .includes(search.toLocaleLowerCase()),
+  const [kind, setKind] = useState<SourceKind>(
+    () =>
+      snapshot.sources.find((source) => source.id === draft.sourceId)?.kind ??
+      "application",
   );
-  return (
+  const sources = snapshot.sources.filter(
+    (source) =>
+      source.kind === kind &&
+      `${source.name} ${source.detail ?? ""}`
+        .toLocaleLowerCase()
+        .includes(search.toLocaleLowerCase()),
+  );
+  const panel = (
     <>
-      <p className={styles.drawerHint}>Pick an input, then apply.</p>
+      <p className={styles.drawerHint}>
+        {kind === "application"
+          ? "Browser capture can include other tabs and windows. Keep calls in another app. Local playback continues."
+          : "Choose a Windows recording endpoint, then apply."}
+      </p>
       <TextInput
-        aria-label="Search recording inputs"
-        placeholder="Search recording inputs"
+        aria-label={
+          kind === "application"
+            ? "Search applications"
+            : "Search recording inputs"
+        }
+        placeholder={
+          kind === "application"
+            ? "Search applications"
+            : "Search recording inputs"
+        }
         leftSection={<Icon name="search" />}
         value={search}
         onChange={(event) => setSearch(event.currentTarget.value)}
@@ -218,35 +245,79 @@ export function SourcePicker({
           >
             <span className={styles.choiceTitle}>{source.name}</span>
             <span className={styles.secondary}>
-              {source.detail ?? "Recording endpoint"}
+              {source.detail ??
+                (source.kind === "application"
+                  ? "Application and child processes"
+                  : "Recording endpoint")}
+              {!source.available && " · Unavailable"}
             </span>
             <span className={styles.selectionTag}>
-              {!source.available
-                ? "Unavailable"
-                : source.id === snapshot.selection.sourceId
-                  ? "Current"
-                  : source.id === draft.sourceId
-                    ? "Queued"
-                    : "Select input"}
+              {source.id === snapshot.selection.sourceId
+                ? "Current"
+                : source.id === draft.sourceId
+                  ? "Queued"
+                  : !source.available
+                    ? "Unavailable"
+                    : ""}
             </span>
           </button>
         ))}
         {sources.length === 0 && (
           <p>
-            {snapshot.sources.length === 0
-              ? "No recording inputs found. Enable the device in Windows Sound settings, then refresh."
-              : "No inputs match your search."}
+            {refreshing
+              ? "Looking for audio sources…"
+              : snapshot.sourceDiscovery.phase === "error"
+                ? "Source list unavailable. Try Refresh sources."
+                : search.trim()
+                  ? "No sources match your search."
+                  : snapshot.sourceDiscovery.phase === "idle"
+                    ? "Refresh sources to find available audio."
+                    : kind === "application"
+                      ? "No applications found. Open an app window, then refresh."
+                      : "No recording inputs found. Enable the device in Windows Sound settings, then refresh."}
           </p>
         )}
       </div>
+    </>
+  );
+  return (
+    <>
+      <Tabs
+        value={kind}
+        keepMounted={false}
+        onChange={(value) => {
+          if (value === "application" || value === "recording") {
+            setKind(value);
+            setSearch("");
+          }
+        }}
+        className={styles.sourceTabs}
+      >
+        <Tabs.List aria-label="Source types" className={styles.sourceTabList}>
+          <Tabs.Tab value="application" className={styles.sourceTab}>
+            Applications
+          </Tabs.Tab>
+          <Tabs.Tab value="recording" className={styles.sourceTab}>
+            Recording inputs
+          </Tabs.Tab>
+        </Tabs.List>
+        <Tabs.Panel value="application" className={styles.sourcePanel}>
+          {kind === "application" && panel}
+        </Tabs.Panel>
+        <Tabs.Panel value="recording" className={styles.sourcePanel}>
+          {kind === "recording" && panel}
+        </Tabs.Panel>
+      </Tabs>
       <div className={styles.drawerFooter}>
-        <Button
-          variant="default"
-          disabled={busy || locksRoute(snapshot)}
-          onClick={refresh}
-        >
-          Refresh inputs
+        <Button variant="default" disabled={refreshing} onClick={refresh}>
+          {refreshing ? "Refreshing…" : "Refresh sources"}
         </Button>
+        {refreshing && <p role="status">Looking for audio sources…</p>}
+        {snapshot.sourceDiscovery.phase === "error" && (
+          <p role="alert" className={styles.warning}>
+            {snapshot.sourceDiscovery.message}
+          </p>
+        )}
       </div>
     </>
   );
@@ -531,7 +602,7 @@ export function AudioDetails({
       <p>
         {snapshot?.sources.find(
           (source) => source.id === snapshot.selection.sourceId,
-        )?.name ?? "Recording input not available"}
+        )?.name ?? "Audio source not available"}
       </p>
       <p>
         {snapshot?.servers.find(
@@ -546,9 +617,13 @@ export function AudioDetails({
       </p>
       <h3>Routing help</h3>
       <p>
-        Send your audio app to VB-Cable's playback endpoint and capture its
-        recording endpoint here. Echocord does not play audio locally. Closing
-        the window keeps the session in the tray; use Quit in the tray to exit.
+        {snapshot?.sources.find(
+          (source) => source.id === snapshot.selection.sourceId,
+        )?.kind === "application"
+          ? "Application capture includes the selected app and its child processes. Browser capture can include other tabs and windows; keep calls in another app. Original local playback continues."
+          : "Send your audio app to VB-Cable's playback endpoint and capture its recording endpoint here. Echocord does not play audio locally."}{" "}
+        Closing the window keeps the session in the tray; use Quit in the tray
+        to exit.
       </p>
     </div>
   );

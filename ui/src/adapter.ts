@@ -420,7 +420,7 @@ export class ControlAdapter {
         commandError: {
           code: "invalid-selection",
           message:
-            "Choose an available recording device and voice room before applying.",
+            "Choose an available audio source and voice room before applying.",
         },
       });
       return false;

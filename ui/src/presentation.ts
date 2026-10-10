@@ -5,7 +5,7 @@ export const connectStageLabels: Record<ConnectStage, string> = {
   preflight: "Checking the selected route…",
   gateway: "Connecting to Discord…",
   join: "Joining the voice channel…",
-  capture: "Opening the recording device…",
+  capture: "Opening audio source…",
 };
 
 export function locksRoute(snapshot: ControlSnapshot): boolean {
@@ -29,16 +29,17 @@ export function readiness(snapshot: ControlSnapshot): string | null {
       ? "Checking bot configuration…"
       : "Review bot configuration to connect.";
   if (snapshot.discovery.phase === "loading")
-    return "Loading recording devices and servers…";
+    return "Loading Discord servers and rooms…";
   if (snapshot.discovery.phase !== "ready")
-    return "Refresh devices and servers to choose a route.";
-  if (!snapshot.selection.sourceId) return "Select a recording device.";
-  if (
-    !snapshot.sources.some(
-      (source) => source.id === snapshot.selection.sourceId && source.available,
-    )
-  )
-    return "The selected recording device is unavailable.";
+    return "Refresh Discord rooms to choose a destination.";
+  if (!snapshot.selection.sourceId) return "Select an audio source.";
+  const source = snapshot.sources.find(
+    (item) => item.id === snapshot.selection.sourceId,
+  );
+  if (!source?.available)
+    return source?.kind === "application"
+      ? "The selected application is unavailable. Refresh sources and select it again."
+      : "The selected audio source is unavailable.";
   const server = snapshot.servers.find(
     (item) => item.id === snapshot.selection.serverId,
   );
@@ -70,7 +71,12 @@ export function captureLabel(snapshot: ControlSnapshot): string {
     stopped: "Capture stopped",
     opening: "Opening input",
     running: "Input running",
-    missing: "Device missing",
+    missing:
+      snapshot.sources.find(
+        (source) => source.id === snapshot.selection.sourceId,
+      )?.kind === "application"
+        ? "Application unavailable"
+        : "Device missing",
     error: "Input failed",
   };
   return labels[snapshot.capture.phase];

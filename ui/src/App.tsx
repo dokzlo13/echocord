@@ -63,6 +63,10 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const nextRoom = nextServer?.channels.find(
     (item) => item.id === queued.channelId,
   );
+  const distinguishAppInstances =
+    source?.kind === "application" &&
+    nextSource?.kind === "application" &&
+    source.name === nextSource.name;
   const routeChanges: { field: string; confirmed: string; queued: string }[] =
     [];
   if (queued.sourceId !== selection.sourceId)
@@ -112,6 +116,9 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const catalogBusy =
     snapshot?.discovery.phase === "loading" ||
     view.pending.includes("refresh-catalog");
+  const sourceBusy =
+    snapshot?.sourceDiscovery.phase === "loading" ||
+    view.pending.includes("refresh-sources");
   const reason = snapshot ? readiness(snapshot) : "Waiting for app status.";
   const routeValid = Boolean(
     nextSource?.available &&
@@ -171,6 +178,9 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       ? snapshot.connection.message
       : null,
     snapshot?.discovery.phase === "error" ? snapshot.discovery.message : null,
+    snapshot?.sourceDiscovery.phase === "error"
+      ? snapshot.sourceDiscovery.message
+      : null,
     snapshot?.bot.message,
   ].filter((message): message is string => Boolean(message));
   let notice: string | null = null;
@@ -184,13 +194,29 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       "The session has not exited. Retry stop before applying or connecting.";
   else if (snapshot?.capture.phase === "missing")
     notice =
-      "Recording input missing. Restore it or stop and choose another input.";
-  else if (snapshot?.capture.phase === "error")
-    notice = "Recording input failed. Check its Windows sound settings.";
+      source?.kind === "application"
+        ? "Application unavailable. Stop, refresh sources and select it again."
+        : source?.kind === "recording"
+          ? "Recording input missing. Restore it or stop and choose another input."
+          : "Audio source unavailable. Stop and select another source.";
+  else if (
+    snapshot?.capture.phase === "error" ||
+    (snapshot?.connection.phase === "error" &&
+      snapshot.connection.code === "capture-failed")
+  )
+    notice =
+      source?.kind === "application"
+        ? "Application capture failed. Check Details or choose another source."
+        : source?.kind === "recording"
+          ? "Recording input failed. Check its Windows sound settings."
+          : "Audio capture failed. Check Details or choose another source.";
   else if (phase === "error")
     notice = "Connection failed. Review the bot's voice room permissions.";
   else if (snapshot?.discovery.phase === "error")
-    notice = "Could not load inputs or rooms. Open the picker to refresh.";
+    notice = "Could not load Discord rooms. Open the room picker to refresh.";
+  else if (snapshot?.sourceDiscovery.phase === "error")
+    notice =
+      "Could not refresh audio sources. Open the source picker to retry.";
   else if (
     snapshot?.bot.status === "invalid" ||
     snapshot?.bot.status === "error"
@@ -275,25 +301,46 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           aria-labelledby="input-heading"
         >
           <div className={styles.sectionHeading}>
-            <h2 id="input-heading">Recording input</h2>
+            <h2 id="input-heading">
+              {source?.kind === "application"
+                ? "Application audio"
+                : source?.kind === "recording"
+                  ? "Recording input"
+                  : "Audio source"}
+            </h2>
             <span data-testid="capture-status">
               {snapshot ? captureLabel(snapshot) : "Waiting for status"}
             </span>
           </div>
           <div className={styles.inputBody}>
             <div className={styles.routeIdentity}>
-              <strong title={source?.name}>
+              <strong
+                title={
+                  source?.kind === "application" && source.detail
+                    ? `${source.name}\n${source.detail}`
+                    : source?.name
+                }
+              >
                 {source?.name ??
                   (selection.sourceId
-                    ? "Saved input unavailable"
-                    : "Choose an input")}
+                    ? "Saved source unavailable"
+                    : "Choose a source")}
               </strong>
-              <span className={styles.secondary} title={source?.detail ?? ""}>
-                {source?.detail ?? "Windows recording endpoint"}
+              <span
+                className={styles.secondary}
+                title={
+                  source?.kind === "application"
+                    ? "Application and child processes"
+                    : (source?.detail ?? "")
+                }
+              >
+                {source?.kind === "application"
+                  ? "Application and child processes"
+                  : (source?.detail ?? "Application or recording endpoint")}
               </span>
               <PickerPopover
                 name="source"
-                title="Recording inputs"
+                title="Audio sources"
                 opened={drawer === "source"}
                 close={close}
                 trigger={
@@ -303,7 +350,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     disabled={locked}
                     onClick={() => open("source")}
                   >
-                    {source ? "Change input" : "Choose input"}
+                    {source?.kind === "recording"
+                      ? "Change input"
+                      : source
+                        ? "Change source"
+                        : "Choose source"}
                     <Icon name="chevron" />
                   </Button>
                 }
@@ -312,9 +363,10 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   <SourcePicker
                     snapshot={snapshot}
                     draft={queued}
-                    busy={locked || catalogBusy}
+                    busy={locked || sourceBusy}
+                    refreshing={sourceBusy}
                     refresh={() =>
-                      void adapter.dispatch({ type: "refresh-catalog" })
+                      void adapter.dispatch({ type: "refresh-sources" })
                     }
                     choose={(sourceId) => {
                       setDraft({ ...queued, sourceId });
@@ -512,18 +564,60 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                 <dd>
                   <span
                     className={`${styles.queuedValue} ${styles.confirmedValue}`}
-                    title={`Confirmed ${field.toLowerCase()}: ${confirmed}`}
+                    title={`Confirmed ${field.toLowerCase()}: ${confirmed}${field === "Input" && source?.kind === "application" && source.detail ? `\n${source.detail}` : ""}`}
                   >
                     <span className={styles.semanticMeter}>Confirmed: </span>
-                    {confirmed}
+                    {distinguishAppInstances &&
+                    field === "Input" &&
+                    source?.kind === "application" &&
+                    source.detail ? (
+                      <>
+                        <span className={styles.semanticMeter}>
+                          {confirmed},{" "}
+                        </span>
+                        {source.detail}
+                      </>
+                    ) : (
+                      <>
+                        {confirmed}
+                        {field === "Input" &&
+                          source?.kind === "application" &&
+                          source.detail && (
+                            <span className={styles.semanticMeter}>
+                              , {source.detail}
+                            </span>
+                          )}
+                      </>
+                    )}
                   </span>
                   <Icon name="arrow" className={styles.queuedArrow} />
                   <span
                     className={styles.queuedValue}
-                    title={`Queued ${field.toLowerCase()}: ${proposed}`}
+                    title={`Queued ${field.toLowerCase()}: ${proposed}${field === "Input" && nextSource?.kind === "application" && nextSource.detail ? `\n${nextSource.detail}` : ""}`}
                   >
                     <span className={styles.semanticMeter}>Queued: </span>
-                    {proposed}
+                    {distinguishAppInstances &&
+                    field === "Input" &&
+                    nextSource?.kind === "application" &&
+                    nextSource.detail ? (
+                      <>
+                        <span className={styles.semanticMeter}>
+                          {proposed},{" "}
+                        </span>
+                        {nextSource.detail}
+                      </>
+                    ) : (
+                      <>
+                        {proposed}
+                        {field === "Input" &&
+                          nextSource?.kind === "application" &&
+                          nextSource.detail && (
+                            <span className={styles.semanticMeter}>
+                              , {nextSource.detail}
+                            </span>
+                          )}
+                      </>
+                    )}
                   </span>
                 </dd>
               </div>

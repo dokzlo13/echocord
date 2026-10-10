@@ -138,6 +138,14 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
     connected,
   );
   await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await page.getByRole("button", { name: "Change input", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Refresh sources", exact: true })
+    .click();
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await expect(
+    page.getByRole("dialog", { name: "Audio sources" }),
+  ).toContainText("CABLE Output");
   await page.getByRole("button", { name: "Mute output", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Mute output", exact: true }),
@@ -180,6 +188,7 @@ test("production uses actual Tauri SDK names/payloads and events; command accept
       .map((call) => call.args),
   ).toEqual([
     { command: { type: "connect" } },
+    { command: { type: "refresh-sources" } },
     { command: { type: "set-muted", muted: true } },
   ]);
 });

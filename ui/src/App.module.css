@@ -598,6 +598,41 @@
 .pickerBody .drawerFooter button {
   height: 28px;
 }
+.sourceTabs {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
+.sourceTabList {
+  flex-shrink: 0;
+  padding: 3px;
+  gap: 2px;
+  border: 0;
+  border-radius: 5px;
+  background: #172128;
+}
+.sourceTabList::before {
+  display: none;
+}
+.sourceTab {
+  flex: 1;
+  padding: 6px 4px;
+  color: #b4c2c9;
+  border: 0;
+  border-radius: 3px;
+  font-size: 0.75rem;
+}
+.sourceTab[data-active] {
+  background: #30484b;
+  color: #edf2f1;
+}
+.sourcePanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
 .pickerBody .choice {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -694,6 +729,9 @@
   align-items: flex-start;
 }
 .warning {
+  color: #f0d3aa;
+}
+.pickerBody .drawerFooter .warning {
   color: #f0d3aa;
 }
 .botState {

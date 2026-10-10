@@ -7,7 +7,11 @@ import { createRoot } from "react-dom/client";
 import { App } from "../src/App";
 import { ControlAdapter, type Transport } from "../src/adapter";
 import { fixtureSnapshot } from "../src/fixtures";
-import type { ControlCommand, ControlSnapshot } from "../src/generated";
+import type {
+  ControlCommand,
+  ControlSnapshot,
+  RecordingSource,
+} from "../src/generated";
 import { theme } from "../src/theme";
 
 export interface Harness {
@@ -17,6 +21,8 @@ export interface Harness {
   rejectDestination: boolean;
   rejectSave: boolean;
   holdDisconnect: boolean;
+  rejectSourceRefresh: boolean;
+  sourceResults: RecordingSource[] | null;
   emit: (patch: Partial<ControlSnapshot>) => void;
   visible: (visible: boolean) => void;
   burst: (count: number) => void;
@@ -37,6 +43,8 @@ const host: Harness = {
   rejectDestination: false,
   rejectSave: false,
   holdDisconnect: false,
+  rejectSourceRefresh: false,
+  sourceResults: null,
   snapshot: () => current,
   emit: (patch) => {
     current = { ...current, ...patch, revision: current.revision + 1 };
@@ -80,6 +88,28 @@ const transport: Transport = {
   },
   dispatch: async (command) => {
     host.commands.push(command);
+    if (command.type === "refresh-sources") {
+      host.emit({ sourceDiscovery: { phase: "loading" } });
+      setTimeout(
+        () =>
+          host.emit(
+            host.rejectSourceRefresh
+              ? {
+                  sourceDiscovery: {
+                    phase: "error",
+                    message:
+                      "Could not enumerate application windows. Refresh sources to retry.",
+                  },
+                }
+              : {
+                  sources: host.sourceResults ?? current.sources,
+                  sourceDiscovery: { phase: "ready" },
+                },
+          ),
+        300,
+      );
+      return;
+    }
     if (command.type === "disconnect" && host.holdDisconnect) return;
     if (command.type === "disconnect")
       host.emit({

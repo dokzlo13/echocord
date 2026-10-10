@@ -33,7 +33,7 @@ EC-006 remains separate recovery/long-session validation, scheduled when an appr
 | EC-018 | Native post-gain meter | done | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
 | EC-019 | Isolated telemetry presentation | done | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
-| EC-021 | Picker clarity, queued changes and meter motion | active | EC-013, EC-018, EC-019 | UI worker / a1; coordinator integration | agent/EC-021-a1 | [task](EC-021.md) |
-| EC-022 | Application-source selection | ready | EC-021; accepted EC-017 source-contract milestone | UI worker / a1 planned | agent/EC-022-a1 planned | [task](EC-022.md) |
+| EC-021 | Picker clarity, queued changes and meter motion | done | EC-013, EC-018, EC-019 | UI worker / a1; coordinator integration | main | [task](EC-021.md), d417bc3; combined/native checks passed |
+| EC-022 | Application-source selection | active | EC-021; accepted EC-017 source-contract milestone | UI worker / a1 | agent/EC-022-a1 | [task](EC-022.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

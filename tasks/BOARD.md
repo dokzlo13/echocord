@@ -52,7 +52,7 @@ Owner testing confirmed the earlier capture routes and perceived low delay. New 
 | EC-028 | Independent destination/fidelity review | done | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
 | EC-029 | Destination continuation integration | done | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
 | EC-030 | Multiple Discord rooms | review | EC-020; gateway/voice design review before code | native worker / a1; coordinator integration | main | [task](EC-030.md), 3c2bad2; combined/native GUI gates pending |
-| EC-031 | Multiple-room control UI | review | approved UI; EC-030 contract checkpoint | UI worker / a1; coordinator integration | main | [task](EC-031.md), 2a333b2; native/combined gates pending |
+| EC-031 | Multiple-room control UI | active | approved UI; EC-030 contract checkpoint | UI worker / a1; native empty-state follow-up | agent/EC-031-a1 | [task](EC-031.md), 2a333b2 baseline; four-room/no-source overlap correction |
 | EC-032 | Independent multi-room review | active | owner-authorized epoch | reviewers / r1 gateway, r2 controller | read-only | [task](EC-032.md) |
 | EC-033 | Multiple-room integration | active | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md) |
 | EC-034 | Discord room source feasibility research | done | owner next-priority request | research worker / r1; coordinator verification | read-only | [task](EC-034.md); no receive implementation/live proof |

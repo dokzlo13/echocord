@@ -69,4 +69,5 @@ app-check: core-check ## Check production UI and Windows Rust integration
 
 engine-smoke: app-build ## Verify actual GUI engine mode rejects empty credentials before capture
 	bash scripts/build-native-tool.sh engine-probe
-	target/x86_64-pc-windows-msvc/release/engine-probe.exe "$$(wslpath -w "$$PWD/target/x86_64-pc-windows-msvc/release/echocord.exe")" "$$(wslpath -w "$$PWD/.trash/app/engine-probe")"
+	app_target_dir="$$(realpath -m -- "$${ECHOCORD_APP_TARGET_DIR:-$$PWD/target}")"; \
+	  target/x86_64-pc-windows-msvc/release/engine-probe.exe "$$(wslpath -w "$$app_target_dir/x86_64-pc-windows-msvc/release/echocord.exe")" "$$(wslpath -w "$$PWD/.trash/app/engine-probe")"

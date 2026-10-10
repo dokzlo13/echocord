@@ -2,6 +2,7 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+app_target_dir="$(realpath -m -- "${ECHOCORD_APP_TARGET_DIR:-$repo_root/target}")"
 check_app=false
 if [[ "${1:-}" == --check ]]; then
   check_app=true
@@ -28,7 +29,7 @@ npm --prefix ui run build
 node scripts/build-app-icon.mjs
 if [[ "$check_app" == true ]]; then
   exec cargo xwin clippy --locked --release -j 2 --target x86_64-pc-windows-msvc \
-    --target-dir "$repo_root/target" -p echocord --bin echocord -- -D warnings
+    --target-dir "$app_target_dir" -p echocord --bin echocord -- -D warnings
 fi
 cargo xwin build --locked --release -j 2 --target x86_64-pc-windows-msvc \
-  --target-dir "$repo_root/target" -p echocord --bin echocord
+  --target-dir "$app_target_dir" -p echocord --bin echocord

@@ -2,7 +2,8 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-executable="$repo_root/target/x86_64-pc-windows-msvc/release/echocord.exe"
+app_target_dir="$(realpath -m -- "${ECHOCORD_APP_TARGET_DIR:-$repo_root/target}")"
+executable="$app_target_dir/x86_64-pc-windows-msvc/release/echocord.exe"
 if [[ ! -f "$executable" ]]; then
   echo 'Build the application with make app-build first.' >&2
   exit 1

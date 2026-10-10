@@ -19,7 +19,10 @@ struct WindowMemory {
 }
 
 pub fn preference_path(settings: Option<&Path>, token: Option<&Path>) -> Option<PathBuf> {
-    let path = settings?.with_extension("window-size");
+    let settings = settings?;
+    let mut name = settings.file_name()?.to_os_string();
+    name.push(".window-size");
+    let path = settings.with_file_name(name);
     if token.is_some_and(|token| {
         path == token
             || matches!((path.canonicalize(), token.canonicalize()), (Ok(a), Ok(b)) if a == b)
@@ -107,7 +110,10 @@ pub fn persist(app: &tauri::AppHandle) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
         let mut file = OpenOptions::new()

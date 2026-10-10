@@ -1,12 +1,12 @@
 # Echocord
 
-A small Windows utility that mixes selected application audio and recording inputs, then sends the shared mix to one Discord bot/channel.
+A small Windows utility that mixes selected application audio and recording inputs, then sends the shared mix to a Discord bot/channel and selected Windows playback devices.
 
-`Selected applications / recording inputs → native shared mix → Discord`
+`Selected applications / recording inputs → native shared mix → Discord + selected playback devices`
 
-Add a source to start capture and see its level before connecting Discord. Each source has Capture/Stop, mix-only Mute and gain. The destination has its own Connect/Cancel/Disconnect, Mute and volume. Source changes take effect on their card and keep the bot connection; room changes briefly reconnect. Up to eight sources and one destination are supported.
+Add a source to start capture and see its level before connecting Discord. Each source has Capture/Stop, mix-only Mute and gain. Each destination has its own Mute and volume: Connect/Cancel/Disconnect for Discord, Play/Stop for a Windows device. Source changes take effect on their card and keep the bot connection; room changes briefly reconnect. Up to eight sources feed one Discord destination and up to three Windows playback destinations. New and restored outputs stay idle until explicitly started.
 
-Application capture includes the selected process and its children, which can include other browser tabs/windows. Original playback continues. No local monitoring, independent local-mute control or custom virtual audio driver ships. An existing recording device such as VB-Cable remains available for isolated routing.
+Application capture includes the selected process and its children, which can include other browser tabs/windows. Original playback continues. Local playback is explicit and optional; it does not suppress original application playback. No independent local-mute control or custom virtual driver ships. An existing cable can be a recording source or playback destination; avoid routing the mix back into a captured input.
 
 Development, dependencies, builds and agent worktrees live in WSL. Windows runs the built application and native audio tests.
 
@@ -22,4 +22,4 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md) and the [task board]
 
 Use `make help` for supported commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md), and the current app flow is in [FIRST-TEST.md](docs/FIRST-TEST.md).
 
-Status: On Air cards, full-window pickers, capture independent of Discord, protected bot setup and shared native mixing are implemented. Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. Automated native fixtures cover isolation and multi-source behavior; live listening on the new mix, measured listener latency and five-hour stability remain separate acceptance. Final integrated build/check evidence is recorded in STATE and the task board.
+Status: On Air cards, full-window pickers, capture independent of Discord, protected bot setup, shared native mixing and explicit playback fan-out are implemented. Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. Automated native fixtures cover isolation and multi-source behavior; live listening on the new mix, measured listener latency and five-hour stability remain separate acceptance. Final integrated build/check evidence is recorded in STATE and the task board.

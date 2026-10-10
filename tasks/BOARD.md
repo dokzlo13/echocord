@@ -4,11 +4,11 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 ## Next pickup order
 
-1. **EC-021:** a bounded usability pass on picker hierarchy, queued-change clarity and meter motion. Keep the accepted direction; avoid reopening a broad redesign or letting polish indefinitely postpone capture work.
-2. **EC-017:** the next major feature is better audio capture without requiring a virtual cable for supported applications. Prove isolation/local-playback behavior, review source selection, then integrate a usable capture path; research alone is not the intended delivery endpoint. Preserve recording-device capture.
-3. **EC-020:** multiple sources feeding one common mix and multiple destinations, after capture evidence and architecture review.
+1. **Owner feedback on the delivered build:** application-to-Discord listening, app selection/reselection, compact pickers and meter motion. The earlier recording route remains available. Native synthetic/browser evidence is recorded; new live app delivery is not yet owner-confirmed.
+2. **EC-020:** design and review multiple sources feeding one shared mix and destination fan-out before implementation. Account for source overlap/clock alignment and Discord's one-channel-per-guild-per-bot constraint. Avoid another broad redesign as a prerequisite.
+3. **EC-006:** targeted recovery/resource checks and a five-hour live session when an appropriate test is available, covering both recording and application sources.
 
-EC-006 remains separate recovery/long-session validation, scheduled when an appropriate live test is available. The current epoch delivers bounded EC-021 polish followed by integrated, manually testable EC-017 application capture. Native experimentation may run alongside the polish design; each substantial change passes design and independent review before integration.
+The capture delivery epoch is complete: EC-021 polish, EC-017 native capture and EC-022 application selection are integrated into a manually testable Windows release. Independent local mute, desktop loopback and an owned virtual audio driver are not shipped. Later enhancements remain separate from the owner-feedback and acceptance gaps above.
 
 
 | ID | Task | State | Depends on | Owner / attempt | Branch | Evidence |
@@ -29,11 +29,11 @@ EC-006 remains separate recovery/long-session validation, scheduled when an appr
 | EC-014 | Capture and routing feasibility | done | — | research worker / a1 | main | [task](EC-014.md) |
 | EC-015 | Repository and handoff cleanup | done | EC-005 | coordinator / a1 | main | [task](EC-015.md) |
 | EC-016 | Protected storage and setup API | done | EC-005 | coordinator + storage worker / a1 | main | [task](EC-016.md) |
-| EC-017 | Driver-free app capture: experiment and integration | active | EC-014 | capture worker / a1; coordinator integration | agent/EC-017-a1 | [task](EC-017.md) |
+| EC-017 | Driver-free app capture: experiment and integration | done | EC-014 | capture worker / a1; coordinator integration | main | [task](EC-017.md), cd28fa9 + 9c0d887; integrated/native checks passed |
 | EC-018 | Native post-gain meter | done | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
 | EC-019 | Isolated telemetry presentation | done | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
 | EC-021 | Picker clarity, queued changes and meter motion | done | EC-013, EC-018, EC-019 | UI worker / a1; coordinator integration | main | [task](EC-021.md), d417bc3; combined/native checks passed |
-| EC-022 | Application-source selection | active | EC-021; accepted EC-017 source-contract milestone | UI worker / a1 | agent/EC-022-a1 | [task](EC-022.md) |
+| EC-022 | Application-source selection | done | EC-021; accepted EC-017 source-contract milestone | UI worker / a1; coordinator integration | main | [task](EC-022.md), 8921a87; 53 browser tests and native app checks passed |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

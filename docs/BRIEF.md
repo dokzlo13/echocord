@@ -2,6 +2,8 @@
 
 ## Agreed requirements
 
+The current iteration supports one explicitly selected application process tree or one Windows recording endpoint, feeding one Discord bot destination, with no local monitoring. The paragraphs below retain the original MVP context; the current application-capture and compact-UI decisions are detailed under post-alpha priorities.
+
 Echocord replaces a general-purpose audio bot client for tabletop gaming sessions. Target sessions last 2–5 hours alongside a virtual tabletop, browser, Discord, and other desktop tools.
 
 The first release uses `browser → VB-Cable playback endpoint → VB-Cable recording endpoint → Echocord → Discord bot → voice channel`. Capture one explicitly selected recording device. Support a locally configured Discord bot. Participants hear streamed music through Discord; local monitoring is unnecessary in the first release.
@@ -43,8 +45,8 @@ The current delivery epoch is authorized to ship a polished Windows build with a
 
 User testing confirms the core live flow, perceived latency, and tray operation. The next iteration emphasizes a deliberately designed compact audio surface, responsive and visible connection progress, fast grouped room navigation, and production-facing settings/copy. Pending route edits must remain distinct from the active route and require explicit apply. Secure in-app bot setup and standard per-user app data replace dependence on development-only setup.
 
-Research before implementation: process/desktop capture while retaining recording inputs; optional virtual endpoints; suppression of local playback without suppressing the stream; multiple sources into one common mix and multiple destinations. No per-source/per-destination routing matrix or advanced DSP is required. Same-server Discord restrictions and local-mute semantics must be established before promising these features.
+Application process capture is implemented with recording inputs retained. Native session-mute tests also suppressed captured audio, so independent local suppression is not offered. Remaining research/design covers desktop capture, optional virtual endpoints and multiple sources into one common mix with multiple destinations. No per-source/per-destination routing matrix or advanced DSP is required. Respect established same-server Discord restrictions and review new local-playback semantics before promising them.
 
-Signal Bridge is accepted as the implementation direction, with compact layout polish required and broader visual refinement deferred. Keep clearly separated input/output areas, slim calibrated meters and useful diagnostics on the main surface beside the signal controls. Retain contextual source/destination selection drawers. Preserve how the same structure grows to multiple inputs feeding one shared mix and multiple destinations, without implying independent routing matrices or shipping inactive future controls.
+Signal Bridge is implemented with compact polish; broader visual refinement follows real use. Keep clearly separated input/output areas, slim calibrated meters and useful diagnostics on the main surface beside the signal controls. Source/destination selection uses compact contextual popovers after owner feedback that the previous drawers were oversized. Preserve how the same structure grows to multiple inputs feeding one shared mix and multiple destinations, without implying independent routing matrices or shipping inactive future controls.
 
 The main surface should fit within the compact application window without internal scrolling, including pending/error controls. Source/target selection lists may scroll in their drawers. Prefer clear spatial grouping over literal graph boxes and connector lines.

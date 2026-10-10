@@ -316,3 +316,55 @@ test("unavailable levels remain gaps while measured silence is a real sample", a
   expect(a.telemetry.history("dst:dest:1")?.at(0)).toBe(0);
   a.dispose();
 });
+
+test("room telemetry is keyed by destination and session across independent reconnects", async () => {
+  const t = new FixtureTransport("rooms");
+  const a = new ControlAdapter(t);
+  await a.start();
+  const scalar = structuredClone(t.current.telemetry);
+  scalar.destinations = scalar.destinations.map((d, i) => ({
+    ...d,
+    levelDbfs: -10 - i * 10,
+    queuedFrames: 480 * (i + 1),
+    droppedFrames: i,
+    gatewayPingMs: d.destinationId === "local:1" ? null : 42,
+  }));
+  scalar.outputLevelDbfs = 0;
+  a.telemetry.ingest(scalar);
+  expect(a.telemetry.read("dst:dest:1").db).toBe(-10);
+  expect(a.telemetry.read("dst:dest:2").db).toBe(-20);
+  expect(a.telemetry.read("dst:dest:3").db).toBe(-30);
+  expect(a.telemetry.net("dest:2").buffer).toBe(20);
+  expect(a.telemetry.net("dest:3").drops).toBe(2);
+  expect(a.telemetry.net("local:1").ping).toBeNull();
+  const peer = a.telemetry.history("dst:dest:3");
+  const source = a.telemetry.history("src:strip:1");
+  const next = t.current.destinations.map((d) =>
+    d.destinationId === "dest:2" ? { ...d, sessionId: 2 } : d,
+  );
+  a.telemetry.setDestinations(next);
+  expect(a.telemetry.history("dst:dest:2")).toBeUndefined();
+  a.telemetry.ingest(scalar);
+  expect(a.telemetry.read("dst:dest:2").db).toBeNull();
+  expect(a.telemetry.history("dst:dest:3")).toBe(peer);
+  expect(a.telemetry.history("src:strip:1")).toBe(source);
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: scalar.destinations.map((d) =>
+      d.destinationId === "dest:2" ? { ...d, sessionId: 2, levelDbfs: -35 } : d,
+    ),
+  });
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: 0 })),
+  });
+  expect(a.telemetry.read("dst:dest:2").db).toBe(-35);
+  a.telemetry.setDestinations(next.filter((d) => d.destinationId !== "dest:2"));
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: scalar.destinations.map((d) => ({ ...d, sessionId: 999 })),
+  });
+  expect(a.telemetry.read("dst:dest:2").db).toBeNull();
+  expect(a.telemetry.history("dst:dest:2")).toBeUndefined();
+  a.dispose();
+});

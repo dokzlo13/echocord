@@ -16,6 +16,8 @@ export const fixtureNames = [
   "connecting",
   "cleanup",
   "outputs",
+  "rooms",
+  "rooms-restored",
 ] as const;
 export type FixtureName = (typeof fixtureNames)[number];
 export function fixtureSnapshot(
@@ -269,6 +271,73 @@ export function fixtureSnapshot(
     },
     output: { volumePercent: 50, muted: name === "muted" },
   };
+  if (name === "rooms" || name === "rooms-restored") {
+    snapshot.servers.push(
+      {
+        id: "guild:3",
+        name: "Listening group",
+        iconUrl: null,
+        channels: [
+          {
+            id: "room:4",
+            name: "Listening room",
+            categoryName: "Voice",
+            position: 0,
+          },
+        ],
+      },
+      {
+        id: "guild:4",
+        name: "Late session",
+        iconUrl: null,
+        channels: [
+          {
+            id: "room:5",
+            name: "Late room",
+            categoryName: "Voice",
+            position: 0,
+          },
+        ],
+      },
+    );
+    const first = snapshot.destinations[0];
+    if (first) {
+      first.connection = {
+        phase: name === "rooms" ? "connected" : "disconnected",
+      };
+      for (const [serverId, channelId, id] of [
+        ["guild:2", "room:3", "dest:2"],
+        ["guild:3", "room:4", "dest:3"],
+      ] as const)
+        snapshot.destinations.push({
+          ...first,
+          destinationId: id,
+          serverId,
+          channelId,
+          volumeDb: -12,
+        });
+      snapshot.destinations.push({
+        ...first,
+        destinationId: "local:1",
+        kind: "playback",
+        serverId: "",
+        channelId: "",
+        deviceId: "play:headphones",
+        displayName: "Preview headphones",
+        volumeDb: 0,
+      });
+    }
+    snapshot.telemetry.destinations = snapshot.destinations.map((d) => ({
+      destinationId: d.destinationId,
+      sessionId: d.sessionId,
+      levelDbfs: d.connection.phase === "connected" ? -20 : null,
+      queuedFrames: d.connection.phase === "connected" ? 480 : 0,
+      droppedFrames: 0,
+      underrunFrames: 0,
+      gatewayPingMs:
+        d.kind === "discord" && d.connection.phase === "connected" ? 38 : null,
+    }));
+  }
   if (name === "outputs") {
     const discord = snapshot.destinations[0];
     if (discord) discord.connection = { phase: "connected" };
@@ -455,7 +524,7 @@ export class FixtureTransport implements Transport {
       }
       case "add-destination":
         this.current.destinations.push({
-          destinationId: "dest:1",
+          destinationId: `dest:${Date.now()}`,
           kind: "discord",
           deviceId: null,
           displayName: null,

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tauri::Manager;
@@ -16,6 +16,7 @@ const MAX_SIZE: u32 = 8192;
 struct WindowMemory {
     path: Option<PathBuf>,
     size: Mutex<Option<(u32, u32)>>,
+    suppress_persistence: AtomicBool,
 }
 
 pub fn preference_path(settings: Option<&Path>, token: Option<&Path>) -> Option<PathBuf> {
@@ -61,6 +62,7 @@ pub fn install(app: &tauri::App, path: Option<PathBuf>) {
     app.manage(WindowMemory {
         path,
         size: Mutex::new(saved),
+        suppress_persistence: AtomicBool::new(false),
     });
     let Some(window) = app.get_webview_window("main") else {
         return;
@@ -92,11 +94,21 @@ pub fn remember(window: &tauri::Window) {
     }
 }
 
+/// A failed native smoke resize must not overwrite the owner's saved geometry.
+pub fn protect_saved_size(app: &tauri::AppHandle) {
+    if let Some(memory) = app.try_state::<WindowMemory>() {
+        memory.suppress_persistence.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Persist only at close/quit, not on every resize or meter update.
 pub fn persist(app: &tauri::AppHandle) {
     let Some(memory) = app.try_state::<WindowMemory>() else {
         return;
     };
+    if memory.suppress_persistence.load(Ordering::SeqCst) {
+        return;
+    }
     let Some(path) = memory.path.as_ref() else {
         return;
     };

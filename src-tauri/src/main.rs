@@ -336,7 +336,8 @@ fn main() {
 }
 
 async fn native_smoke(app: &tauri::AppHandle) -> bool {
-    // Explicit test mode: no Connect command, audio capture, or voice transmission.
+    // Explicit test mode: no Connect command or voice transmission. Saved recording
+    // inputs may restore capture through the normal startup policy.
     for _ in 0..100 {
         let state = app.state::<ShellState>();
         if state.snapshot_requested.load(Ordering::SeqCst)
@@ -396,6 +397,35 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     if app.tray_by_id("echocord").is_none() || window.is_visible().ok() != Some(true) {
         return false;
     }
+    if window.is_decorated().ok() != Some(false) || window.is_maximizable().ok() != Some(false) {
+        return false;
+    }
+    let (Ok(original), Ok(scale)) = (window.inner_size(), window.scale_factor()) else {
+        return false;
+    };
+    let original = original.to_logical::<u32>(scale);
+    let geometry_ok = async {
+        for (width, height) in [(420, 420), (760, 440)] {
+            if window
+                .set_size(tauri::LogicalSize::new(width, height))
+                .is_err()
+                || !wait_window_size(&window, width, height).await
+            {
+                return false;
+            }
+        }
+        true
+    }
+    .await;
+    // Restore the owner's size even if a geometry assertion fails.
+    let restored = window.set_size(original).is_ok()
+        && wait_window_size(&window, original.width, original.height).await;
+    if !restored {
+        window_state::protect_saved_size(app);
+    }
+    if !geometry_ok || !restored {
+        return false;
+    }
     let hidden_event = std::sync::Arc::new(AtomicBool::new(false));
     let visible_event = std::sync::Arc::new(AtomicBool::new(false));
     let hidden = hidden_event.clone();
@@ -418,7 +448,21 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
         if !wait_visibility(app, true).await || !visible_event.swap(false, Ordering::SeqCst) {
             return false;
         }
-        if window.close().is_err() || !wait_visibility(app, false).await {
+        let keep_in_tray = app
+            .state::<ShellState>()
+            .controller
+            .snapshot()
+            .settings
+            .keep_in_tray;
+        let hide_result = if keep_in_tray {
+            window.close()
+        } else {
+            // Closing would quit normally; fresh-profile smoke covers close-to-tray.
+            let result = window.hide();
+            publish_visibility(app);
+            result
+        };
+        if hide_result.is_err() || !wait_visibility(app, false).await {
             return false;
         }
         if window.is_visible().ok() != Some(false) || !hidden_event.load(Ordering::SeqCst) {
@@ -430,6 +474,19 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     .await;
     app.unlisten(listener);
     result
+}
+
+async fn wait_window_size(window: &tauri::WebviewWindow, width: u32, height: u32) -> bool {
+    for _ in 0..40 {
+        if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+            let logical = size.to_logical::<u32>(scale);
+            if logical.width.abs_diff(width) <= 1 && logical.height.abs_diff(height) <= 1 {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 async fn wait_visibility(app: &tauri::AppHandle, expected: bool) -> bool {

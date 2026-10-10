@@ -297,7 +297,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           <button
             type="button"
             className="win-btn win-close"
-            aria-label="Close to tray"
+            aria-label={
+              snapshot?.settings.keepInTray === false
+                ? "Close Echocord"
+                : "Close to tray"
+            }
             title={
               snapshot?.settings.keepInTray === false
                 ? "Close Echocord"

@@ -2,6 +2,8 @@
 
 The owner authorizes independent capture, multiple-source mixing and targeted card edits, replacing the earlier capture-only-on-Connect/global-Apply policy. Reviewed architecture: a persistent tokenless audio worker owns capture and a fixed native mix timeline; Discord retains its disposable worker and observed-exit/job-kill boundary. A dedicated bounded shared-memory PCM ring crosses those native workers through explicitly inherited handles. The parent holds handles but never maps/reads PCM; control JSON and frontend IPC still carry no samples. Source faults normally affect only that source; unconfirmed native cleanup is contained by worker ownership. One destination ships now, with a shared mix available to future independent readers. The original review below records why network disposal remains important.
 
+Independent EC-025 review approved the final native and adopted UI checkpoints. Blocking findings were resolved before integration: atomic output gain/mute publication, source overlap checking outside the mix tick, pre-clamp overload reporting, failed-host Stop/Remove, inert controller preparation before single-instance admission, same-source phase preservation, telemetry-only IPC isolation, history freshness, and compact error recovery. Native mixing and UI checks support those decisions; new live Discord listening and long-session acceptance remain separate. EC-026 records final combined shell validation.
+
 # Advisory decisions for the first user build
 
 The independent architecture and desktop-UX reviews examined the pinned dependencies, actual probe code, and draft UI checkpoint 4f48825. This record distinguishes adopted changes from recommendations deferred beyond the first test.

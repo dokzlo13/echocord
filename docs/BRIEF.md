@@ -22,6 +22,8 @@ Close keeps capture/streaming in the tray by default; Keep running in tray can m
 
 Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay and working meters/tray behavior. The owner also reported retaining capture while routing original playback to an unused existing endpoint. This is feedback on those setups, not a controlled latency benchmark or a general independent-mute guarantee.
 
+The owner subsequently confirmed multi-server operation, with a subjectively small but acceptable latency increase and approximately15 MB observed for two servers. The timing and memory boundaries are unspecified. A possible fuzzy Firefox playback observation has not been reproduced or attributed to Echocord; the reviewed EC-037 audit found no intentional route/volume/category/priority/timer change and defers a controlled stopped-versus-muted comparison. This report alone does not establish a need to change audio timing or routing.
+
 Native fixtures establish selected process-tree/browser isolation, stereo/silence/lifecycle behavior, bounded queues and shared two-source mixing with source/destination gain/mute and a stable reader. Browser checks and independent review establish direct prototype adoption, card/sheet behavior and telemetry isolation. The task records retain exact checks/results. Neither category establishes live listening on the new mix or five-hour stability.
 
 ## Acceptance targets requiring measurements

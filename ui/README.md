@@ -1,35 +1,28 @@
 # Echocord desktop UI
 
-React, TypeScript, Mantine and CSS Modules implement the accepted Signal Bridge surface in the native Tauri app. Rust-generated `src/generated.ts` is the wire-model authority. Rust owns configuration, encrypted credentials, discovery, audio and recovery; the frontend carries no sample buffers.
+React and TypeScript adopt the approved On Air prototype's cards, full-window sheets, styles and combined dB faders. Native HTML controls, local Sofia Sans fonts and Lucide icons replace the earlier component-library surface. Rust-generated `src/generated.ts` is the wire-model authority; Rust owns credentials, discovery, audio, workers and recovery. No sample buffers cross frontend IPC.
 
-Run in WSL using the Node version in `.nvmrc`:
+Use the project-pinned Node toolchain in WSL. From this directory:
 
 ```sh
 npm ci
-npx playwright install chromium
+npx --no-install playwright install chromium
 npm run dev
 ```
 
-`dev` uses an in-memory fixture transport and never starts real audio or connects to Discord. Select a development state with `?fixture=connected` (or a name from `src/fixtures.ts`). The main UI has no development controls. Production cannot activate fixtures through flags or query parameters; outside Tauri, it shows an explicit unavailable state.
-
 | Script | Result |
 | --- | --- |
-| `npm run dev` | Loopback fixture preview |
-| `npm run dev:native` | Frontend preview for the native Tauri shell |
-| `npm run build` | Strict TypeScript and production native bundle in ignored `dist/` |
-| `npm test` | Build, then adapter, fixture, production-host and rendering checks |
-| `npm run check` | Biome, strict TypeScript, production build and tests |
+| `npm run dev` | Local fixture preview |
+| `npm run dev:native` | Frontend for the native Tauri shell |
+| `npm run typecheck` / `npm run lint` | Strict types / Biome checks |
+| `npm run build` | Typecheck and native production bundle in ignored `dist/` |
+| `npm test` | Build, then behavior/adapter/native-SDK/layout checks |
+| `npm run check` | Lint, build and tests |
 
-Tests serve development fixtures on 4175 and the production bundle on 4176. Coordinate those ports with other workers. Raw browser output goes to ignored `.trash/ec011/`. Final review screenshots belong in the coordinator's ignored evidence directory before worktree cleanup. Tests use synthetic credentials and no real services.
+Fixture mode activates only for `DEV && MODE=fixture`; `?fixture=…` selects names in `src/fixtures.ts`. Production cannot enable fixtures through a query string and reports unavailable transport outside Tauri. The isolated browser harness exposes synthetic controls and React Profiler measurements; it never enters the production bundle.
 
-The surface separates recording input, shared mix and Discord destination. Pickers stage route changes; Apply selection saves without connecting, while Apply & reconnect stops the active session, confirms each change and starts the new route. Failure/cancellation can preserve already-confirmed changes, with only the remaining draft queued. Cleanup failure blocks further route application until stop succeeds. Mute and stop/cancel remain available below nonmodal selection/setup drawers. Ctrl+K opens the room picker; Escape closes a drawer and returns focus.
+Tests use fixture port 4184 and production-preview port 4185, with a default 440×640 viewport. Coordinate ports with workers. Test artifacts go to ignored `.trash/ec024/test-results/`; preserve selected final evidence outside a worktree before retiring it. Tests use no real credentials or services.
 
-Bot settings provide one Test & Save operation through `configureBot`. The token is ephemeral, clears on success/close, and is absent from control snapshots and command history. Failed saves never claim rollback. First-run has a direct Set up bot action, then explicit input/room selection; nothing auto-connects or chooses a fallback.
+Source edits are immediate and targeted. Capture works before Discord Connect. Outputs support one Discord room and three explicit Windows playback devices; added/restored outputs stay idle. Full-window pickers retain keyboard/focus behavior. Independent meters/counters/history use destination IDs and session generations; scalar bursts do not rerender controls. Source meters are post-gain before source mute; Discord meters observe reader handoff and playback meters observe callback output, without claiming listener receipt. Histories preserve unavailable gaps and pause while hidden.
 
-App subscribes only to stable controls. `Telemetry.tsx` alone subscribes to the adapter's independent `{sessionId,sourceId,capture,visible}` stream. Event-driven DOM/ref meters cap painting at 20Hz, queue text at 5Hz and detailed counters at 4Hz; one pending timer per subscriber and no idle animation loop. Document hiding or native visibility false cancels work; resume reads the latest observation. Input peak is pre-gain; mix peak is Rust's actual post-gain/mute reader measurement before Discord. Null means no reading and the native -96dBFS floor means silent; quieter values below the displayed -60dBFS bar remain numeric. No listener latency or delivery is inferred.
-
-Capture queue duration uses the known 48 kHz engine PCM boundary; its occupied/total frame fraction and bar express occupancy of the 1,920-frame queue. Details describe its 40ms capacity and local frame counters. The main surface fits 480×600 and 420×540 including pending/error bands; compact crowded states compress secondary copy and calibration ticks, while drawer lists may scroll.
-
-The browser-only `tests/harness.html`/`harness.tsx` wraps the real App in React Profiler and exposes synthetic transport controls for burst, visibility and partial-failure checks. It is never imported by the production entry. Browser checks cover user behavior and geometry, including containment/overlap; they do not establish Windows WebView scaling, live audio, actual FPS/CPU, tray behavior or long-session stability.
-
-See [DESIGN.md](../DESIGN.md) for the final visual contract and [QUALITY.md](../docs/QUALITY.md) for native/audio acceptance. The coordinator owns shell capabilities, native integration and final Windows smoke.
+[UI architecture](../docs/UI.md), [design](../DESIGN.md), [development commands](../docs/DEVELOPMENT.md) and [quality gates](../docs/QUALITY.md) are the current authorities. Browser evidence does not establish native Windows scaling, physical audio, resource use or long-session stability.

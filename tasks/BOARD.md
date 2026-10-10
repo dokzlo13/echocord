@@ -2,22 +2,17 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
-## Active destination continuation
+## Delivered destination continuation
 
-The owner reports visible drift from the approved prototype and authorizes research plus implementation of different destinations. EC-027 compares and restores fidelity, EC-020 owns native destination research/architecture/contracts/implementation, EC-028 reviews independently, and EC-029 integrates. The delivered build remains the working baseline. The bounded deliverable is one Discord room plus up to three explicit Windows playback outputs; multiple Discord rooms remain a researched architecture follow-on. Native design review precedes implementation. Preserve the running owner app/capture during development.
-
-## Delivered mixing epoch
-
-The owner-approved On Air Stack prototype is adopted in the Windows release. Up to eight explicit inputs feed one shared native mix; capture works before Connect, source changes are targeted, and the Discord destination has independent gain/mute and lifecycle. EC-023–026 are integrated and reviewed. Global Apply and the previous compact popovers are superseded. DESIGN.md is the current UI authority.
+The shared mix now feeds one Discord room and up to three explicit Windows playback devices. Each output has independent gain/mute/start/stop, session-fenced telemetry and native lifetime. Outputs restore idle; no driver or automatic playback is introduced. EC-027 also restores the actual prototype's wide two-source histories, compact measured sparklines and completed-change notices, with four-output control containment at all five supported sizes. EC-020/027–029 are integrated and independently reviewed.
 
 ## Next pickup order
 
-1. **Owner feedback:** manually listen to the mixed output, adjust source gains/mutes, stop or replace a source while connected, and assess the adopted UI at compact/wide sizes. Automated native/browser evidence is recorded; new mixed Discord listening awaits owner review.
-2. **EC-020:** review destination fan-out on the delivered shared-mix foundation. Account for independent output failure/queues and Discord's one-channel-per-guild-per-bot constraint; no further broad redesign is a prerequisite.
-3. **EC-006:** targeted recovery/resource/clock-drift checks and a five-hour live session with appropriate listeners.
+1. **Owner feedback:** review the corrected UI; choose Add destination → Playback, then Play; test independent output gain/mute/Stop alongside source capture. The real native test covered one unused endpoint, not concurrent distinct hardware or live Discord listening.
+2. **EC-030:** focused shared-gateway/disposable-voice-driver design for multiple Discord rooms, with a design/review checkpoint before implementation. Different-guild calls are feasible; same-guild simultaneous rooms need distinct bot identities.
+3. **EC-006:** coordinated live Discord-plus-playback listening, physical endpoint/network/sleep recovery, independent clocks/resources and five-hour stability.
 
-The owner confirmed the preceding application-capture route and perceived low delay. This epoch has no live Discord test. Independent local mute, desktop loopback and an owned virtual audio driver remain outside the release. Source mute silences only that source's contribution to Echocord's mix.
-
+Owner testing confirmed the earlier capture routes and perceived low delay. New automatic results are recorded in STATE and tasks, without replacing live acceptance. Independent original-playback suppression, desktop capture and a new virtual driver remain outside this release. The current app and saved preferences are left for owner review; inspect processes before another test.
 
 | ID | Task | State | Depends on | Owner / attempt | Branch | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -40,16 +35,16 @@ The owner confirmed the preceding application-capture route and perceived low de
 | EC-017 | Driver-free app capture: experiment and integration | done | EC-014 | capture worker / a1; coordinator integration | main | [task](EC-017.md), cd28fa9 + 9c0d887; integrated/native checks passed |
 | EC-018 | Native post-gain meter | done | EC-012 | coordinator; implementation integrated | main | [task](EC-018.md) |
 | EC-019 | Isolated telemetry presentation | done | EC-012 | coordinator; implementation integrated | main | [task](EC-019.md) |
-| EC-020 | Destination fan-out and shared-mix extensions | active | EC-023 done; design/review checkpoint before implementation | native worker / a1 | agent/EC-020-a1 | [task](EC-020.md) |
+| EC-020 | Destination fan-out and shared-mix extensions | done | EC-023; reviewed native architecture | native worker / a1; coordinator integration | main | [task](EC-020.md) |
 | EC-021 | Picker clarity, queued changes and meter motion | done | EC-013, EC-018, EC-019 | UI worker / a1; coordinator integration | main | [task](EC-021.md), d417bc3; combined/native checks passed |
 | EC-022 | Application-source selection | done | EC-021; accepted EC-017 source-contract milestone | UI worker / a1; coordinator integration | main | [task](EC-022.md), 8921a87; 53 browser tests and native app checks passed |
 | EC-023 | Persistent capture and shared native mix | done | EC-017, EC-022; architecture review checkpoint | native worker / a1; coordinator integration | main | [task](EC-023.md) |
 | EC-024 | Adopt approved On Air prototype | done | approved design, EC-021/022; EC-023 contract milestone | UI worker / a1; coordinator integration | main | [task](EC-024.md) |
 | EC-025 | Independent mixing review | done | owner-authorized epoch | reviewer / r1 | read-only | [task](EC-025.md) |
 | EC-026 | Native window and integration | done | approved shell; EC-023 contract milestone | coordinator / a1 | main | [task](EC-026.md) |
-| EC-027 | Prototype fidelity and destination UI | active | EC-024/026; EC-020 contract checkpoint | UI worker / a1 | agent/EC-027-a1 | [task](EC-027.md) |
-| EC-028 | Independent destination/fidelity review | active | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
-| EC-029 | Destination continuation integration | active | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
-| EC-030 | Multiple Discord rooms | blocked | EC-020; gateway/voice design review before code | unassigned | — | [task](EC-030.md) |
+| EC-027 | Prototype fidelity and destination UI | done | EC-024/026; EC-020 contract checkpoint | UI worker / a1; coordinator integration | main | [task](EC-027.md) |
+| EC-028 | Independent destination/fidelity review | done | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
+| EC-029 | Destination continuation integration | done | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
+| EC-030 | Multiple Discord rooms | ready | EC-020; gateway/voice design review before code | unassigned | — | [task](EC-030.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

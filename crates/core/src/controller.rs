@@ -231,6 +231,7 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
                 .clone()
                 .unwrap_or(ControlSnapshot::default().output);
             prefs.destinations.push(DestinationStrip {
+                session_id: 0,
                 kind: DestinationKind::Discord,
                 device_id: None,
                 display_name: None,
@@ -1233,6 +1234,7 @@ impl Actor {
                 self.snapshot.selection.channel_id = Some(channel_id.clone());
                 self.snapshot.connection = Connection::Disconnected;
                 self.snapshot.destinations.push(DestinationStrip {
+                    session_id: 0,
                     kind: DestinationKind::Discord,
                     device_id: None,
                     display_name: None,

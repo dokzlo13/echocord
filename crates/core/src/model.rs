@@ -243,6 +243,7 @@ pub struct PlaybackDevice {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DestinationTelemetry {
+    pub session_id: u32,
     pub destination_id: String,
     pub level_dbfs: Option<f32>,
     pub queued_frames: u32,
@@ -254,6 +255,8 @@ pub struct DestinationTelemetry {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DestinationStrip {
+    #[serde(default)]
+    pub session_id: u32,
     #[serde(default)]
     pub kind: DestinationKind,
     #[serde(default)]
@@ -694,6 +697,7 @@ mod tests {
             },
             |s| {
                 s.destinations.push(DestinationStrip {
+                    session_id: 0,
                     kind: DestinationKind::Discord,
                     device_id: None,
                     display_name: None,

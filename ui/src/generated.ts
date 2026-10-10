@@ -7,8 +7,8 @@ export type InputStrip = { stripId: string, sourceId: string, kind: SourceKind, 
 gainDb: number | null, muted: boolean, colourSlot: number, restored: boolean, };
 export type DestinationKind = "discord" | "playback";
 export type PlaybackDevice = { id: string, name: string, available: boolean, detail: string | null, };
-export type DestinationTelemetry = { destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, };
-export type DestinationStrip = { kind: DestinationKind, deviceId: string | null, displayName: string | null, destinationId: string, serverId: string, channelId: string, connection: Connection, volumeDb: number | null, muted: boolean, };
+export type DestinationTelemetry = { sessionId: number, destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, };
+export type DestinationStrip = { sessionId: number, kind: DestinationKind, deviceId: string | null, displayName: string | null, destinationId: string, serverId: string, channelId: string, connection: Connection, volumeDb: number | null, muted: boolean, };
 export type AppSettings = { restoreSetup: boolean, keepInTray: boolean, meterStyle: MeterStyle, };
 export type MeterStyle = "simple" | "history";
 export type InputTelemetry = { stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, };

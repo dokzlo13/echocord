@@ -1314,12 +1314,13 @@ export function DestCard({
       <>
         <ConnectLog key={card.op} stage={card.stage} room={channel.name} />
         <div className="stages d-stage-line" aria-live="polite">
-          <ol className="stage-steps">
+          <ol className="stage-steps" aria-label="Connection progress">
             {STAGES.map((st, i) => (
               <li
                 key={st.id}
                 data-done={i < idx || undefined}
                 data-now={i === idx || undefined}
+                aria-current={i === idx ? "step" : undefined}
               >
                 {st.label}
               </li>

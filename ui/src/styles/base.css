@@ -833,6 +833,33 @@ input {
   display: grid;
   gap: 8px;
 }
+.stage-steps {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stage-steps li {
+  padding-top: 6px;
+  border-top: 3px solid var(--line-strong);
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.stage-steps li[data-done] {
+  border-color: var(--standby);
+  color: var(--ink-2);
+}
+.stage-steps li[data-now] {
+  border-color: var(--standby);
+  color: var(--ink);
+  animation: pulse 900ms ease-in-out infinite alternate;
+}
+.stage-line {
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
 .preflight {
   display: grid;
   align-content: start;
@@ -2054,4 +2081,22 @@ li[data-status="now"] .log-result svg {
   align-items: center;
   gap: 10px;
   min-height: 18px;
+}
+
+.d-stage-line .stage-steps {
+  display: flex;
+  flex: none;
+  gap: 3px;
+}
+.d-stage-line .stage-steps li {
+  width: 14px;
+  height: 0;
+  padding: 0;
+  overflow: hidden;
+  font-size: 0;
+}
+.d-stage-line .stage-line {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }

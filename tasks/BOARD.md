@@ -2,6 +2,10 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
+## Active multi-room epoch
+
+The owner requests planning and implementation of multiple room targets. EC-030 owns native design/contracts/implementation, EC-031 the existing UI extension, EC-032 independent review and EC-033 integration. Same-server/multiple-bot scope is being clarified; shared gateway/per-room lifecycle research proceeds in parallel. The delivered playback build remains the baseline and must stay undisturbed while the new version is staged.
+
 ## Delivered destination continuation
 
 The shared mix now feeds one Discord room and up to three explicit Windows playback devices. Each output has independent gain/mute/start/stop, session-fenced telemetry and native lifetime. Outputs restore idle; no driver or automatic playback is introduced. EC-027 also restores the actual prototype's wide two-source histories, compact measured sparklines and completed-change notices, with four-output control containment at all five supported sizes. EC-020/027–029 are integrated and independently reviewed.
@@ -45,6 +49,9 @@ Owner testing confirmed the earlier capture routes and perceived low delay. New 
 | EC-027 | Prototype fidelity and destination UI | done | EC-024/026; EC-020 contract checkpoint | UI worker / a1; coordinator integration | main | [task](EC-027.md) |
 | EC-028 | Independent destination/fidelity review | done | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
 | EC-029 | Destination continuation integration | done | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
-| EC-030 | Multiple Discord rooms | ready | EC-020; gateway/voice design review before code | unassigned | — | [task](EC-030.md) |
+| EC-030 | Multiple Discord rooms | active | EC-020; gateway/voice design review before code | native worker / a1 | agent/EC-030-a1 | [task](EC-030.md) |
+| EC-031 | Multiple-room control UI | active | approved UI; EC-030 contract checkpoint | UI worker / a1 | agent/EC-031-a1 | [task](EC-031.md) |
+| EC-032 | Independent multi-room review | active | owner-authorized epoch | reviewer / r1 | read-only | [task](EC-032.md) |
+| EC-033 | Multiple-room integration | active | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

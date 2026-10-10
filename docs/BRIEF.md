@@ -1,8 +1,8 @@
 # Product brief
 
-## Authorized next increment
+## Authorized multi-room increment
 
-The owner requests correction of visible differences from the approved prototype and research/implementation of different destinations. The shared mix and existing Discord route remain the baseline. EC-020 design/review selects one Discord destination plus up to three explicit Windows playback endpoints. Concurrent Discord rooms remain a researched follow-on with separate gateway/voice-worker ownership. New outputs must remain explicit, independently controlled and isolated, with no automatic playback/default-device fallback. A new virtual driver stays postponed. The requirements below include this reviewed increment; final integrated measurements are recorded in STATE.
+The owner now requests planning and implementation of multiple Discord room targets. EC-030 will review shared gateway/per-room voice ownership before implementation; EC-031 preserves the approved UI while exposing independently controlled rooms. Same-server destinations require separate bot identities and are being clarified with the owner. The current shared mix and Windows playback routes remain independent. No automatic joins/output starts, silent room replacement, secret-bearing frontend data or weakened teardown are permitted. Requirements below describe the delivered baseline until the new increment is integrated.
 
 ## Accepted current requirements
 

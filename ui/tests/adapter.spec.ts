@@ -368,3 +368,29 @@ test("room telemetry is keyed by destination and session across independent reco
   expect(a.telemetry.history("dst:dest:2")).toBeUndefined();
   a.dispose();
 });
+
+test("fixture destination identities remain unique across rapid adds and removals", async () => {
+  const t = new FixtureTransport("disconnected");
+  await t.dispatch({
+    type: "add-destination",
+    serverId: "guild:2",
+    channelId: "room:3",
+  });
+  const room = t.current.destinations.at(-1)?.destinationId;
+  await t.dispatch({
+    type: "add-playback-destination",
+    deviceId: "play:headphones",
+  });
+  const removed = t.current.destinations.at(-1)?.destinationId;
+  if (!removed) throw Error("Missing fixture destination");
+  await t.dispatch({ type: "remove-destination", destinationId: removed });
+  await t.dispatch({
+    type: "add-playback-destination",
+    deviceId: "play:speakers",
+  });
+  const replacement = t.current.destinations.at(-1)?.destinationId;
+  expect(new Set([room, removed, replacement]).size).toBe(3);
+  expect(new Set(t.current.destinations.map((d) => d.destinationId)).size).toBe(
+    t.current.destinations.length,
+  );
+});

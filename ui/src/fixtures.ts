@@ -384,6 +384,7 @@ export class FixtureTransport implements Transport {
   minimized = 0;
   closed = 0;
   dragged = 0;
+  private nextDestination = 0;
   private listeners = new Set<(s: ControlSnapshot) => void>();
   private visibility = new Set<(v: boolean) => void>();
   constructor(name: FixtureName = "disconnected") {
@@ -524,7 +525,7 @@ export class FixtureTransport implements Transport {
       }
       case "add-destination":
         this.current.destinations.push({
-          destinationId: `dest:${Date.now()}`,
+          destinationId: `fixture-output:${++this.nextDestination}`,
           kind: "discord",
           deviceId: null,
           displayName: null,
@@ -587,7 +588,7 @@ export class FixtureTransport implements Transport {
         );
         if (device)
           this.current.destinations.push({
-            destinationId: `local:${this.current.destinations.length}`,
+            destinationId: `fixture-output:${++this.nextDestination}`,
             sessionId: 0,
             kind: "playback",
             deviceId: device.id,

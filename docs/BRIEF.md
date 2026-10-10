@@ -1,60 +1,43 @@
 # Product brief
 
-## Agreed requirements
+## Accepted current requirements
 
-The owner-authorized mixing epoch supports multiple explicitly selected application/recording sources feeding one shared native mix and one Discord destination, with no local monitoring. Capture runs independently of connecting. The original MVP context below is historical; current mixing-era decisions supersede its single-source and global-Apply behavior.
+Echocord mixes up to eight explicitly selected application process trees or Windows recording endpoints into one shared native mix and one Discord bot destination. It is a compact utility for 2–5 hour tabletop/voice sessions alongside a browser, player, Discord and other desktop tools. No local monitoring, media player, soundboard, routing matrix or DSP beyond gain/mute is required.
 
-Echocord replaces a general-purpose audio bot client for tabletop gaming sessions. Target sessions last 2–5 hours alongside a virtual tabletop, browser, Discord, and other desktop tools.
+Adding a source starts capture and metering before any voice connection. Each source has Capture/Stop, mix-only Mute and precise dB gain; the destination has Connect/Cancel/Disconnect, Mute and volume. Source add/change/remove/stop and ordinary faults do not leave Discord or silence surviving sources. Room changes are targeted and currently briefly disconnect/reconnect, including within the same server. There is no global Apply or queued-route workflow. Gain has no boost; users can lower individual sources when the shared mix overload indicator lights.
 
-The first release uses `browser → VB-Cable playback endpoint → VB-Cable recording endpoint → Echocord → Discord bot → voice channel`. Capture one explicitly selected recording device. Support a locally configured Discord bot. Participants hear streamed music through Discord; local monitoring is unnecessary in the first release.
+First launch is empty. Restore setup defaults on: saved recording cards reopen, application cards wait for explicit Capture against their exact saved process identity, and the destination restores idle. Exited/restarted applications require refresh/reselection. No executable-name match, default microphone, broader capture or alternate room/channel fallback is allowed. Disabling restore starts with empty cards. Source/destination gain/mute and ordinary settings persist; bot setup never automatically joins voice.
 
-Provide a minimal utility UI for input selection, bot configuration, server/channel selection, volume, mute, and status. Closing the window keeps streaming in the tray; provide explicit Quit. Prefer low delay and reliable operation. Resources should be sensible and not noticeably worse than Kenku; no exact comparative benchmark is required.
+Capture remains restricted to the selected process tree or recording device. Browser capture may include other tabs/windows; keep the voice call in another app. Original local playback continues. Tested Windows session mute also suppressed captured samples, so no independent local-mute control ships. Owner-reported routing to an unused existing playback endpoint is an OS-routing workaround, not a new Echocord control. A custom virtual interface/driver is postponed.
 
-Use minimal automatic recovery without choosing a different device/channel or overriding user intent. Surface significant failures. Preserve mute and volume across recovery. Silence is valid input. User disconnect/quit cancels recovery. Do not repeatedly rejoin after removal or permission rejection.
+Rust owns samples, mixing, process ownership, credentials and recovery. Tauri + React + TypeScript is the validated desktop stack. The approved On Air prototype is directly adopted through native controls, local Sofia Sans fonts and Lucide icons; a component-library migration is not required. Source, dependencies, builds and worktrees stay in WSL, with small Windows runtime additions.
 
-Rust core, Tauri + React + TypeScript + Mantine, with CSS Modules for limited custom styling, is the preferred stack. Source and agent work remain in WSL. Install necessary development tools in WSL; Windows additions should be small.
+Use bounded recovery without changing source/channel identity or overriding intent. Preserve gain/mute through recovery; silence is valid input. Disconnect/Quit cancels network recovery. Do not repeatedly rejoin after removal or permission rejection. Expose normal source failures on their cards and unconfirmed native cleanup as a real containment failure.
 
-## Proposed details requiring prototype evidence
+The default window is 440×640, minimum 420×420, resizable with remembered size. Sources and Destination have independently scrolling card lists and become two columns from 700 px. Identities open full-window pickers. Keep whole-card actions reachable in compact/error states; the document does not scroll. The shared mix has no separate Mix bar. Connection details replace the old Audio details sheet.
 
-- Show an input level meter and actionable error states; remember the last device/destination.
-- Keep connection state separate from capture health.
-- Bounded retries after 1, 3, and 10 seconds; same-device return grace period of 30 seconds. These are provisional design parameters.
-- Local pipeline p95 ≤60 ms, listener delay target ≤300 ms, investigate repeated >500 ms, mute submission ≤100 ms. These are provisional targets, not proven capabilities or signed-off release gates. Measurement boundaries are in `QUALITY.md`.
-- OS-backed token storage, settings file for ordinary preferences, no SQLite initially.
-- Start disconnected on a fresh app launch; automatic connection is outside the initial scope. Reconnection within an explicitly started session is a different behavior.
+Close keeps capture/streaming in the tray by default; Keep running in tray can make Close quit. Provide native Open, destination Mute, Disconnect and explicit Quit. Settings expose persisted Simple/History meters, Restore setup and Keep running in tray. UI meters/graphs use bounded measured telemetry, not fictional prototype values. Unknown gateway/profile/connection facts stay unavailable or omitted; no voice RTT, participant or listener-delivery claim is invented.
+
+## Confirmed experience and measured evidence
+
+Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay and working meters/tray behavior. The owner also reported retaining capture while routing original playback to an unused existing endpoint. This is feedback on those setups, not a controlled latency benchmark or a general independent-mute guarantee.
+
+Native fixtures establish selected process-tree/browser isolation, stereo/silence/lifecycle behavior, bounded queues and shared two-source mixing with source/destination gain/mute and a stable reader. Browser checks and independent review establish direct prototype adoption, card/sheet behavior and telemetry isolation. The task records retain exact checks/results. Neither category establishes live listening on the new mix or five-hour stability.
+
+## Acceptance targets requiring measurements
+
+- Local pipeline p95 ≤60 ms, listener delay target ≤300 ms, investigation of repeated >500 ms, and mute submission ≤100 ms remain proposed targets, not proven capabilities.
+- Validate sustained resources, broad recovery, physical endpoint removal, sleep/resume, native accessibility/display scaling and a separate five-hour normal session.
+- Keep measurement boundaries and uncertainty explicit; local queue occupancy or pre-Discord meters do not measure listener delay.
+
+[QUALITY.md](QUALITY.md) owns the applicable gates. The current executable is the test subject; integration results and remaining acceptance are recorded in STATE and EC-006/023–026.
 
 ## Future scope
 
-Multiple capture devices mixed into one shared mix; independent destinations including local playback and multiple Discord destinations. Investigate Discord's connection constraints and bot identities before promising simultaneous channels in one server.
+Destination fan-out may reuse the common native mix with independent bounded readers/output controls. One Discord bot can be in only one voice channel per server at a time; distinct same-server destinations require a reviewed identity/lifecycle design. Local playback, desktop/endpoint loopback, a custom virtual endpoint/driver, other receivers and later operating-system support are separate work. No inactive future-routing controls ship.
 
-Application capture has been added in the current epoch through an explicitly selected process tree. Future source types remain playback-device/desktop loopback or an Echocord virtual audio device. The virtual device is a separate driver project. Linux is a later platform; macOS is distant. Other receivers such as Mumble, TeamSpeak, or Zoom need individual feasibility research.
+## Historical MVP and superseded decisions
 
-No media player, browser embedding, sound pad, playlist manager, custom decoder engine, or complex routing-matrix UI.
+The first release proved `browser → VB-Cable playback endpoint → VB-Cable recording endpoint → Echocord → Discord bot → voice channel`, one input and one destination. It established WSL cross-builds, native dependencies, protected storage, tray ownership and the initial live route. Native application capture then removed the virtual-cable requirement for selected apps.
 
-## Delivery sequence
-
-1. Durable project context, task coordination, library survey, and WSL build setup.
-2. Cross-compile and run a minimal Windows dependency probe; verify actual native dependencies.
-3. Prove VB-Cable capture → Discord with bounded buffering and diagnostics.
-4. Add the minimal UI, persistence, tray behavior, and recovery.
-5. Failure-injection tests and a real five-hour session; revise provisional budgets using evidence.
-
-## Post-alpha priorities
-
-The current delivery epoch is authorized to ship a polished Windows build with application audio capture alongside the existing recording-device route. Capture must remain restricted to the explicitly selected application process tree. Source selection must explain browser-wide scope and original local playback behavior; app restart requires explicit reselection when identity changes. Independent local playback suppression is conditional on native evidence, not a promised control. Shared mixing and destination fan-out remain a subsequent iteration.
-
-User testing confirms the core live flow, perceived latency, and tray operation. The next iteration emphasizes a deliberately designed compact audio surface, responsive and visible connection progress, fast grouped room navigation, and production-facing settings/copy. Pending route edits must remain distinct from the active route and require explicit apply. Secure in-app bot setup and standard per-user app data replace dependence on development-only setup.
-
-Application process capture is implemented with recording inputs retained. Native session-mute tests also suppressed captured audio, so independent local suppression is not offered. Remaining research/design covers desktop capture, optional virtual endpoints and multiple sources into one common mix with multiple destinations. No per-source/per-destination routing matrix or advanced DSP is required. Respect established same-server Discord restrictions and review new local-playback semantics before promising them.
-
-Signal Bridge is implemented with compact polish; broader visual refinement follows real use. Keep clearly separated input/output areas, slim calibrated meters and useful diagnostics on the main surface beside the signal controls. Source/destination selection uses compact contextual popovers after owner feedback that the previous drawers were oversized. Preserve how the same structure grows to multiple inputs feeding one shared mix and multiple destinations, without implying independent routing matrices or shipping inactive future controls.
-
-The main surface should fit within the compact application window without internal scrolling, including pending/error controls. Source/target selection lists may scroll in their drawers. Prefer clear spatial grouping over literal graph boxes and connector lines.
-
-## Accepted mixing-era direction
-
-Owner testing confirms application-to-Discord capture and low perceived delay. Routing a captured app to an unused existing playback endpoint was also reported to avoid headphone playback while preserving capture; that is an owner-observed routing workaround, not an Echocord local-mute feature. A custom virtual interface/driver is postponed.
-
-Adopt the approved On Air Stack prototype directly. Cards have actionable identities and targeted edits; full-window sheets replace the compact popovers, and independently scrolling lists replace the fixed single-source surface. Remove global Apply, the queued-change band, the Mix bar and the old Audio details sheet. Source gain/mute/capture and destination volume/mute/connection are distinct. Adding a source starts capture and metering before Connect; live source changes keep the destination connected. First launch is empty. Restore setup reopens saved recording inputs, restores app cards with explicit safe reattachment, and restores rooms idle. No source fallback or ambiguous app match is permitted.
-
-The current delivery limit is eight source strips and one Discord destination. One common mix is the extension point for later bounded destination fan-out; no routing matrix or advanced DSP is required. Gain has dB precision and no boost. Network numbers/graphs use measured available telemetry and must not reproduce fictional prototype data. Native worker architecture changes are authorized and independently reviewed; the parent remains PCM-free.
+Earlier Signal Bridge releases used Mantine, compact contextual pickers, capture only after Connect and a draft/Apply & reconnect workflow. Owner feedback and the accepted On Air mixing iteration replace those decisions. Their original review/task records remain useful history; they are not instructions for current product behavior. Long-session and quantitative listener acceptance have not been closed by the redesign.

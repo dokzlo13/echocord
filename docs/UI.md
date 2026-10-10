@@ -1,34 +1,47 @@
 # Desktop control UI
 
-The production React/Mantine surface follows [DESIGN.md](../DESIGN.md). Audio source, shared mix and Discord destination have separate spatial regions; source and room selection use compact contextual popovers. A single selected application or recording input feeds one Discord destination. Slim input/post-gain meters and a bounded capture-queue readout sit on the main surface. A persistent transport exposes mute and connect/cancel/stop.
+The production React/TypeScript surface directly adopts the owner-approved On Air prototype's cards, sheets, combined fader, layout and styles; [DESIGN.md](../DESIGN.md) is the visual authority. It uses native buttons/ranges, local Sofia Sans/Sofia Sans Condensed fonts and Lucide icons. Prototype scenarios, navigation and fictional data are excluded from production.
 
-## Selection, setup and errors
+## Cards and immediate operations
 
-Picker choices create a local draft. Apply selection while disconnected saves the route; Apply & reconnect explicitly stops an active session, waits for observed cleanup, confirms selection steps and starts the requested route. Confirmed endpoint identity remains authoritative. Cancellation/partial failure can leave already-confirmed selections saved; the remaining draft is reconciled rather than presented as an atomic rollback. No default microphone, room or implicit connect fallback is chosen.
+Sources and Destination form independently scrolling vertical lists with content-weighted height. At 700 px wide they become side-by-side. Slot headers show source state summaries, numbered jump chips where useful and Add. Surviving source colours stay assigned. The current limit is eight sources and one destination; destination Add explains its limit.
 
-Applications and Recording inputs have separate searchable tabs. Source refresh uses its own native status/command, works while streaming or without a configured/reachable bot, and keeps cached rows visible on error. Application details distinguish process instances; unavailable/current markers survive exit, and restarted applications require explicit reselection. Main labels and error copy reflect the confirmed source kind. Browser overlap and original local playback are stated once in the picker; no independent local mute is shown. Same-name queued applications expose their instance details without parsing IDs.
+The source identity opens its picker. Adding a source starts native capture and metering before Discord Connect. Capture/Stop is independent of mix-only Mute and gain. Gain is −60…0 dB with no boost; Off is null on the wire. The combined native range changes by 0.5 dB with arrows, 6 dB with Page keys, and supports Home/End with dB accessible values. Source add/replace/stop/remove and ordinary source faults keep the destination connected. A source failure remains on its card. Duplicate/identifiable overlapping captures are rejected.
 
-Grouped room search uses server/category context and actual catalog icons with an initials fallback. Long identities remain available in the pickers. Popovers use content-sized height with bounded width/height, list-only scrolling, search autofocus and Escape/close focus return. Transport stays accessible, including a direct outside Mute/Stop click. Main states, including pending/errors, fit the checked 480x600 and 420x540 viewports without internal/document scrolling. Labelled queued-change rows distinguish confirmed and proposed route fields. Bot setup and complete error/details content retain secondary sheets.
+The destination identity opens the room picker. Connect/Cancel/Disconnect, Mute and volume apply to that destination. Muting preserves the connection. Connect is allowed with no capturing source, in which case the output is silent. Live removal asks for inline confirmation. Cleanup-incomplete exposes Retry disconnect and blocks another Connect. Room changes disclose a brief reconnect, including within the same server, and the badge follows actual leaving/joining state. Global Apply, queued changes, the Mix bar and old Audio details sheet are retired.
 
-First-run offers bot setup. Test & Save sends an ephemeral password-field value through a private command; Rust validates before current-user DPAPI persistence. The field clears on success or close. Errors never echo arbitrary secret-bearing exceptions or promise rollback after an unconfirmed response. Bot replacement is blocked during an active/pending session. Closing the app window keeps the session in the tray; Quit ends the application.
+Operation errors remain visible inside the active picker/settings sheet or affected card, preserving authoritative native phases and reachable Stop/Disconnect. A removal followed by a save failure is still reported after the card disappears. No arbitrary IPC or secret-bearing exception is echoed.
+
+## Pickers, setup and restore
+
+Full-window sheets below the title bar have back/title, search, bounded list scrolling and footer actions. Search receives focus; keyboard selection, Escape, focus trapping and return to the triggering identity are supported. The underlying control surface is inert.
+
+Applications and Inputs have separate tabs. Local refresh works without bot configuration/network; current, In mix and unavailable rows are explicit. Native instance details distinguish same-name applications. Browser capture includes the selected tree's tabs/windows; keep the call in another app. Original playback continues. Generic source-kind glyphs are used where no native executable icon exists. Room search groups actual servers/categories and uses supplied server icons or initials.
+
+First launch has empty cards and offers bot setup. Test & save sends an ephemeral password value through a private command; Rust validates before current-user DPAPI persistence. Tokens never return in snapshots. Bot replacement is disabled during a voice session. The bot sheet displays supplied name/ID/avatar and known server catalog data; permissions are checked on connection rather than invented as badges. Unknown profile/network details stay unavailable or omitted.
+
+Restore setup defaults on. Saved recording inputs reopen; restored application cards wait for explicit Capture with exact saved identity validation. An exited/restarted app requires refresh/reselection, never silent executable-name matching. The destination restores idle and never joins automatically. Source/destination gain/mute and settings persist. Simple/History, Restore setup and Keep running in tray are wired settings; unsupported preference controls are omitted.
 
 ## Control and telemetry boundary
 
-Rust model types generate `ui/src/generated.ts`. The frontend sends intentions and renders authoritative snapshots; it owns no audio buffers, retry budgets or process lifetimes.
+Rust generates `ui/src/generated.ts`. The frontend sends intentions and owns no samples, process lifetimes or retry policy.
 
-- `get_snapshot` returns ControlSnapshot; `echocord://snapshot` delivers newer revisions.
-- `dispatch` accepts `{ command }` for typed control intentions.
+- `get_snapshot` and `echocord://snapshot` provide authoritative control state/revisions.
+- `echocord://telemetry` carries bounded `MixTelemetry` scalars independently of control snapshots.
+- `dispatch` accepts `{ command }` for targeted card/settings intentions.
 - `configure_bot` accepts `{ token }`, validates/saves in Rust and returns no credential data.
 - `get_visibility` and `echocord://visibility` report native shown/non-minimized state.
 
-The adapter preserves a cached control ViewState across telemetry-only revisions while retaining the latest full snapshot for ordering and command confirmation. Capture phase/message changes still notify controls. A separate cached telemetry subscription carries current capture scalars and visibility; restart clears old-generation observations before fresh data arrives. Event/read races and late disposal callbacks are guarded.
+The shell filters scalar-only updates from control publication; the adapter preserves control-store identity across telemetry-only revisions and fences stale reads/disposed subscriptions. Refs/canvas paint meters at most 20 Hz, level history at 10 Hz and network values/plots at 2 Hz. Histories use bounded 60-second level and 2-minute network rings. Painting pauses for native/document hiding; visibility/gap resets avoid presenting old data as recent, and a new destination session resets its history. Reduced motion suppresses decorative transitions.
 
-Meters and diagnostics use DOM refs, not React state per observation. Visible meter updates are capped at 20Hz, queue text at 5Hz and counters at 4Hz, with no idle animation loop. Meter bars interpolate through CSS (80ms attack, 180ms release); numerical and semantic readings stay exact. Document/native hidden states cancel pending presentation work and transitions; return snaps to the latest observation. Source/session changes, unavailable levels and reduced motion also snap. A browser Profiler regression verifies that telemetry bursts do not commit the control surface, while ordinary controls still do.
+Source meters observe native post-gain peaks before source mute, so muted activity continues under hatching. Pre-gain source clipping and summed mix overload are separate native amber indications. Destination meters observe actual post-volume/mute reader handoff before Discord transport and are idle when not sending. The On air badge reports connection state, not listener receipt.
 
-Input peak is pre-gain. Mix peak is actual completed PCM reader handoff after gain/mute, before Discord, with bounded freshness. Neither measures received loudness or listener delay. Queue milliseconds represent buffered frames at the known engine rate, not total latency. Quiet readings below the visual scale retain their numeric value; only the native silence floor is labelled Silent.
+Gateway is measured Discord control-connection RTT, nullable until observed; it is not voice-server or listener delay. Buffer is local queued audio at the known 48 kHz rate. Drop and underrun counts are native counters. Graphs draw observed samples only. Listener counts, voice RTT, voice host/reconnect details and encryption negotiation are not simulated when unavailable.
 
-## Validation and scope
+## Window and acceptance
 
-EC-013/018/019/021/022 record measured checks and limitations. Browser coverage includes keyboard/focus, setup, drafts/cancel/partial failure, native SDK wiring, source kinds/refresh/restarts, compact containment and live resizing, text/DPR cases and telemetry rendering. Coordinator native smoke checks actual frontend IPC, independent local discovery, encrypted bot discovery when configured, window visibility and tray lifecycle. Native text scaling/accessibility, real FPS/CPU under a live session, application-to-Discord listening, listener latency and five-hour stability remain separate acceptance.
+The custom 36px title bar provides native drag, bot/settings, minimize and Close; there is no maximize. Default size is 440×640, minimum 420×420, with safe remembered size. Close keeps capture/streaming in the tray by default; disabling Keep running in tray makes it quit. Tray Open/Mute/Disconnect/Quit retain native ownership semantics.
 
-Development fixture mode is explicit and excluded from production builds. Browser tests use synthetic catalogs and measurements; no live credentials or services. Raw screenshots and test artifacts stay private, with redundant files removed at closeout. Vetted skill provenance remains in .agents/SOURCES.md; prototype research is historical evidence, not current visual authority.
+EC-024 records 45 passing browser/adapter/production-IPC checks and independent reference review at 440×640, 455×455, 420×420, 760×440 and 1000×640, including minimum-size History/errors. These checks establish browser behavior and faithful source adoption, not native display scaling, screen-reader behavior or live audio experience. EC-023–026 and [QUALITY.md](QUALITY.md) separate integrated Windows checks, automated native audio evidence and remaining owner/live acceptance.
+
+Fixture mode is development-only and excluded from release assets. Browser tests use synthetic catalogs and measurements without live credentials/services. Raw captures, profiles and reports remain private. Vetted skill provenance is in [.agents/SOURCES.md](../.agents/SOURCES.md); earlier rejected UI research is historical rather than current design authority.

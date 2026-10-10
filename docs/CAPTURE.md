@@ -1,8 +1,8 @@
 # Capture and routing feasibility
 
-Initial research checked 2026-10-09; native implementation and measurements followed in EC-017. Recording-input to Discord is owner-confirmed. Application capture has synthetic/native browser evidence; live Discord delivery and physical local audibility are not yet owner-confirmed. [BRIEF](BRIEF.md) defines delivery scope; [QUALITY](QUALITY.md) governs validation.
+Initial research was checked 2026-10-09; EC-017 implemented application capture and EC-023 added the shared mix. Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. Credential-free native fixtures establish isolation and bounded mixing behavior; live listening on the new mix, quantitative listener latency and long-session behavior remain separate acceptance. [BRIEF](BRIEF.md) defines delivery scope; [QUALITY](QUALITY.md) governs validation.
 
-The implemented native path captures one included application process tree while retaining CPAL recording inputs. It needs no virtual cable or custom driver. The measured session-mute path also suppresses captured samples, so this build offers no independent original-playback suppression. PCM and recovery stay inside the owned Rust engine.
+The implemented native path mixes up to eight explicitly included application process trees and/or CPAL recording inputs into one Discord destination. Capture runs in a persistent tokenless worker before and independently of Discord Connect. It needs no virtual cable or custom driver. The measured session-mute path also suppresses captured samples, so this build offers no independent original-playback suppression. PCM and capture/recovery stay in owned Rust workers. The parent and frontend never map or transport samples.
 
 | Capability | Decision and practical limit | Relative scope |
 | --- | --- | --- |
@@ -10,8 +10,8 @@ The implemented native path captures one included application process tree while
 | Application/process capture | Implemented with direct Windows bindings; native tests include a visible browser root and two tabs. The boundary is the included process tree, not an individual tab. [EC-017](../tasks/EC-017.md), [Microsoft sample][process-sample] | Implemented |
 | Desktop/endpoint capture | Assessed but not exposed: its whole mix includes Discord and notifications. CPAL 0.18.2 supports render-device loopback; current delivery prioritizes explicit app isolation. [CPAL source][cpal] | S–M future |
 | Independent local mute | Owned-session mute/volume changed captured samples. No suppression control ships; a future local monitor's mute would control only that monitor. [EC-017](../tasks/EC-017.md) | Measured limitation |
-| Multiple sources, one mix | One Rust mixing timeline with bounded queues, drift handling, clipping control and protection against overlapping captures. | L |
-| Multiple destinations | Fan out common PCM into independent bounded queues and output controls; enforce the guild-scoped bot constraint below. | M–L |
+| Multiple sources, one mix | Implemented: up to eight sources on a common 48 kHz stereo timeline, bounded nonblocking queues, per-source dB gain/mute, unity sum and clamp with overload indication. Duplicate/identifiable overlapping captures are rejected. No normalization or drift resampler. [EC-023](../tasks/EC-023.md) | Implemented |
+| Multiple destinations | Future fan-out from the common native bus with independent bounded readers/output controls; enforce the guild-scoped bot constraint below. Current destination count is one. | M–L future |
 | Own selectable endpoint | Separate driver project: install/admin access, signing, packaging and recovery. SysVAD simulates capture/loopback, not a finished virtual cable. [SysVAD][sysvad] | XL |
 
 S = bounded experiment; M = integrated feature; L = substantial pipeline work; XL = separate project. These are relative engineering judgments, not delivery commitments.
@@ -28,7 +28,7 @@ S = bounded experiment; M = integrated feature; L = substantial pipeline work; X
 
 Process-loopback activation has no original-playback suppression option. Muting Echocord's future monitor affects only its own playback; the source application can remain audible. [Activation parameters][activation]
 
-Owned native tests confirmed session volume/mute reaching captured samples: muting the selected root removed its signal, while the child's separate session stayed captured; quarter volume reduced captured root amplitude to approximately one quarter. Physical speaker audibility and endpoint mute were not tested. Independent suppression is therefore unavailable through the tested session path. The existing cable route without monitoring remains available. [EC-017](../tasks/EC-017.md)
+Owned native tests confirmed session volume/mute reaching captured samples: muting the selected root removed its signal, while the child's separate session stayed captured; quarter volume reduced captured root amplitude to approximately one quarter. Physical speaker audibility and endpoint mute were not tested. Independent suppression is therefore unavailable through the tested session path. The existing cable route without monitoring remains available. Owner feedback also reported preserving process capture while routing the source application to an unused existing playback endpoint to avoid headphone playback. This is an OS-routing workaround, not an Echocord suppression control or a controlled result for every device/application. [EC-017](../tasks/EC-017.md)
 
 The result agrees with the earlier external experiment. Endpoint mute also affects Discord when it shares that endpoint; it is not offered as per-application suppression. [Reported experiment][volume-report], [endpoint mute][endpoint-mute]
 
@@ -38,14 +38,18 @@ Protocol/library conclusion: one bot identity supports multiple guilds concurren
 
 ## Native results and remaining acceptance
 
-The implemented adapter feeds 48 kHz stereo float through the existing bounded reader and owned engine. WSL-built, credential-free Windows fixtures established:
+The source adapters feed bounded queues and a persistent 48 kHz stereo native mix. A disposable Discord worker consumes a shared-memory reader, with actual destination gain/mute metering at handoff. WSL-built, credential-free Windows fixtures established:
 
 1. Selected root/child stereo and 44.1/48 kHz rendering, with an unrelated positive-control source excluded. Selected silence stayed exactly zero while the unrelated source continued.
 2. Production discovery of a dedicated browser's visible root, capturing two distinguishable tabs and stereo without parent ascent or tab-isolation claims.
 3. Silence/resume, source exit, stale identity rejection, explicit restart selection, owned playback-endpoint switching, stop and bounded queue pressure.
 4. Controlled cancellation while activation completion remained pending, late-callback storage lifetime, sticky cleanup failure and preserved failure reporting during startup cancellation.
 
-The source UI uses the reviewed application/recording discriminator, opaque identity and independent local discovery. Source refresh never changes the selected route. Raw evidence stays private; [EC-017](../tasks/EC-017.md) records sanitized commands/results. Live Discord app delivery, physical audibility, OS endpoint removal, sleep/resume and long-session stability remain open. No desktop loopback mode, independent local mute, virtual endpoint or multi-source/fan-out feature is implied by these results.
+EC-023 additionally exercised independent 44.1/48 kHz application renderers, capture without credentials/destination, source/destination gain and mute, source failure with surviving audio, stop/start/replacement through one reader, bounded queues and observed worker exit. The native producer cursor measured approximately 48,000 stereo frames/s in a short warmed-up observation; this is producer timing, not a listener-latency or long-session measurement. [EC-023](../tasks/EC-023.md) retains exact commands/results.
+
+The UI uses generated source kinds/opaque identities and independent local discovery. Adding a source begins capture immediately; refresh does not silently change a selected source. Restored recordings reopen when restore is enabled; app cards require explicit exact-identity attachment and stale identities require selection. Normal source edits/faults do not leave Discord. Room changes currently briefly disconnect/reconnect even within one server.
+
+Raw evidence stays private. Live mixed delivery, controlled physical local-audibility/suppression measurements, OS endpoint removal, sleep/resume, broad resource/recovery behavior and long-session stability remain open. Desktop loopback, independent local mute, a custom virtual endpoint and destination fan-out are not shipped.
 
 [process-sample]: https://github.com/microsoft/Windows-classic-samples/blob/434f6002bdf9cf9829406c3ff2b33387982d6168/Samples/ApplicationLoopback/README.md
 [cpal]: https://github.com/RustAudio/cpal/blob/v0.18.2/src/host/wasapi/device.rs#L830

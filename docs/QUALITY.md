@@ -1,6 +1,6 @@
 # Quality gates
 
-## Before application scaffolding
+## Initial scaffolding gate (historical)
 
 Verify WSL builds a Windows executable, then verify the actual native audio dependencies and Tauri shell. Record commands, versions, target, outputs, and failures. A successful generic executable does not establish Songbird or Tauri compatibility.
 
@@ -8,13 +8,13 @@ Documentation validation is separate from future application gates. Do not add g
 
 ## Current executable gates
 
-`make check` runs production core formatting/Clippy/tests, generated-contract drift checks, UI lint/type/build/browser checks, and Windows application Clippy. `make app-smoke` rebuilds and verifies the native UI without joining voice. `make engine-smoke` checks actual worker startup with synthetic empty credentials. Retired dependency probes and draft prototypes are no longer active gates. Live delivery and five-hour stability require the explicit acceptance steps below.
+`make check` runs production core formatting/Clippy/tests, generated-contract drift checks, UI lint/type/build/browser checks, and Windows application Clippy. `make app-smoke` rebuilds and verifies native UI/IPC/tray without sending Connect or joining voice; normal startup restoration may reopen saved recording inputs. `make engine-smoke` checks actual worker startup with synthetic empty credentials. Retired dependency probes and draft prototypes are no longer active gates. Live delivery and five-hour stability require the explicit acceptance steps below.
 
-## Planned automated gates
+## Automated gates
 
 - Rust formatting and Clippy with warnings denied on supported targets; meaningful unit tests for buffer accounting, conversion, and recovery transitions.
 - Windows-target compilation of the actual adapters. WSL/Linux unit tests cover portable logic, not WASAPI integration.
-- TypeScript strict mode, lint, production frontend build, and tests for controls and failure states. Select one formatter/linter setup when scaffolding.
+- TypeScript strict mode, Biome lint, production frontend build and meaningful tests for controls/failure states.
 - One source of truth for Rust/TypeScript command/event shapes; prove binding generation or schema checking before claiming compile-time IPC safety.
 - Commit lockfiles and pin the validated Rust/tool versions. Review dependency features and avoid unnecessary playback/decoder/network-fetch features.
 - Independent review and applicable combined checks before closing implementation tasks.
@@ -23,15 +23,31 @@ UI tests should exercise user behavior with a mock control-plane adapter. Browse
 
 ## Visual acceptance
 
-Use a compact utility layout with clear source, destination, streaming state, and mute. Prefer Mantine components and a consistent theme over decorative dashboards. Review screenshots of disconnected, connecting, streaming, muted, missing-device, and error states. Check keyboard navigation, visible focus, labels, non-color status cues, and Windows display scaling. A typecheck cannot certify a good layout. Keep raw screenshots and host settings in ignored `.trash/`; publish only sanitized results. Avoid brittle screenshots of live meters. Apply vetted upstream skills when available.
+The owner-approved On Air Stack is the current authority in [DESIGN.md](../DESIGN.md). Adopt its actual components/styles; do not reopen design selection or prefer a replacement component-library theme. Keep local licensed fonts/icons, native controls and the compact custom title bar. No prototype navigation, simulated source activity or fictional network/profile values ship.
+
+Review first-run, restored preflight, capturing before Connect, joining/cancel/recovering, live/muted, source faults, operation errors, cleanup-incomplete and live removal. Test multiple sources and the enforced single destination, targeted edits with no global Apply, full-window picker/settings/bot/connection sheets, independent list scrolling and truthful unavailable metrics.
+
+Use 440×640 (default), 455×455, 420×420 (minimum), 760×440 and 1000×640, with Simple and History cases where relevant. Preserve whole-card actions and separate list scrolling without document overflow; include compact faults/operation errors and long/Cyrillic identities. Check source colour numbering, non-colour state cues, dB arrows/Page/Home/End, visible focus, picker selection, sheet trapping/Escape/return and reduced motion. Compare a bounded screenshot set against the accepted reference, batch corrections, and retain valid final captures privately.
+
+Browser/SDK mocks do not prove native window behavior. Check actual drag, resize, minimize, close-to-tray, disabled-tray Close, reopen/Quit and safe remembered size at Windows 100%, 125% and 150% display scaling. The integrated epoch has measured geometry/tray/visibility and tray-disabled exit at 125% (DPI 120), including logical 420×420 and 760×440 plus size restoration. This does not close 100%/150%, native screen-reader/text-scaling or live-resource acceptance. Final native evidence is recorded in EC-026/STATE.
+
+A typecheck cannot certify the layout, and display scaling is distinct from browser DPR or Windows text scaling. Avoid brittle meter-value screenshots. Keep raw captures, profiles and host settings ignored; publish sanitized outcomes. Applicable vetted skills and their licenses/pins are in [.agents/SOURCES.md](../.agents/SOURCES.md).
 
 ## Audio acceptance experiment
 
 ### Application-capture gate
 
-Before shipping EC-017, review the direct Windows adapter's process identity, activation pointer lifetime, COM ownership, packet release, cancellation during opening/running, and terminal cleanup behavior. Native tests use only owned synthetic sources and no Discord credentials: distinguish selected root/children from unrelated audio; verify stereo, silence/resume, supported render rates, stale identity/source exit, bounded queue behavior and cancellation. Check browser scope separately with an isolated test profile when available. A silent stream is valid input; an exited process never triggers capture of a replacement PID or a broader source.
+For capture changes, preserve EC-017's reviewed process identity, activation pointer lifetime, COM ownership, packet release, cancellation during opening/running, and terminal cleanup behavior. Native tests use only owned synthetic sources and no Discord credentials: distinguish selected root/children from unrelated audio; verify stereo, silence/resume, supported render rates, stale identity/source exit, bounded queue behavior and cancellation. Check browser scope separately with an isolated test profile when available. A silent stream is valid input; an exited process never triggers capture of a replacement PID or a broader source.
 
-Local application/session mute effects and original playback audibility are separate evidence. Do not infer independent local suppression from successful process capture. Endpoint changes, protected/exclusive audio, sleep/resume, audible Discord delivery and long-session stability remain explicit acceptance boundaries unless actually exercised. Browser tests cover source-kind selection, source refresh without credentials/network, staging/apply/discard, unavailable sources, compact pickers, focus/keyboard, and preservation of control/telemetry isolation. Native shell checks still cover WebView/tray behavior.
+Local application/session mute effects and original playback audibility are separate evidence. Do not infer independent local suppression from successful process capture. Endpoint changes, protected/exclusive audio, sleep/resume, audible Discord delivery and long-session stability remain explicit acceptance boundaries unless actually exercised. Browser tests cover source-kind selection, refresh without credentials/network, immediate add/replace/start/stop/mute/gain, safe restore/reselection, unavailable sources, full-window pickers, rejected operations, focus/keyboard and control/telemetry isolation. Native shell checks still cover WebView/tray behavior.
+
+### Shared-mix and lifecycle gate
+
+Preserve the persistent tokenless audio worker and disposable Discord worker, parent/frontend PCM exclusion, bounded shared-memory reader and narrow inherited-handle ownership. Portable tests must cover precise dB gain, source/destination mute, unity summation/clamping and overload telemetry, overlap/capacity reservations, stale-result fencing, migration/restore and worker failure/cleanup. Native tests require owned unrelated positive controls, multiple application sources, silence/resume, per-source stop/replace/exit while the stable reader survives, independent output controls and observed shutdown. Capture without credentials or a destination must drain normally; source changes must not request bot leave.
+
+Measure the producer cursor against real elapsed time after warm-up, rather than a reader's synthesized silence. Short native two-source measurements are recorded in EC-023; they do not prove multihour clock alignment or live Discord delivery. There is no drift resampler or automatic normalization. Mix overload must be observed before clamp and remain visible after destination attenuation. A cleanup containment failure may stop the audio worker; never claim every fatal native failure affects only one source.
+
+Prove destination Cancel/Disconnect during startup/recovery, cleanup-incomplete blocking, repeated idempotent Capture/selection and rejected-worker operations without phantom cards. Room changes must disclose and follow actual reconnect stages, including same-server changes. No default-source or ambiguous restored-app attachment is allowed.
 
 ### Pipeline and session targets
 
@@ -46,7 +62,7 @@ Proposed targets, to calibrate against the first working prototype:
 
 Measure queue occupancy/age, underruns, overruns, stale-frame drops, reconnect attempts, CPU, and memory including WebView processes. Keep queues bounded. Sample clocks can drift even with one capture device against a network sender; investigate clock correction before increasing buffers.
 
-Run silence/resume, 44.1/48 kHz inputs, stereo channel checks, and supported-format conversion. Keep a listener observation log and correlate problems with diagnostics. Do not promise zero network loss or detect every audible issue automatically.
+Run silence/resume, stereo and supported-format checks. Application fixtures may render at 44.1/48 kHz while process capture supplies 48 kHz stereo. Recording inputs currently require 48 kHz mono/stereo; unsupported recording formats must be rejected rather than silently converted or replaced. Keep a listener observation log and correlate problems with diagnostics. Do not promise zero network loss or detect every audible issue automatically.
 
 Separate the stable five-hour run from deliberate network/device/permission failure tests. Verify retry exhaustion, preserving mute, explicit disconnect during recovery, device return, sleep/resume, tray reopening, and clean Quit. A silent input must not trigger reconnects.
 
@@ -54,8 +70,8 @@ Resources are a practical guardrail: no unexplained sustained load, unbounded qu
 
 ## Live visualization budget
 
-Meters are a telemetry surface, not whole-application state. Keep audio callbacks and PCM in Rust. Publish bounded scalar observations independently of audio sample rate; the current engine/control telemetry cadence is approximately 10 Hz. The redesigned UI must isolate those observations from top-level React controls, selection lists and settings renders. Start with lightweight DOM/CSS; add Canvas only when a concrete history/plot warrants it. No charting/WebGL dependency is required for simple bars.
+Audio callbacks and PCM stay in Rust. Scalar telemetry is approximately 10 Hz and has its own native event; full control snapshots publish only when retained control state changes. React controls, catalogs and settings must stay stable during scalar bursts. Use lightweight DOM/CSS for meters and bounded canvas histories/plots, with no chart/WebGL dependency required.
 
-Target a capped 15–30 visual updates per second while visible, with bounded smoothing/history and no invented measurements. Suspend visualization work when hidden/minimized; verify the actual Tauri/WebView visibility path as well as browser behavior. Control state changes and mute/cancel must remain responsive. A focused render-count/telemetry-burst test should demonstrate that metering does not rerender the whole control surface; a visibility test should demonstrate paused visual work and a safe refresh on return.
+The implementation caps meter paints at 20 Hz, level history at 10 Hz and network readouts/plots at 2 Hz. Stop scheduled visual work for both document hiding and native minimize/tray hiding; verify the real Tauri/WebView visibility path as well as browser behavior. On return, refresh scalars and clear/gap stale history rather than showing old samples as recent. Reset destination-session history, bound rings and pending fader work, preserve reduced motion, and keep commands responsive. Profiler/burst, visibility and lifecycle regressions must test these boundaries.
 
-Diagnostic values must name their measurement boundary. Capture queue occupancy can be expressed in frames or milliseconds at the known sample rate; it is not local total latency or listener delay. A pre-Discord output meter must observe samples after gain/mute at the native reader boundary, or be explicitly identified as derived. Do not fabricate latency, spectrum, delivery health or sample-rate measurements for visual appeal. The complete pipeline and five-hour resource checks remain separate acceptance.
+Source levels are native post-gain peaks before source mute, so muted activity continues visibly with hatching. Pre-gain source clipping and summed mix overload are separate observations. Destination levels must be actual post-volume/mute native handoff, idle when not sending; they do not confirm listener receipt. Queue occupancy in frames or milliseconds at 48 kHz is local buffered audio, not total latency. Gateway RTT must be measured, nullable and labelled gateway; it is not voice RTT. Do not fabricate listener counts, permissions, encryption negotiation, latency, spectrum or historical values. The five-hour pipeline/resource gate remains separate acceptance.

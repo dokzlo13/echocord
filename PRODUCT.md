@@ -6,30 +6,38 @@
 
 web
 
-The rendering surface is a web UI inside a native Windows 11 Tauri application, not a hosted website. Windows desktop conventions, keyboard access, compact sizing, and display scaling apply.
+The rendering surface is a web UI inside a native Windows Tauri application, not a hosted website. Desktop keyboard access, compact sizing, native window/tray behavior and display scaling apply.
 
 ## Users and purpose
 
-People running tabletop sessions or other voice meetings route selected local audio into a Discord voice channel while using their normal browser/player. Echocord is an audio bridge and compact control surface, not a media player or soundboard.
+People running tabletop sessions or other voice meetings mix selected local audio into a Discord voice channel while using their normal browser/player. Echocord is an audio bridge and compact control surface, not a media player or soundboard.
 
 ## Operating context
 
-Current flow: one explicitly selected application process tree or Windows recording endpoint feeds one Discord bot/channel. Capture and joining start only on explicit action. The recording route's audible delivery, perceived delay, tray behavior and meters were confirmed in owner testing. Application capture has native synthetic/browser evidence and awaits owner listening feedback; five-hour stability is not established.
+Up to eight explicitly selected application process trees or recording endpoints feed one common 48 kHz stereo mix and one Discord destination. Adding a source starts capture and metering without credentials or a voice connection. Source Capture/Stop, gain and mix-only Mute are independent of destination Connect/Cancel/Disconnect, volume and Mute. Edits are immediate and targeted; source changes do not leave the room. A room change currently disposes and reconnects the destination, even within one server.
+
+Owner testing confirmed the earlier recording route and application-to-Discord delivery with low perceived delay. Native fixtures cover isolation and shared-mix behavior. Those results do not establish live mixed delivery, numeric listener latency, resource behavior over hours or five-hour stability.
 
 ## Capabilities and constraints
 
-Rust owns audio, recovery, and credentials; React/TypeScript/Mantine owns controls. Development/builds remain in WSL with small Windows runtime needs. Preserve input isolation, bounded recovery, reliable cancel/quit, and a visible distinction between selected settings and applied routing. No silent fallback to a microphone or another destination.
+Rust owns PCM, mixing, recovery and credentials. A persistent tokenless audio worker and disposable Discord worker have separate native lifetimes; the parent and frontend never handle sample buffers. React/TypeScript with native controls, local Sofia Sans fonts and Lucide icons adopts the actual approved On Air prototype. Development and builds remain in WSL with small Windows runtime requirements.
 
-Settings use platform-standard local data and current-user encrypted credentials. Local source discovery is independent of Discord configuration/network. Application capture includes child processes and can include other browser tabs/windows; keep the voice call in another app. Original playback continues, and no independent local-mute control is offered because tested session mute also silenced captured samples. Exited/restarted applications require explicit reselection, and application selection resets on a fresh Echocord launch. Desktop loopback, a virtual endpoint, multiple inputs and multiple destinations remain future capabilities.
+First launch has empty source/destination slots. Restore setup is enabled by default: saved recording inputs reopen, application cards wait for explicit Capture, and the destination returns idle. App attachment validates the exact saved process identity; an exited/restarted app requires refresh and selection. No executable-name match, default microphone or alternate room is chosen silently. Disabling restore starts with empty cards. Gain/mute and ordinary settings persist, protected credentials remain backend-owned, and window size is remembered separately.
+
+Source discovery is independent of Discord configuration/network. Application capture includes child processes and can include other browser tabs/windows; keep the voice call in another app. Original playback continues. Tested Windows session mute also silenced captured samples, so no independent local-mute control is offered. No local monitor, desktop loopback or owned virtual driver ships.
+
+Settings expose Simple/History meters, Restore setup and Keep running in tray. Closing keeps capture/streaming running by default; disabling the tray setting makes Close quit. The tray provides Open, destination Mute, Disconnect and Quit. Only explicit Connect joins Discord; restoring a room or saving a bot token never joins it.
 
 ## Product principles
 
-- Make source, destination, activity, and connection progress immediately understandable.
-- Keep essential audio controls available during slow operations.
-- Ship coherent user-facing iterations without prototype/debug/test instructions in the product.
-- Use deliberate design and review for substantial feature sets.
-- Keep personal information and raw evidence out of version control.
+- Make source activity, destination state and connection progress immediately understandable.
+- Keep source Stop and destination Cancel/Disconnect reachable during failures and slow operations.
+- Use measured telemetry with clear boundaries; unknown values stay unavailable.
+- Ship coherent product controls without prototype scenario navigation or simulated measurements.
+- Use design and independent review for substantial changes; keep private evidence out of Git.
 
-## Open decisions
+## Open decisions and remaining acceptance
 
-The implemented Signal Bridge surface uses compact contextual source/room pickers, labelled queued changes, slim measured meters and main-surface diagnostics. Broader visual refinement follows real use. The next major architecture review is multiple sources feeding one shared mix and destination fan-out; one Discord bot can target only one voice channel per server at a time. A virtual driver, other receivers and public distribution remain separate work. Owner app-capture feedback, recovery/long-session checks and native accessibility/resource measurements are still open.
+On Air Stack is the accepted and implemented surface: actionable cards, independently scrolling lists, full-window sheets and combined dB faders/meters. Global Apply, the queued-change band, Mix bar and old Audio details sheet are retired. It defaults to 440×640, with a 420×420 minimum and two columns from 700 px.
+
+Destination fan-out remains future work; one bot can occupy only one voice channel per server at a time. A virtual driver, other receivers and public distribution are separate work. Native accessibility/display scaling, broad recovery/resource checks, live mixed delivery and long-session acceptance remain explicit gates rather than inferred capabilities.

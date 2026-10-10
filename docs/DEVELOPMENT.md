@@ -33,17 +33,17 @@ make check
 | --- | --- |
 | `make build` | Build the Windows app in WSL |
 | `make check` | Production Rust, bindings, frontend, and Windows checks |
-| `make app-run` | Run the built app, initially disconnected |
+| `make app-run` | Run the built app; restore capture preferences but never auto-connect Discord |
 | `make app-smoke` | Build and verify native UI/tray/IPC without voice joining |
 | `make engine-smoke` | Exercise owned worker startup with synthetic credentials |
 | `make ui-dev` | Local fixture preview for development |
 | `make bindings` | Regenerate the TypeScript control contract |
 
-`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. Browser tests use fixtures. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
+`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic worker-startup checks. App smoke sends no Connect and joins no voice, but normal startup restoration may capture saved recording inputs. Browser tests use fixtures. The frontend uses the adopted On Air source with native controls and self-hosted fonts; Mantine is retired. Worker previews/tests must use distinct ports, and owned previews stop before cleanup. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
 
-Production regression helpers remain available for focused native diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; initial audible Discord delivery and perceived latency were user-confirmed; measured listener latency and long sessions remain open in [acceptance](FIRST-TEST.md).
+Production regression helpers remain available for focused native diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; earlier recording and application-to-Discord delivery with low perceived delay were owner-confirmed; live mixed delivery, measured listener latency and long sessions remain open in [acceptance](FIRST-TEST.md).
 
-The existing `capture-probe` also supports `--application-suite` for owned synthetic application/child/isolation tests; build it with `bash scripts/build-native-tool.sh capture-probe`. Its `--browser-suite` requires an explicitly dedicated disposable browser profile and two synthetic tone URLs; see EC-017 for the measurement boundaries. These are developer regression helpers, not app setup prerequisites. Keep raw output/profile data ignored and never use a personal browser profile for a fixture.
+The `capture-probe` supports `--application-suite` for owned synthetic application/child/isolation checks and `--mixing-suite` for credential-free two-source/common-reader checks; build it with `bash scripts/build-native-tool.sh capture-probe`. Its `--browser-suite` requires an explicitly dedicated disposable browser profile and two synthetic tone URLs; see EC-017 for the measurement boundaries. These are developer regression helpers, not app setup prerequisites. Keep raw output/profile data ignored and never use a personal browser profile for a fixture.
 
 Concurrent worktrees should use separate portable Cargo target directories. Sharing unqualified executable outputs such as `target/debug/export-bindings` can run a different branch's cached generator even when Cargo considers the current branch fresh. Final integrated checks use the normal commands after worker builds have stopped.
 
@@ -53,7 +53,7 @@ Sources: [cargo-xwin](https://github.com/rust-cross/cargo-xwin), [Tauri Windows 
 
 ## Runtime storage
 
-A normal executable launch uses `ProjectDirs` local application data: `%LOCALAPPDATA%\Echocord\data` on Windows. The token is encrypted for the current Windows user with DPAPI; settings are ordinary JSON. In-app Test & Save validates the token before encrypted persistence and never joins voice. Rust reads tokens; frontend snapshots contain no secret.
+A normal executable launch uses `ProjectDirs` local application data: `%LOCALAPPDATA%\Echocord\data` on Windows. The token is encrypted for the current Windows user with DPAPI; versioned ordinary JSON stores source/destination cards, dB gain/mute and app preferences. The shell remembers safe window size in a separate sidecar. Prior recording/destination/output preferences migrate; future-version files are preserved. In-app Test & Save validates the token before encrypted persistence and never joins voice. Rust reads tokens; frontend snapshots contain no secret. Restore setup defaults on: recording cards reopen, app cards wait for explicit exact-identity attachment, and rooms stay idle. Turning restore off starts with empty cards. A source added through the picker captures before any destination connects. Keep running in tray defaults on; turning it off makes Close quit.
 
 `make app-run` uses those defaults. Set `ECHOCORD_DATA_DIR` to an ignored WSL directory for isolated development storage. `ECHOCORD_TOKEN_FILE` explicitly overrides the encrypted credential destination. Plaintext credential files are not accepted. The executable also accepts `--data-dir`, `--token-file`, and `--settings-file`. Keep all private paths and fixtures outside Git. Tests and probes use explicit private directories and synthetic values.
 

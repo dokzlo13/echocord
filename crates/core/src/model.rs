@@ -321,9 +321,55 @@ pub struct MixTelemetry {
     pub gateway_ping_ms: Option<f32>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum GatewayPhase {
+    #[default]
+    Disconnected,
+    Connecting,
+    Connected,
+    Recovering,
+    Disconnecting,
+    CleanupIncomplete,
+    Error,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewaySnapshot {
+    pub phase: GatewayPhase,
+    /// Application-owned gateway lifetime, never Discord's private session ID.
+    pub generation: u32,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReservationPhase {
+    Selected,
+    Joining,
+    Connected,
+    Leaving,
+    Blocked,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerReservation {
+    pub server_id: String,
+    pub channel_id: String,
+    pub destination_id: String,
+    pub session_id: u32,
+    pub phase: ReservationPhase,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlSnapshot {
+    #[serde(default)]
+    pub gateway: GatewaySnapshot,
+    #[serde(default)]
+    pub server_reservations: Vec<ServerReservation>,
     #[serde(default)]
     pub playback_devices: Vec<PlaybackDevice>,
     #[serde(default)]
@@ -354,6 +400,8 @@ pub struct ControlSnapshot {
 /// requires new snapshot/capture fields to be classified explicitly.
 #[derive(PartialEq)]
 struct ControlEventKey<'a> {
+    gateway: &'a GatewaySnapshot,
+    server_reservations: &'a [ServerReservation],
     playback_devices: &'a [PlaybackDevice],
     playback_discovery: &'a Discovery,
     session_id: u32,
@@ -375,6 +423,8 @@ struct ControlEventKey<'a> {
 impl ControlSnapshot {
     fn control_event_key(&self) -> ControlEventKey<'_> {
         let Self {
+            gateway,
+            server_reservations,
             playback_devices,
             playback_discovery,
             revision: _,
@@ -403,6 +453,8 @@ impl ControlSnapshot {
                 },
         } = self;
         ControlEventKey {
+            gateway,
+            server_reservations,
             playback_devices,
             playback_discovery,
             session_id: *session_id,
@@ -432,6 +484,8 @@ impl ControlSnapshot {
 impl Default for ControlSnapshot {
     fn default() -> Self {
         Self {
+            gateway: GatewaySnapshot::default(),
+            server_reservations: Vec::new(),
             playback_devices: Vec::new(),
             playback_discovery: Discovery::Idle,
             inputs: Vec::new(),
@@ -591,6 +645,10 @@ pub fn typescript_contract() -> String {
         CapturePhase::decl(&config),
         Capture::decl(&config),
         Output::decl(&config),
+        GatewayPhase::decl(&config),
+        GatewaySnapshot::decl(&config),
+        ReservationPhase::decl(&config),
+        ServerReservation::decl(&config),
         ControlSnapshot::decl(&config),
         ControlCommand::decl(&config),
     ];

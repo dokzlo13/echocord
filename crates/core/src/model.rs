@@ -220,9 +220,46 @@ pub struct InputStrip {
     pub restored: bool,
 }
 
+pub const MAX_PLAYBACK_DESTINATIONS: usize = 3;
+pub const MAX_DESTINATIONS: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum DestinationKind {
+    #[default]
+    Discord,
+    Playback,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackDevice {
+    pub id: String,
+    pub name: String,
+    pub available: bool,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationTelemetry {
+    pub destination_id: String,
+    pub level_dbfs: Option<f32>,
+    pub queued_frames: u32,
+    pub dropped_frames: u32,
+    pub underrun_frames: u32,
+    pub gateway_ping_ms: Option<f32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DestinationStrip {
+    #[serde(default)]
+    pub kind: DestinationKind,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub destination_id: String,
     pub server_id: String,
     pub channel_id: String,
@@ -269,6 +306,8 @@ pub struct InputTelemetry {
 #[serde(rename_all = "camelCase")]
 pub struct MixTelemetry {
     #[serde(default)]
+    pub destinations: Vec<DestinationTelemetry>,
+    #[serde(default)]
     pub mix_pre_clip: bool,
     pub inputs: Vec<InputTelemetry>,
     pub output_level_dbfs: Option<f32>,
@@ -282,6 +321,10 @@ pub struct MixTelemetry {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlSnapshot {
+    #[serde(default)]
+    pub playback_devices: Vec<PlaybackDevice>,
+    #[serde(default)]
+    pub playback_discovery: Discovery,
     #[serde(default)]
     pub inputs: Vec<InputStrip>,
     #[serde(default)]
@@ -308,6 +351,8 @@ pub struct ControlSnapshot {
 /// requires new snapshot/capture fields to be classified explicitly.
 #[derive(PartialEq)]
 struct ControlEventKey<'a> {
+    playback_devices: &'a [PlaybackDevice],
+    playback_discovery: &'a Discovery,
     session_id: u32,
     inputs: &'a [InputStrip],
     destinations: &'a [DestinationStrip],
@@ -327,6 +372,8 @@ struct ControlEventKey<'a> {
 impl ControlSnapshot {
     fn control_event_key(&self) -> ControlEventKey<'_> {
         let Self {
+            playback_devices,
+            playback_discovery,
             revision: _,
             telemetry: _,
             session_id,
@@ -353,6 +400,8 @@ impl ControlSnapshot {
                 },
         } = self;
         ControlEventKey {
+            playback_devices,
+            playback_discovery,
             session_id: *session_id,
             inputs,
             destinations,
@@ -380,6 +429,8 @@ impl ControlSnapshot {
 impl Default for ControlSnapshot {
     fn default() -> Self {
         Self {
+            playback_devices: Vec::new(),
+            playback_discovery: Discovery::Idle,
             inputs: Vec::new(),
             destinations: Vec::new(),
             settings: AppSettings::default(),
@@ -424,6 +475,18 @@ impl Default for ControlSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum ControlCommand {
+    RefreshPlaybackDevices,
+    AddPlaybackDestination {
+        device_id: String,
+    },
+    ChangePlaybackDestination {
+        destination_id: String,
+        device_id: String,
+    },
+    SetAllDestinationsMuted {
+        muted: bool,
+    },
+    DisconnectAllDestinations,
     AddSource {
         source_id: String,
     },
@@ -502,6 +565,9 @@ pub fn typescript_contract() -> String {
     let declarations = [
         InputPhase::decl(&config),
         InputStrip::decl(&config),
+        DestinationKind::decl(&config),
+        PlaybackDevice::decl(&config),
+        DestinationTelemetry::decl(&config),
         DestinationStrip::decl(&config),
         AppSettings::decl(&config),
         MeterStyle::decl(&config),
@@ -556,6 +622,7 @@ mod tests {
             measured.capture.underrun_frames = index * 2;
             measured.capture.queued_frames = index % 1920;
             measured.telemetry = MixTelemetry {
+                destinations: Vec::new(),
                 mix_pre_clip: true,
                 inputs: vec![InputTelemetry {
                     strip_id: "input-1".into(),
@@ -627,6 +694,9 @@ mod tests {
             },
             |s| {
                 s.destinations.push(DestinationStrip {
+                    kind: DestinationKind::Discord,
+                    device_id: None,
+                    display_name: None,
                     destination_id: "discord-1".into(),
                     server_id: "1".into(),
                     channel_id: "2".into(),

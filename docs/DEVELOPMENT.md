@@ -43,6 +43,10 @@ make check
 
 Production regression helpers remain available for focused native diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; initial audible Discord delivery and perceived latency were user-confirmed; measured listener latency and long sessions remain open in [acceptance](FIRST-TEST.md).
 
+The existing `capture-probe` also supports `--application-suite` for owned synthetic application/child/isolation tests; build it with `bash scripts/build-native-tool.sh capture-probe`. Its `--browser-suite` requires an explicitly dedicated disposable browser profile and two synthetic tone URLs; see EC-017 for the measurement boundaries. These are developer regression helpers, not app setup prerequisites. Keep raw output/profile data ignored and never use a personal browser profile for a fixture.
+
+Concurrent worktrees should use separate portable Cargo target directories. Sharing unqualified executable outputs such as `target/debug/export-bindings` can run a different branch's cached generator even when Cargo considers the current branch fresh. Final integrated checks use the normal commands after worker builds have stopped.
+
 cargo-xwin documents cross-compilation and WSL execution, including CMake/Ninja support. Tauri documents a cross-compilation route but cautions that it is less tested than native builds. This project investigates that route to keep development in WSL. Start with an executable; NSIS packaging can follow, and MSI packaging is not a prerequisite.
 
 Sources: [cargo-xwin](https://github.com/rust-cross/cargo-xwin), [Tauri Windows build](https://v2.tauri.app/distribute/windows-installer/), [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).

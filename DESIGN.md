@@ -20,6 +20,6 @@ The entire main surface, including pending/error actions, fits 480Ã—600 and 420Ã
 
 ## Review and validation seam
 
-Owner feedback in the current epoch identifies the near-full-width selection drawers as oversized for their purpose. Their containment and size are under bounded EC-021 review; narrower panels, anchored pickers and separate windows are proposals pending research and rendered review. Keep essential transport accessible while resolving this correction. The remaining visual contract stays in force.
+Owner feedback in the current epoch identifies the near-full-width selection drawers as oversized for their purpose. EC-021's research and rendered review select compact anchored nonmodal pickers for source/room selection. Their width and height are bounded, short lists size to content, only results scroll, and essential transport remains exposed and usable. Implement keyboard dismissal/focus return and direct Mute/Stop access; separate native picker windows were not justified by the compared flows. This reviewed change is under implementation; the remaining visual contract stays in force.
 
 Owner accepted the private refined Signal Bridge direction before implementation. This document is the implementation authority. Production screenshots, behavior, keyboard, fit, rendering and visibility evidence are collected privately; sanitized results and remaining native acceptance are recorded in EC-013. Coordinator owns independent review, native shell integration and final acceptance.

@@ -29,6 +29,12 @@ pub fn dispatch() -> Option<ProbeResult<()>> {
         Some("--application-suite") if args.len() == 1 => Some(suite()),
         Some("--mixing-suite") if args.len() == 1 => Some(mixing_suite()),
         Some("--playback-suite") if args.len() == 2 => Some(playback_suite(&args[1])),
+        Some("--duplex-inventory") if args.len() == 1 => {
+            Some(duplex_inventory().and_then(|inventory| {
+                println!("{}", serde_json::to_string_pretty(&inventory)?);
+                Ok(())
+            }))
+        }
         Some("--playback-list") if args.len() == 1 => Some(
             echocord_core::playback::inspect_devices().and_then(|inventory| {
                 println!("{}", serde_json::to_string_pretty(&inventory)?);
@@ -992,4 +998,95 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         started.observation.callback_frames
     );
     Ok(())
+}
+
+fn duplex_inventory() -> ProbeResult<serde_json::Value> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
+    struct Com;
+    impl Drop for Com {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+    let _com = Com;
+    let string = |raw: windows::core::PWSTR| -> ProbeResult<String> {
+        let value = unsafe { raw.to_string() };
+        unsafe {
+            CoTaskMemFree(Some(raw.0.cast()));
+        }
+        Ok(value?)
+    };
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }?;
+    let mut defaults = Vec::new();
+    for flow in [eRender, eCapture] {
+        for (role, kind) in [
+            ("console", eConsole),
+            ("multimedia", eMultimedia),
+            ("communications", eCommunications),
+        ] {
+            let device = unsafe { enumerator.GetDefaultAudioEndpoint(flow, kind) }?;
+            defaults.push((role, string(unsafe { device.GetId() }?)?));
+        }
+    }
+    let host = cpal::host_from_id(cpal::HostId::Wasapi)?;
+    let descriptions: std::collections::HashMap<_, _> = host
+        .devices()?
+        .filter_map(|device| {
+            Some((
+                device.id().ok()?.id().to_owned(),
+                device.description().ok()?.name().to_owned(),
+            ))
+        })
+        .collect();
+    let endpoints = unsafe { enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE) }?;
+    let mut rows = Vec::new();
+    for index in 0..unsafe { endpoints.GetCount() }? {
+        let device = unsafe { endpoints.Item(index) }?;
+        let id = string(unsafe { device.GetId() }?)?;
+        let endpoint: IMMEndpoint = device.cast()?;
+        let flow = unsafe { endpoint.GetDataFlow() }?;
+        let manager: IAudioSessionManager2 = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+        let sessions = unsafe { manager.GetSessionEnumerator() }?;
+        let mut active = Vec::new();
+        for session_index in 0..unsafe { sessions.GetCount() }? {
+            let session = unsafe { sessions.GetSession(session_index) }?;
+            if unsafe { session.GetState() }? == AudioSessionStateActive {
+                let identity: IAudioSessionControl2 = session.cast()?;
+                active.push(unsafe { identity.GetProcessId() }?);
+            }
+        }
+        let container_id = (|| -> ProbeResult<String> {
+            use windows::Win32::{
+                Devices::Properties::DEVPKEY_Device_ContainerId,
+                System::Com::{
+                    STGM_READ,
+                    StructuredStorage::{PropVariantClear, PropVariantToStringAlloc},
+                },
+            };
+            let properties = unsafe { device.OpenPropertyStore(STGM_READ) }?;
+            let mut value = unsafe {
+                properties.GetValue(&DEVPKEY_Device_ContainerId as *const _ as *const _)
+            }?;
+            let text = unsafe { PropVariantToStringAlloc(&value) }
+                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })
+                .and_then(string);
+            unsafe { PropVariantClear(&mut value) }.ok();
+            text
+        })()
+        .ok();
+        let topology: Result<IDeviceTopology, _> = unsafe { device.Activate(CLSCTX_ALL, None) };
+        let mut adapter_ids = Vec::new();
+        if let Ok(topology) = topology {
+            for connector_index in 0..unsafe { topology.GetConnectorCount() }? {
+                let connector = unsafe { topology.GetConnector(connector_index) }?;
+                if let Ok(connected) = unsafe { connector.GetDeviceIdConnectedTo() } {
+                    adapter_ids.push(string(connected)?);
+                }
+            }
+        }
+        rows.push(serde_json::json!({"id": cpal::DeviceId::new(cpal::HostId::Wasapi, &id).to_string(), "name": descriptions.get(&id), "flow": if flow == eRender { "render" } else { "capture" }, "defaultRoles": defaults.iter().filter(|(_, endpoint_id)| endpoint_id == &id).map(|(role, _)| *role).collect::<Vec<_>>(), "activeSessionPids": active, "connectedAdapterIds": adapter_ids, "containerId": container_id}));
+    }
+    Ok(serde_json::Value::Array(rows))
 }

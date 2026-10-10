@@ -50,6 +50,6 @@ The owner confirmed the preceding application-capture route and perceived low de
 | EC-027 | Prototype fidelity and destination UI | active | EC-024/026; EC-020 contract checkpoint | UI worker / a1 | agent/EC-027-a1 | [task](EC-027.md) |
 | EC-028 | Independent destination/fidelity review | active | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
 | EC-029 | Destination continuation integration | active | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |
-| EC-030 | Multiple Discord rooms | ready | EC-020; gateway/voice design review before code | unassigned | — | [task](EC-030.md) |
+| EC-030 | Multiple Discord rooms | blocked | EC-020; gateway/voice design review before code | unassigned | — | [task](EC-030.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

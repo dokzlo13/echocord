@@ -38,6 +38,8 @@ Native fixtures establish selected process-tree/browser isolation, stereo/silenc
 
 ## Future scope
 
+The owner identifies a Discord voice room as the next input priority after multiple destinations: aggregate participants into one source stream and relay it to Windows playback or another Discord room; individual participant mute can follow later. Live capture/relay is requested, not persisted recordings. EC-034 owns receive/DAVE feasibility and a reviewed design for shared server reservations, bounded native audio input and feedback prevention. This capability is not implemented in the delivered baseline.
+
 The common mix already feeds independently controlled Discord and playback readers. Multiple Discord rooms need a reviewed shared-gateway/disposable-voice-driver lifecycle. One Discord bot can be in only one voice channel per server at a time; distinct same-server destinations require a reviewed identity/lifecycle design. Desktop/endpoint loopback capture, a custom virtual endpoint/driver, other receivers and later operating-system support are separate work. No inactive future-routing controls ship.
 
 ## Historical MVP and superseded decisions

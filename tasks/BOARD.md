@@ -6,6 +6,8 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 The owner requests planning and implementation of multiple room targets. EC-030 owns native design/contracts/implementation, EC-031 the existing UI extension, EC-032 independent review and EC-033 integration. The owner confirmed different-server rooms with the existing bot. Design/review covers one shared gateway, independent room workers and one room per server. The delivered playback build remains the baseline and must stay undisturbed while the new version is staged.
 
+Next owner priority: EC-034 researches a Discord room as an aggregate participant-audio source for live playback/cross-server relay. Per-participant mute is later scope. This follows the current multiple-destination delivery; receive support and feedback/lifecycle design need their own checkpoint.
+
 ## Delivered destination continuation
 
 The shared mix now feeds one Discord room and up to three explicit Windows playback devices. Each output has independent gain/mute/start/stop, session-fenced telemetry and native lifetime. Outputs restore idle; no driver or automatic playback is introduced. EC-027 also restores the actual prototype's wide two-source histories, compact measured sparklines and completed-change notices, with four-output control containment at all five supported sizes. EC-020/027–029 are integrated and independently reviewed.
@@ -53,5 +55,6 @@ Owner testing confirmed the earlier capture routes and perceived low delay. New 
 | EC-031 | Multiple-room control UI | active | approved UI; EC-030 contract checkpoint | UI worker / a1 | agent/EC-031-a1 | [task](EC-031.md) |
 | EC-032 | Independent multi-room review | active | owner-authorized epoch | reviewer / r1 | read-only | [task](EC-032.md) |
 | EC-033 | Multiple-room integration | active | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md) |
+| EC-034 | Discord room source feasibility and design | ready | research independent; implementation after EC-033 and review | coordinator; research worker pending | — | [task](EC-034.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

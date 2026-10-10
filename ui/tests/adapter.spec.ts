@@ -218,3 +218,101 @@ test("history starts fresh after native visibility return and destination sessio
   expect(Number.isNaN(a.telemetry.net().buffer2m.at(1))).toBe(true);
   a.dispose();
 });
+
+test("per-output sessions reject stale samples and retain unaffected histories", async () => {
+  const t = new FixtureTransport("outputs");
+  const a = new ControlAdapter(t);
+  await a.start();
+  const scalar = structuredClone(t.current.telemetry);
+  a.telemetry.ingest(scalar);
+  const other = a.telemetry.history("dst:local:3");
+  const source = a.telemetry.history("src:strip:1");
+  const next = t.current.destinations.map((d) =>
+    d.destinationId === "local:1" ? { ...d, sessionId: d.sessionId + 1 } : d,
+  );
+  a.telemetry.setDestinations(next);
+  expect(a.telemetry.history("dst:local:1")).toBeUndefined();
+  expect(a.telemetry.history("dst:local:3")).toBe(other);
+  expect(a.telemetry.history("src:strip:1")).toBe(source);
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: scalar.destinations.map((d) =>
+      d.destinationId === "local:1" ? { ...d, levelDbfs: -1 } : d,
+    ),
+  });
+  expect(a.telemetry.read("dst:local:1").db).toBeNull();
+  const session =
+    next.find((d) => d.destinationId === "local:1")?.sessionId ?? 0;
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: scalar.destinations.map((d) =>
+      d.destinationId === "local:1"
+        ? { ...d, sessionId: session, levelDbfs: -32 }
+        : d,
+    ),
+  });
+  expect(a.telemetry.read("dst:local:1").db).toBe(-32);
+  a.telemetry.ingest(scalar);
+  expect(a.telemetry.read("dst:local:1").db).toBe(-32);
+  a.dispose();
+});
+
+test("unknown scalar IDs and legacy aliases cannot bleed into another output meter", async () => {
+  const t = new FixtureTransport("outputs");
+  const a = new ControlAdapter(t);
+  await a.start();
+  const scalar = structuredClone(t.current.telemetry);
+  a.telemetry.ingest({
+    ...scalar,
+    outputLevelDbfs: 0,
+    destinations: scalar.destinations.map((d) => ({
+      ...d,
+      levelDbfs: d.destinationId === "local:1" ? -10 : -40,
+    })),
+  });
+  expect(a.telemetry.read("dst:local:1").db).toBe(-10);
+  expect(a.telemetry.read("dst:dest:1").db).toBe(-40);
+  expect(a.telemetry.read("dst:unknown").db).toBeNull();
+  const before = a.telemetry.net("local:1");
+  a.telemetry.ingest({
+    ...scalar,
+    destinations: [
+      {
+        destinationId: "unknown",
+        sessionId: 999,
+        levelDbfs: 0,
+        queuedFrames: 1920,
+        droppedFrames: 100,
+        underrunFrames: 100,
+        gatewayPingMs: 10,
+      },
+    ],
+  });
+  expect(a.telemetry.net("local:1")).toBe(before);
+  expect(a.telemetry.net("unknown").buffer).toBeNull();
+  a.dispose();
+});
+
+test("unavailable levels remain gaps while measured silence is a real sample", async () => {
+  const t = new FixtureTransport();
+  const a = new ControlAdapter(t);
+  await a.start();
+  const scalar = structuredClone(t.current.telemetry);
+  a.telemetry.resetHistory();
+  a.telemetry.ingest({
+    ...scalar,
+    inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: null })),
+    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: null })),
+  });
+  expect(Number.isNaN(a.telemetry.history("src:strip:1")?.at(0))).toBe(true);
+  expect(Number.isNaN(a.telemetry.history("dst:dest:1")?.at(0))).toBe(true);
+  a.telemetry.resetHistory();
+  a.telemetry.ingest({
+    ...scalar,
+    inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: -96 })),
+    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: -96 })),
+  });
+  expect(a.telemetry.history("src:strip:1")?.at(0)).toBe(0);
+  expect(a.telemetry.history("dst:dest:1")?.at(0)).toBe(0);
+  a.dispose();
+});

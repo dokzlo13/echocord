@@ -104,3 +104,66 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+
+/* Restored verbatim geometry from the actual prototype; traces use native rings. */
+.spark {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  width: 46px;
+  height: 26px;
+}
+.dest-body:has(.net-chart:not([data-hidden])) .spark {
+  display: none;
+}
+.spark[data-available="false"] {
+  visibility: hidden;
+}
+@container dlist (max-height: 181px) {
+  .d-tiles .spark {
+    display: none;
+  }
+}
+@container dlist (max-height: 193px) {
+  .dest-card:has(.cf[data-mode="history"]) .d-tiles .spark {
+    display: none;
+  }
+}
+.stats[data-local] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.dest-card[data-status="playing"] .badge {
+  color: var(--ok);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.badge[data-status="playing"] .badge-dot {
+  background: var(--ok);
+}
+.dst-slot .chip[data-state="playing"] {
+  background: var(--ok);
+  color: var(--action-ink);
+}
+
+/* Every populated source list retains one complete card during weighted shrink. */
+.window .src-slot:not([data-many]):has(.source-card) {
+  min-height: 146px;
+}
+.window .src-slot:not([data-many]):has(.cf[data-mode="history"]) {
+  min-height: 158px;
+}
+@container win (max-height: 539px) {
+  .window .src-slot:not([data-many]):has(.source-card) {
+    min-height: 144px;
+  }
+  .window .src-slot:not([data-many]):has(.cf[data-mode="history"]) {
+    min-height: 144px;
+  }
+}
+/* Older WebViews retain size queries if scroll-state is unavailable. */
+.dst-list {
+  container-type: size;
+}
+@supports (container-type: size scroll-state) {
+  .dst-list {
+    container-type: size scroll-state;
+  }
+}

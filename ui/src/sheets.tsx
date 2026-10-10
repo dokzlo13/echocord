@@ -14,7 +14,12 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { NetChart, OnAirTime, StatTiles } from "./cards";
 import { STATUS, statusKey } from "./copy";
-import type { AppSettings, BotProfile, Discovery } from "./generated";
+import type {
+  AppSettings,
+  BotProfile,
+  Discovery,
+  PlaybackDevice,
+} from "./generated";
 import { ServerTile, SourceGlyph } from "./icons";
 import type {
   BotState,
@@ -334,7 +339,8 @@ export function SourcePicker({
   );
 }
 
-export function RoomPicker({
+function DiscordRooms({
+  tabs,
   dests,
   servers,
   error,
@@ -345,6 +351,7 @@ export function RoomPicker({
   onPick,
   onClose,
 }: {
+  tabs: ReactNode;
   dests: DestCard[];
   servers: Server[];
   error: string | null;
@@ -429,6 +436,7 @@ export function RoomPicker({
         </>
       }
     >
+      {tabs}
       {error && (
         <p className="field-error" role="alert">
           {error}
@@ -544,6 +552,253 @@ export function RoomPicker({
           )}
         </div>
       </div>
+    </Sheet>
+  );
+}
+
+/** The approved full-window picker gains a second native destination type. */
+export function RoomPicker({
+  dests,
+  sources,
+  servers,
+  devices,
+  discovery,
+  playbackDiscovery,
+  error,
+  busy,
+  botReady,
+  onBot,
+  onRefresh,
+  onRefreshPlayback,
+  replacing,
+  onPick,
+  onPlayback,
+  onClose,
+}: {
+  dests: DestCard[];
+  sources: SourceCard[];
+  servers: Server[];
+  devices: PlaybackDevice[];
+  discovery: Discovery;
+  playbackDiscovery: Discovery;
+  error: string | null;
+  busy: boolean;
+  botReady: boolean;
+  onBot: () => void;
+  onRefresh: () => void;
+  onRefreshPlayback: () => void;
+  replacing?: DestCard | undefined;
+  onPick: (serverId: string, channelId: string) => void;
+  onPlayback: (deviceId: string) => void;
+  onClose: () => void;
+}) {
+  const [tab, setTab] = useState<"discord" | "playback">(
+    replacing?.kind ?? (botReady ? "discord" : "playback"),
+  );
+  const [q, setQ] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
+  const inUse = new Set(
+    dests.filter((d) => d.kind === "playback").map((d) => d.deviceId),
+  );
+  const chosen = devices.find(
+    (d) => d.id === selected && d.available && !inUse.has(d.id),
+  );
+  const limit =
+    dests.filter((d) => d.kind === "playback").length >= 3 && !replacing;
+  const discordLimit = dests.some(
+    (d) => d.kind === "discord" && d.uid !== replacing?.uid,
+  );
+  const tabs = (
+    <div
+      className="tabs destination-tabs"
+      role="tablist"
+      aria-label="Destination kind"
+    >
+      {(["discord", "playback"] as const).map((kind) => (
+        <button
+          key={kind}
+          type="button"
+          role="tab"
+          className="tab"
+          aria-selected={tab === kind}
+          disabled={!!replacing && replacing.kind !== kind}
+          onClick={() => {
+            setTab(kind);
+            setSelected(null);
+            setQ("");
+          }}
+        >
+          {kind === "discord" ? "Discord" : "Playback"}
+        </button>
+      ))}
+    </div>
+  );
+  if (tab === "discord" && botReady && !discordLimit)
+    return (
+      <DiscordRooms
+        dests={dests.filter((d) => d.kind === "discord")}
+        servers={servers}
+        discovery={discovery}
+        error={error}
+        busy={busy}
+        replacing={replacing}
+        onPick={onPick}
+        onRefresh={onRefresh}
+        onClose={onClose}
+        tabs={tabs}
+      />
+    );
+  return (
+    <Sheet
+      title={
+        replacing
+          ? `Change ${replacing.kind === "playback" ? "playback device" : "room"}`
+          : "Add destination"
+      }
+      onClose={onClose}
+      footer={
+        tab === "playback" ? (
+          <>
+            <Refresh
+              label="Refresh"
+              onRefresh={onRefreshPlayback}
+              busy={playbackDiscovery.phase === "loading"}
+            />
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!chosen || busy || limit}
+              onClick={() => chosen && onPlayback(chosen.id)}
+            >
+              {chosen
+                ? `${replacing ? "Use" : "Add"} ${chosen.name}`
+                : "Choose a playback device"}
+            </button>
+          </>
+        ) : !botReady ? (
+          <button type="button" className="btn btn-primary" onClick={onBot}>
+            Set up bot
+          </button>
+        ) : undefined
+      }
+    >
+      {tabs}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      {tab === "discord" ? (
+        <div className="pick-empty">
+          {discordLimit
+            ? "One Discord room is supported currently. Add a playback output, or change the existing Discord card."
+            : "Set up a Discord bot to choose a voice room. Playback works without a bot."}
+        </div>
+      ) : (
+        <>
+          <SearchField
+            value={q}
+            onChange={setQ}
+            placeholder="Search playback devices"
+          />
+          {playbackDiscovery.phase === "error" && (
+            <p className="field-error" role="alert">
+              {playbackDiscovery.message}
+            </p>
+          )}
+          {limit && (
+            <p className="room-note">Three playback outputs are supported.</p>
+          )}
+          <div
+            className="pick-list"
+            role="listbox"
+            aria-label="Playback devices"
+          >
+            {devices
+              .filter((d) =>
+                `${d.name} ${d.detail ?? ""}`
+                  .toLowerCase()
+                  .includes(q.trim().toLowerCase()),
+              )
+              .map((device) => {
+                const current = device.id === replacing?.deviceId;
+                const used = inUse.has(device.id);
+                const why = !device.available
+                  ? (device.detail ?? "This playback device is unavailable.")
+                  : used && !current
+                    ? "Already an output"
+                    : limit
+                      ? "Three playback outputs are supported."
+                      : undefined;
+                const disabled = current || !!why;
+                return (
+                  <button
+                    key={device.id}
+                    type="button"
+                    role="option"
+                    className="pick-row"
+                    aria-selected={selected === device.id}
+                    aria-disabled={disabled}
+                    data-disabled={disabled || undefined}
+                    onClick={() => !disabled && setSelected(device.id)}
+                    onDoubleClick={() => !disabled && onPlayback(device.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !disabled) {
+                        e.preventDefault();
+                        onPlayback(device.id);
+                      }
+                    }}
+                  >
+                    <SourceGlyph glyph="playback" tint="#6b7f8e" size={22} />
+                    <span className="pick-text">
+                      <span className="pick-name">{device.name}</span>
+                      <span className="pick-detail">
+                        {why ?? device.detail ?? "Windows playback endpoint"}
+                      </span>
+                    </span>
+                    <span className="pick-meta">
+                      {current ? (
+                        <span className="tag">Current</span>
+                      ) : used ? (
+                        <span className="tag">In use</span>
+                      ) : null}
+                      {selected === device.id && (
+                        <Check size={16} className="pick-check" />
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            {devices.length === 0 && (
+              <div className="pick-empty">
+                {playbackDiscovery.phase === "loading"
+                  ? "Looking for playback devices…"
+                  : "No playback devices found. Connect a device and refresh."}
+              </div>
+            )}
+          </div>
+          <p className="room-note">
+            Added outputs stay stopped until you press Play.
+          </p>
+          {sources.some((s) => s.identity.kind === "recording") && (
+            <p className="room-note">
+              Don't send a captured cable back into its paired playback
+              endpoint.
+            </p>
+          )}
+          {sources.some((s) => s.identity.kind === "application") && (
+            <p className="room-note">
+              Original app playback still follows Windows routing. Playing the
+              mix on the same audible device can double the sound.
+            </p>
+          )}
+          {replacing?.state === "live" && chosen && (
+            <p className="foot-note">
+              Changing devices briefly stops and restarts this output.
+            </p>
+          )}
+        </>
+      )}
     </Sheet>
   );
 }
@@ -915,23 +1170,29 @@ export function ConnectionSheet({
         store,
         () => {
           if (underruns.current)
-            underruns.current.textContent = `${store.net().underruns ?? "Unavailable"}`;
+            underruns.current.textContent = `${store.net(dest.uid).underruns ?? "Unavailable"}`;
         },
         2,
       ),
-    [store],
+    [store, dest.uid],
   );
-  const sk = statusKey(dest.state);
+  const local = dest.kind === "playback";
+  const sk = local && dest.state === "live" ? "playing" : statusKey(dest.state);
+  const statusLabel = local
+    ? dest.state === "live"
+      ? "Playing"
+      : "Stopped"
+    : STATUS[statusKey(dest.state)];
   return (
     <Sheet
-      title="Connection"
+      title={dest.kind === "playback" ? "Playback output" : "Connection"}
       onClose={onClose}
-      label={`Connection details for ${channel?.name}`}
+      label={`${dest.kind === "playback" ? "Playback output" : "Connection"} details for ${channel?.name}`}
     >
       <div className="conn-head">
         <span className="badge" data-status={sk}>
           <span className="badge-dot" aria-hidden />
-          {STATUS[sk]}
+          {statusLabel}
         </span>
         <span className="conn-room">
           {channel?.name} <span className="conn-server">{server?.name}</span>
@@ -941,26 +1202,33 @@ export function ConnectionSheet({
         </span>
       </div>
       <div className="conn-chart">
-        <NetChart uid={dest.uid} seconds={120} minHeight={40} />
+        <NetChart uid={dest.uid} seconds={120} minHeight={40} local={local} />
       </div>
-      <StatTiles uid={dest.uid} />
+      <StatTiles uid={dest.uid} local={local} />
       <dl className="facts-list tabular">
         <dt>Underruns</dt>
         <dd ref={underruns}>Unavailable</dd>
-        <dt>Reconnects this session</dt>
-        <dd>Unavailable</dd>
-        <dt>Voice server</dt>
-        <dd>Unavailable</dd>
+        {!local && (
+          <>
+            <dt>Reconnects this session</dt>
+            <dd>Unavailable</dd>
+            <dt>Voice server</dt>
+            <dd>Unavailable</dd>
+          </>
+        )}
         <dt>Audio</dt>
-        <dd>Opus · 48 kHz stereo</dd>
-        <dt>Bot</dt>
-        <dd>Discord bot</dd>
+        <dd>{local ? "Native mix · 48 kHz stereo" : "Opus · 48 kHz stereo"}</dd>
+        {!local && (
+          <>
+            <dt>Bot</dt>
+            <dd>Discord bot</dd>
+          </>
+        )}
       </dl>
       <p className="conn-note">
-        Gateway is Discord's control connection; it is unavailable until
-        measured. Buffer is audio waiting inside Echocord. Neither is listener
-        delay. The meter observes the native output before Discord transport; it
-        does not confirm what players hear.
+        {local
+          ? "The meter observes samples handed to this selected device after output volume and mute; it does not prove physical audibility. Buffer is audio queued inside Echocord, not device or listener delay."
+          : "Gateway is Discord's control connection; it is unavailable until measured. Buffer is audio waiting inside Echocord. Neither is listener delay. The meter observes native output before Discord transport; it does not confirm what players hear."}
       </p>
     </Sheet>
   );

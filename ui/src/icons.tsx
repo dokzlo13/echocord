@@ -1,4 +1,4 @@
-import { AppWindow, Cable } from "lucide-react";
+import { AppWindow, Cable, Headphones } from "lucide-react";
 import type { Glyph } from "./model";
 
 /** Native catalogs currently supply identity text; these glyphs describe source kind. */
@@ -11,7 +11,12 @@ export function SourceGlyph({
   tint: string;
   size?: number;
 }) {
-  const Icon = glyph === "application" ? AppWindow : Cable;
+  const Icon =
+    glyph === "application"
+      ? AppWindow
+      : glyph === "playback"
+        ? Headphones
+        : Cable;
   return (
     <span
       className="glyph"

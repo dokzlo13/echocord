@@ -1,5 +1,9 @@
 import { createContext, useContext } from "react";
-import type { MixTelemetry } from "./generated";
+import type {
+  DestinationStrip,
+  DestinationTelemetry,
+  MixTelemetry,
+} from "./generated";
 
 export const fraction = (db: number | null) =>
   db === null ? 0 : Math.max(0, Math.min(1, (db + 60) / 60));
@@ -29,58 +33,68 @@ export interface Network {
   ping2m: Ring;
   buffer2m: Ring;
 }
+const emptyNetwork = (): Network => ({
+  ping: null,
+  buffer: null,
+  drops: null,
+  underruns: null,
+  ping2m: new Ring(240),
+  buffer2m: new Ring(240),
+});
+interface DestinationState {
+  sessionId: number;
+  identity: string;
+  value: DestinationTelemetry | null;
+  network: Network;
+  lastNet: number;
+}
 export class TelemetryStore {
   visible = true;
   private latest: MixTelemetry | null = null;
   private histories = new Map<string, Ring>();
-  private network: Network = {
-    ping: null,
-    buffer: null,
-    drops: null,
-    underruns: null,
-    ping2m: new Ring(240),
-    buffer2m: new Ring(240),
-  };
+  private outputs = new Map<string, DestinationState>();
+  private unknown = emptyNetwork();
   private lastLevel = Number.NEGATIVE_INFINITY;
-  private lastNet = Number.NEGATIVE_INFINITY;
-  private sessionId: number | null = null;
-  private outputId: string | null = null;
   private peaks = new Map<string, { db: number; until: number }>();
   private visibleListeners = new Set<() => void>();
-  setOutput(id: string | null) {
-    if (this.outputId !== id) {
-      this.outputId = id;
-      this.histories.delete(`dst:${id}`);
-      this.network = {
-        ping: null,
-        buffer: null,
-        drops: null,
-        underruns: null,
-        ping2m: new Ring(240),
-        buffer2m: new Ring(240),
-      };
+  setDestinations(destinations: DestinationStrip[]) {
+    const valid = new Set(destinations.map((d) => d.destinationId));
+    for (const d of destinations) {
+      const identity = `${d.kind}:${d.deviceId ?? `${d.serverId}:${d.channelId}`}`;
+      const current = this.outputs.get(d.destinationId);
+      if (
+        !current ||
+        identity !== current.identity ||
+        d.sessionId > current.sessionId
+      ) {
+        this.histories.delete(`dst:${d.destinationId}`);
+        this.peaks.delete(`dst:${d.destinationId}`);
+        this.outputs.set(d.destinationId, {
+          sessionId: d.sessionId,
+          identity,
+          value: null,
+          network: emptyNetwork(),
+          lastNet: Number.NEGATIVE_INFINITY,
+        });
+      }
     }
+    for (const id of this.outputs.keys())
+      if (!valid.has(id)) {
+        this.outputs.delete(id);
+        this.histories.delete(`dst:${id}`);
+        this.peaks.delete(`dst:${id}`);
+      }
   }
   resetHistory = () => {
     this.histories.clear();
     this.peaks.clear();
-    this.network.ping2m = new Ring(240);
-    this.network.buffer2m = new Ring(240);
     this.lastLevel = Number.NEGATIVE_INFINITY;
-    this.lastNet = Number.NEGATIVE_INFINITY;
-  };
-  setSession(id: number) {
-    if (this.sessionId !== id) {
-      this.sessionId = id;
-      for (const key of this.histories.keys())
-        if (key.startsWith("dst:")) this.histories.delete(key);
-      for (const key of this.peaks.keys())
-        if (key.startsWith("dst:")) this.peaks.delete(key);
-      this.network.ping2m = new Ring(240);
-      this.network.buffer2m = new Ring(240);
-      this.lastNet = Number.NEGATIVE_INFINITY;
+    for (const d of this.outputs.values()) {
+      d.network.ping2m = new Ring(240);
+      d.network.buffer2m = new Ring(240);
+      d.lastNet = Number.NEGATIVE_INFINITY;
     }
-  }
+  };
   setVisible(visible: boolean) {
     if (this.visible === visible) return;
     if (visible) this.resetHistory();
@@ -93,37 +107,58 @@ export class TelemetryStore {
   };
   ingest(value: MixTelemetry) {
     this.latest = value;
-    this.network.ping = value.gatewayPingMs;
-    this.network.buffer = value.queuedFrames / 48;
-    this.network.drops = value.droppedFrames;
-    this.network.underruns = value.underrunFrames;
-    if (!this.visible || (typeof document !== "undefined" && document.hidden))
-      return;
     const now = performance.now();
-    if (Number.isFinite(this.lastLevel) && now - this.lastLevel > 250)
+    const visible =
+      this.visible && !(typeof document !== "undefined" && document.hidden);
+    if (
+      visible &&
+      Number.isFinite(this.lastLevel) &&
+      now - this.lastLevel > 250
+    )
       this.resetHistory();
+    for (const v of value.destinations) {
+      const d = this.outputs.get(v.destinationId);
+      if (!d || v.sessionId < d.sessionId) continue;
+      if (v.sessionId > d.sessionId) {
+        d.sessionId = v.sessionId;
+        d.network = emptyNetwork();
+        d.lastNet = Number.NEGATIVE_INFINITY;
+        this.histories.delete(`dst:${v.destinationId}`);
+        this.peaks.delete(`dst:${v.destinationId}`);
+      }
+      d.value = v;
+      d.network.ping = v.gatewayPingMs;
+      d.network.buffer = v.queuedFrames / 48;
+      d.network.drops = v.droppedFrames;
+      d.network.underruns = v.underrunFrames;
+      if (visible && now - d.lastNet >= 490) {
+        d.lastNet = now;
+        d.network.ping2m.push(v.gatewayPingMs ?? Number.NaN);
+        d.network.buffer2m.push(v.queuedFrames / 48);
+      }
+    }
+    if (!visible) return;
     if (now - this.lastLevel >= 95) {
       this.lastLevel = now;
       const valid = new Set<string>();
-      for (const s of value.inputs) {
-        const key = `src:${s.stripId}`;
+      for (const input of value.inputs) {
+        const key = `src:${input.stripId}`;
         valid.add(key);
-        this.ring(key).push(fraction(s.levelDbfs));
+        this.ring(key).push(
+          input.levelDbfs === null ? Number.NaN : fraction(input.levelDbfs),
+        );
       }
-      if (this.outputId) {
-        const key = `dst:${this.outputId}`;
+      for (const [id, d] of this.outputs) {
+        const key = `dst:${id}`;
         valid.add(key);
-        this.ring(key).push(fraction(value.outputLevelDbfs));
+        this.ring(key).push(
+          d.value?.levelDbfs == null ? Number.NaN : fraction(d.value.levelDbfs),
+        );
       }
       for (const key of this.histories.keys())
         if (!valid.has(key)) this.histories.delete(key);
       for (const key of this.peaks.keys())
         if (!valid.has(key)) this.peaks.delete(key);
-    }
-    if (now - this.lastNet >= 490) {
-      this.lastNet = now;
-      this.network.ping2m.push(value.gatewayPingMs ?? Number.NaN);
-      this.network.buffer2m.push(value.queuedFrames / 48);
     }
   }
   private ring(key: string) {
@@ -139,11 +174,10 @@ export class TelemetryStore {
     const input = key.startsWith("src:")
       ? this.latest?.inputs.find((s) => s.stripId === key.slice(4))
       : null;
-    const db = input
-      ? input.levelDbfs
-      : key.startsWith("dst:")
-        ? (this.latest?.outputLevelDbfs ?? null)
-        : null;
+    const output = key.startsWith("dst:")
+      ? this.outputs.get(key.slice(4))
+      : null;
+    const db = input?.levelDbfs ?? output?.value?.levelDbfs ?? null;
     const now = performance.now();
     let held = this.peaks.get(key);
     if (db === null) {
@@ -157,24 +191,20 @@ export class TelemetryStore {
       db,
       peak: held?.db ?? null,
       preClip:
-        input?.preClip ??
-        (key.startsWith("dst:") ? (this.latest?.mixPreClip ?? false) : false),
+        input?.preClip ?? (output ? (this.latest?.mixPreClip ?? false) : false),
     };
   };
-  net = () => this.network;
+  net = (id?: string) =>
+    id
+      ? (this.outputs.get(id)?.network ?? this.unknown)
+      : (this.outputs.values().next().value?.network ?? this.unknown);
   clear() {
     this.latest = null;
-    this.sessionId = null;
+    this.outputs.clear();
     this.histories.clear();
     this.peaks.clear();
-    this.network = {
-      ping: null,
-      buffer: null,
-      drops: null,
-      underruns: null,
-      ping2m: new Ring(240),
-      buffer2m: new Ring(240),
-    };
+    this.unknown = emptyNetwork();
+    this.lastLevel = Number.NEGATIVE_INFINITY;
   }
 }
 const Context = createContext<TelemetryStore | null>(null);

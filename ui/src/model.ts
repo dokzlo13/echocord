@@ -2,13 +2,15 @@ import type {
   AppSettings,
   BotStatus,
   Connection,
+  DestinationKind,
   InputStrip,
   Server as NativeServer,
+  PlaybackDevice,
   RecordingSource,
 } from "./generated";
 
 export type MeterMode = "simple" | "history";
-export type Glyph = "application" | "cable";
+export type Glyph = "application" | "cable" | "playback";
 export interface CatalogSource extends RecordingSource {
   glyph: Glyph;
   tint: string;
@@ -56,6 +58,10 @@ export type DestState =
 export type Stage = "checking" | "gateway" | "joining" | "starting";
 export interface DestCard {
   uid: string;
+  kind: DestinationKind;
+  deviceId: string | null;
+  device: PlaybackDevice | null;
+  sessionId: number;
   serverId: string;
   channelId: string;
   server: Server;

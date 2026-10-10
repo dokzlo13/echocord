@@ -112,8 +112,7 @@ export class ControlAdapter {
     )
       return;
     this.revision = snapshot.revision;
-    this.telemetry.setOutput(snapshot.destinations[0]?.destinationId ?? null);
-    this.telemetry.setSession(snapshot.sessionId);
+    this.telemetry.setDestinations(snapshot.destinations);
     this.telemetry.ingest(snapshot.telemetry);
     if (
       !this.state.snapshot ||

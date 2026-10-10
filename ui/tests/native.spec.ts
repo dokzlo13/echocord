@@ -144,7 +144,11 @@ test("release binds exact Tauri names and telemetry event without faking accepte
     (t) =>
       (
         window as unknown as { echocordTestHost: Host }
-      ).echocordTestHost.telemetry({ ...t, outputLevelDbfs: -6 }),
+      ).echocordTestHost.telemetry({
+        ...t,
+        destinations: t.destinations.map((d) => ({ ...d, levelDbfs: -6 })),
+        outputLevelDbfs: -6,
+      }),
     live.telemetry,
   );
   await expect

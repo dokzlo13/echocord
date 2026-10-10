@@ -46,19 +46,40 @@ function destination(
   confirmRemove: boolean,
   liveAt?: number,
 ): Destination {
-  const server = serverView(
-    s.servers.find((x) => x.id === d.serverId) ?? {
-      id: d.serverId,
-      name: "Saved server",
-      iconUrl: null,
-      channels: [],
-    },
-  );
-  const channel = server.channels.find((x) => x.id === d.channelId) ?? {
-    id: d.channelId,
-    name: "Saved voice room",
-    category: "Voice rooms",
-  };
+  const device =
+    d.kind === "playback"
+      ? (s.playbackDevices.find((x) => x.id === d.deviceId) ?? null)
+      : null;
+  const server =
+    d.kind === "playback"
+      ? {
+          id: "",
+          name: device?.detail ?? "Windows playback",
+          initials: "",
+          tint: "#6b7f8e",
+          iconUrl: null,
+          channels: [],
+        }
+      : serverView(
+          s.servers.find((x) => x.id === d.serverId) ?? {
+            id: d.serverId,
+            name: "Saved server",
+            iconUrl: null,
+            channels: [],
+          },
+        );
+  const channel =
+    d.kind === "playback"
+      ? {
+          id: d.deviceId ?? "",
+          name: device?.name ?? d.displayName ?? "Saved playback device",
+          category: "Playback",
+        }
+      : (server.channels.find((x) => x.id === d.channelId) ?? {
+          id: d.channelId,
+          name: "Saved voice room",
+          category: "Voice rooms",
+        });
   const c = d.connection;
   const stage =
     c.phase === "connecting"
@@ -72,6 +93,10 @@ function destination(
       : undefined;
   return {
     uid: d.destinationId,
+    kind: d.kind,
+    deviceId: d.deviceId,
+    device,
+    sessionId: d.sessionId,
     serverId: d.serverId,
     channelId: d.channelId,
     server,
@@ -83,7 +108,7 @@ function destination(
     volumeDb: d.volumeDb,
     muted: d.muted,
     confirmRemove,
-    op: s.sessionId,
+    op: d.sessionId,
     liveAt,
     fault:
       c.phase === "error" || c.phase === "cleanup-incomplete"
@@ -91,8 +116,12 @@ function destination(
             title: c.message,
             actionLabel:
               c.phase === "cleanup-incomplete"
-                ? "Retry disconnect"
-                : "Change room",
+                ? d.kind === "playback"
+                  ? "Retry stop"
+                  : "Retry disconnect"
+                : d.kind === "playback"
+                  ? "Change device"
+                  : "Change room",
           }
         : undefined,
   };
@@ -108,7 +137,9 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const opener = useRef<HTMLElement | null>(null);
   const win = useRef<HTMLDivElement>(null);
   const [wide, setWide] = useState(false);
-  const liveTimes = useRef(new Map<string, number>());
+  const liveTimes = useRef(
+    new Map<string, { session: number; since: number }>(),
+  );
   useEffect(() => {
     void adapter.start();
     return adapter.dispose;
@@ -169,11 +200,19 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
         ? { title: c.fault.message, actionLabel: "Pick again" }
         : undefined,
     })) ?? [];
+  const destinationIds = new Set(
+    snapshot?.destinations.map((d) => d.destinationId) ?? [],
+  );
+  for (const id of liveTimes.current.keys())
+    if (!destinationIds.has(id)) liveTimes.current.delete(id);
   const dests: Destination[] =
     snapshot?.destinations.map((d) => {
       if (d.connection.phase === "connected") {
-        if (!liveTimes.current.has(d.destinationId))
-          liveTimes.current.set(d.destinationId, Date.now());
+        if (liveTimes.current.get(d.destinationId)?.session !== d.sessionId)
+          liveTimes.current.set(d.destinationId, {
+            session: d.sessionId,
+            since: Date.now(),
+          });
       } else if (d.connection.phase !== "recovering")
         liveTimes.current.delete(d.destinationId);
       return {
@@ -181,7 +220,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           snapshot,
           d,
           confirm === d.destinationId,
-          liveTimes.current.get(d.destinationId),
+          liveTimes.current.get(d.destinationId)?.since,
         ),
         operationError: operationError(d.destinationId),
       };
@@ -216,8 +255,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const bot = snapshot?.bot.status ?? "unconfigured";
   const botName = snapshot?.bot.name ?? "Discord bot";
   const mode = snapshot?.settings.meterStyle ?? "simple";
-  const addDestination = () =>
-    open(bot === "ready" ? { kind: "room" } : { kind: "bot", next: "room" });
+  const addDestination = () => open({ kind: "room" });
   const replacingSource =
     sheet?.kind === "source"
       ? sources.find((s) => s.uid === sheet.replaceUid)
@@ -228,7 +266,21 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       : undefined;
   const netDest =
     sheet?.kind === "net" ? dests.find((d) => d.uid === sheet.uid) : undefined;
-  const live = dests.some((d) => !["idle", "fault"].includes(d.state));
+  const live = dests.some(
+    (d) => d.kind === "discord" && !["idle", "fault"].includes(d.state),
+  );
+  const playing = dests.filter(
+    (d) => d.kind === "playback" && d.state === "live",
+  ).length;
+  const onAir = dests.filter(
+    (d) => d.kind === "discord" && d.state === "live",
+  ).length;
+  const destinationSummary =
+    dests.length > 1
+      ? [onAir && `${onAir} on air`, playing && `${playing} playing`]
+          .filter(Boolean)
+          .join(" · ") || "All stopped"
+      : undefined;
   return (
     <TelemetryProvider value={adapter.telemetry}>
       <div ref={win} className="window" data-layout="stack" data-native>
@@ -384,7 +436,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     card={c}
                     index={i}
                     mode={mode}
-                    expand={wide && sources.length === 1}
+                    expand={wide && sources.length <= 2}
                     h={{
                       dismiss: adapter.dismissError,
                       change: () => open({ kind: "source", replaceUid: c.uid }),
@@ -415,24 +467,34 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               </div>
             )}
           </section>
-          <section className="slot dst-slot" aria-label="Destination">
+          <section className="slot dst-slot" aria-label="Destinations">
             <SlotHead
-              title="Destination"
-              chips={[]}
+              title={dests.length > 1 ? "Destinations" : "Destination"}
+              summary={destinationSummary}
+              chips={dests.map((d) => ({
+                uid: d.uid,
+                label: d.channel.name,
+                state:
+                  d.state === "live"
+                    ? d.kind === "discord"
+                      ? "on"
+                      : "playing"
+                    : d.state === "fault"
+                      ? "fault"
+                      : "stopped",
+              }))}
               addLabel="Add destination"
               onAdd={addDestination}
-              addDisabled={view.phase !== "ready" || dests.length >= 1}
-              addHint={dests.length ? "One destination for now" : undefined}
+              addDisabled={view.phase !== "ready" || dests.length >= 4}
+              addHint={
+                dests.length >= 4 ? "Four destinations for now" : undefined
+              }
             />
             {dests.length === 0 ? (
               <Empty
-                text={bot === "ready" ? "No room yet" : "No Discord bot yet"}
-                sub={
-                  bot === "ready"
-                    ? "Pick the voice room your bot joins."
-                    : "Connect a bot once, then pick the voice room it joins."
-                }
-                action={bot === "ready" ? "Add room" : "Set up bot"}
+                text="No destinations yet"
+                sub="A Discord voice room or a Windows playback device."
+                action="Add destination"
                 onAction={addDestination}
               />
             ) : (
@@ -441,7 +503,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                 data-count={dests.length}
                 style={
                   {
-                    "--dst-natural": `${mode === "history" ? 194 : 182}px`,
+                    "--dst-natural": `${dests.length === 1 ? (mode === "history" ? 194 : 182) : dests.length * (mode === "history" ? 146 : 134) + (dests.length - 1) * 8}px`,
                   } as React.CSSProperties
                 }
               >
@@ -450,9 +512,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     key={d.uid}
                     card={d}
                     mode={mode}
-                    expand={true}
+                    expand={dests.length === 1}
+                    compact={dests.length > 1}
                     sourcesCapturing={capturing.length}
                     botReady={bot === "ready"}
+                    botName={botName}
                     h={{
                       dismiss: adapter.dismissError,
                       change: () => open({ kind: "room", replaceUid: d.uid }),
@@ -533,12 +597,34 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           <RoomPicker
             dests={dests}
             servers={servers}
+            devices={snapshot.playbackDevices}
+            sources={sources}
+            playbackDiscovery={snapshot.playbackDiscovery}
+            botReady={bot === "ready"}
+            onBot={() => setSheet({ kind: "bot", next: "room" })}
+            onRefreshPlayback={() =>
+              void send({ type: "refresh-playback-devices" })
+            }
             error={view.commandError?.message ?? null}
             busy={view.pending.length > 0}
             discovery={snapshot.discovery}
             onRefresh={() => void send({ type: "refresh-catalog" })}
             replacing={replacingDest}
             onClose={close}
+            onPlayback={async (deviceId) => {
+              if (
+                await send(
+                  replacingDest
+                    ? {
+                        type: "change-playback-destination",
+                        destinationId: replacingDest.uid,
+                        deviceId,
+                      }
+                    : { type: "add-playback-destination", deviceId },
+                )
+              )
+                close();
+            }}
             onPick={async (serverId, channelId) => {
               if (
                 await send(

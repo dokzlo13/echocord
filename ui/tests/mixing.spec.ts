@@ -14,7 +14,7 @@ test("first run has two empty slots and opens a full window source picker", asyn
 }) => {
   await page.goto("/tests/harness.html?fixture=first-run");
   await expect(page.getByText("No sources yet")).toBeVisible();
-  await expect(page.getByText("No Discord bot yet")).toBeVisible();
+  await expect(page.getByText("No destinations yet")).toBeVisible();
   await page
     .getByRole("button", { name: "Add source", exact: true })
     .last()
@@ -257,16 +257,21 @@ test("live destination removal has inline confirmation and Keep cancels", async 
   await expect(page.locator(".source-card")).toHaveCount(1);
 });
 
-test("one destination limit is explicit and room replacement names reconnect", async ({
+test("one Discord room limit is explicit and room replacement names reconnect", async ({
   page,
 }) => {
   await open(page);
   await expect(
     page.getByRole("button", { name: "Add destination", exact: true }),
-  ).toBeDisabled();
+  ).toBeEnabled();
+  await page
+    .getByRole("button", { name: "Add destination", exact: true })
+    .click();
+  await page.getByRole("tab", { name: "Discord", exact: true }).click();
   await expect(
-    page.getByRole("button", { name: "Add destination", exact: true }),
-  ).toHaveAttribute("title", "One destination for now");
+    page.getByText(/One Discord room is supported currently/),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Change room", exact: true }).click();
   await page.getByRole("option", { name: "Lounge", exact: true }).click();
   await expect(
@@ -373,6 +378,11 @@ test("bot setup saves through native adapter and clears the credential field", a
   page,
 }) => {
   await page.goto("/tests/harness.html?fixture=first-run");
+  await page
+    .getByRole("button", { name: "Add destination", exact: true })
+    .last()
+    .click();
+  await page.getByRole("tab", { name: "Discord", exact: true }).click();
   await page
     .getByRole("button", { name: "Set up bot", exact: true })
     .last()

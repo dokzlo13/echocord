@@ -163,6 +163,7 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
         }
         const n = ring.buf.length;
         let peak = 0;
+        let observed = false;
         const x = (k: number) => plotW - (k / (n - 1)) * plotW;
         const y = (f: number) => padT + plotH - f * plotH;
         let oldest = 0;
@@ -172,15 +173,31 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
             break;
           }
         ctx.beginPath();
-        ctx.moveTo(x(oldest), y(0));
+        let segment = false;
+        let newest = oldest;
         for (let k = oldest; k >= 0; k--) {
           const v = ring.at(k);
-          if (!Number.isFinite(v)) continue;
+          if (!Number.isFinite(v)) {
+            if (segment) {
+              ctx.lineTo(x(newest), y(0));
+              ctx.closePath();
+              segment = false;
+            }
+            continue;
+          }
+          observed = true;
           peak = Math.max(peak, v);
+          if (!segment) {
+            ctx.moveTo(x(k), y(0));
+            segment = true;
+          }
           ctx.lineTo(x(k), y(v));
+          newest = k;
         }
-        ctx.lineTo(x(0), y(0));
-        ctx.closePath();
+        if (segment) {
+          ctx.lineTo(x(newest), y(0));
+          ctx.closePath();
+        }
         ctx.globalAlpha = 0.16;
         ctx.fillStyle = colour;
         ctx.fill();
@@ -204,8 +221,11 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
         ctx.stroke();
         if (peakRef.current) {
           const db = peak * 60 - 60;
-          peakRef.current.textContent =
-            peak > 0 ? `Peak ${fmtDb(db)} dBFS` : "Silent";
+          peakRef.current.textContent = !observed
+            ? "Level unavailable"
+            : peak > 0
+              ? `Peak ${fmtDb(db)} dBFS`
+              : "Silent";
         }
       },
       10,
@@ -353,11 +373,74 @@ function useEvery(ms: number) {
   );
 }
 
+function Spark({ uid, kind }: { uid: string; kind: "gateway" | "buffer" }) {
+  const store = useTelemetryStore();
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(
+    () =>
+      paint(
+        store,
+        () => {
+          const cv = ref.current;
+          const ctx = cv?.getContext("2d");
+          if (!cv || !ctx) return;
+          const dpr = devicePixelRatio || 1;
+          const w = Math.round(cv.clientWidth * dpr);
+          const h = Math.round(cv.clientHeight * dpr);
+          if (!w || !h) return;
+          if (cv.width !== w) cv.width = w;
+          if (cv.height !== h) cv.height = h;
+          const cs = getComputedStyle(cv);
+          const n = store.net(uid);
+          const ring = kind === "gateway" ? n.ping2m : n.buffer2m;
+          const max = kind === "gateway" ? 120 : 60;
+          const pad = 3 * dpr;
+          const y = (v: number) =>
+            h - pad - (Math.min(v, max) / max) * (h - pad * 2);
+          ctx.clearRect(0, 0, w, h);
+          ctx.lineWidth = 1.5 * dpr;
+          ctx.lineJoin = "round";
+          ctx.strokeStyle = cs.getPropertyValue("--spark").trim() || "#888";
+          ctx.beginPath();
+          let connected = false;
+          for (let k = 23; k >= 0; k--) {
+            const v = ring.at(k);
+            if (!Number.isFinite(v)) {
+              connected = false;
+              continue;
+            }
+            const x = ((23 - k) / 23) * (w - pad * 2) + pad;
+            if (!connected) {
+              ctx.moveTo(x, y(v));
+              connected = true;
+            } else ctx.lineTo(x, y(v));
+          }
+          ctx.stroke();
+          const current = ring.at(0);
+          cv.dataset.available = Number.isFinite(current) ? "true" : "false";
+          if (Number.isFinite(current)) {
+            ctx.fillStyle = cs.getPropertyValue("--spark-now").trim() || "#fff";
+            ctx.beginPath();
+            ctx.arc(w - pad, y(current), 2.5 * dpr, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        },
+        2,
+      ),
+    [uid, kind, store],
+  );
+  return (
+    <canvas ref={ref} className="spark" data-available="false" aria-hidden />
+  );
+}
 export function StatTiles({
+  uid,
   compact,
+  local,
 }: {
   uid: string;
   compact?: boolean | undefined;
+  local?: boolean | undefined;
 }) {
   const store = useTelemetryStore();
   const host = useRef<HTMLSpanElement>(null);
@@ -366,44 +449,59 @@ export function StatTiles({
       paint(
         store,
         () => {
-          const n = store.net();
-          const values = [n.ping, n.buffer, n.drops];
+          const n = store.net(uid);
+          const values = local
+            ? [n.buffer, n.drops]
+            : [n.ping, n.buffer, n.drops];
           host.current
             ?.querySelectorAll<HTMLElement>("[data-value]")
             .forEach((el, i) => {
+              if (i === values.length - 1) {
+                if ((n.drops ?? 0) > 0) el.dataset.warn = "";
+                else delete el.dataset.warn;
+              }
               el.textContent =
-                values[i] === null ? "—" : `${Math.round(values[i] ?? 0)}`;
+                values[i] == null ? "—" : `${Math.round(values[i] ?? 0)}`;
             });
         },
         2,
       ),
-    [store],
+    [store, uid, local],
   );
   return (
-    <span ref={host} className="stats" data-compact={compact || undefined}>
-      <span
-        className="stat"
-        title="Discord gateway round trip, when available; voice-server ping is unavailable"
-      >
-        <span className="stat-label">Gateway</span>
-        <span className="stat-value tabular">
-          <span data-value>—</span>
-          <small> ms</small>
+    <span
+      ref={host}
+      className="stats"
+      data-compact={compact || undefined}
+      data-local={local || undefined}
+    >
+      {!local && (
+        <span
+          className="stat"
+          title="Measured Discord gateway round trip; voice-server ping is unavailable"
+        >
+          <span className="stat-label">Gateway</span>
+          <span className="stat-value tabular">
+            <span data-value>—</span>
+            <small> ms</small>
+          </span>
+          {!compact && <Spark uid={uid} kind="gateway" />}
         </span>
-      </span>
+      )}
       <span
         className="stat"
-        title="Audio queued inside Echocord; this is not listener delay"
+        title="Audio queued inside Echocord; not hardware or listener delay"
       >
         <span className="stat-label">Buffer</span>
         <span className="stat-value tabular">
           <span data-value>—</span>
           <small> ms</small>
         </span>
+        {!compact && <Spark uid={uid} kind="buffer" />}
       </span>
       <span
         className="stat"
-        title="Frames dropped from the bounded native audio queue"
+        title="Native output frames dropped to keep queued audio bounded"
       >
         <span className="stat-label">Dropped</span>
         <span className="stat-value tabular" data-value>
@@ -416,10 +514,13 @@ export function StatTiles({
 
 /** Native buffer observations only; unavailable gateway values do not become a series. */
 export function NetChart({
+  uid,
+  local,
   seconds,
   minHeight = 28,
 }: {
   uid: string;
+  local?: boolean | undefined;
   seconds: number;
   minHeight?: number | undefined;
 }) {
@@ -449,7 +550,7 @@ export function NetChart({
           if (cv.width !== w) cv.width = w;
           if (cv.height !== h) cv.height = h;
           const cs = getComputedStyle(cv);
-          const n = store.net();
+          const n = store.net(uid);
           const samples = Math.min(seconds * 2, n.buffer2m.buf.length);
           let max = 0;
           for (let k = 0; k < samples; k++) {
@@ -492,7 +593,7 @@ export function NetChart({
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
           for (const series of [
-            { ring: n.ping2m, css: "--net-a" },
+            ...(!local ? [{ ring: n.ping2m, css: "--net-a" }] : []),
             { ring: n.buffer2m, css: "--net-b" },
           ]) {
             ctx.strokeStyle = cs.getPropertyValue(series.css).trim();
@@ -532,14 +633,16 @@ export function NetChart({
         },
         2,
       ),
-    [store, seconds, minHeight],
+    [store, uid, local, seconds, minHeight],
   );
   return (
     <div className="net-chart" ref={box}>
       <div className="net-legend" aria-hidden>
-        <span className="net-key" data-series="ping2m">
-          Gateway
-        </span>
+        {!local && (
+          <span className="net-key" data-series="ping2m">
+            Gateway
+          </span>
+        )}
         <span className="net-key" data-series="buffer2m">
           Buffer
         </span>
@@ -646,7 +749,7 @@ function ConnectLog({
   );
 }
 
-function InlinePing({ uid: _uid }: { uid: string }) {
+function InlinePing({ uid }: { uid: string }) {
   const store = useTelemetryStore();
   const ref = useRef<HTMLSpanElement>(null);
   useEffect(
@@ -654,13 +757,13 @@ function InlinePing({ uid: _uid }: { uid: string }) {
       paint(
         store,
         () => {
-          const n = store.net();
+          const n = store.net(uid);
           if (ref.current)
             ref.current.textContent = `${n.buffer === null ? "—" : Math.round(n.buffer)} ms buffer · ${n.drops ?? "—"} dropped`;
         },
         2,
       ),
-    [store],
+    [store, uid],
   );
   return <span ref={ref}>Awaiting audio telemetry</span>;
 }
@@ -752,6 +855,35 @@ function MuteToggle({
   );
 }
 
+function useIdentityNotice(key: string, name: string, ready: boolean) {
+  const previous = useRef({ key, name });
+  const pending = useRef<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (previous.current.key !== key) {
+      pending.current = previous.current.name;
+      previous.current = { key, name };
+    } else previous.current.name = name;
+    const from = pending.current;
+    if (!from) return;
+    if (timer.current) clearTimeout(timer.current);
+    setNotice(ready ? `Switched from ${from}` : `Selected instead of ${from}`);
+    if (ready) pending.current = null;
+    timer.current = setTimeout(() => {
+      setNotice(null);
+      pending.current = null;
+    }, 2800);
+  }, [key, name, ready]);
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+  return notice;
+}
+
 const sourceTag = (c: Source) =>
   c.state === "opening"
     ? "Opening…"
@@ -792,9 +924,16 @@ export function SourceCard({
   const { host, readout } = useLevel(`src:${card.uid}`);
   const capturing = card.state === "capturing";
   const opening = card.state === "opening";
-  const detail = card.restored
-    ? "From last session · press Capture to reattach"
-    : s.detail;
+  const notice = useIdentityNotice(
+    card.sourceId,
+    s.name,
+    card.state === "capturing",
+  );
+  const detail =
+    notice ??
+    (card.restored
+      ? "From last session · press Capture to reattach"
+      : s.detail);
   const tag = sourceTag(card);
   const idle =
     card.state === "stopped"
@@ -844,7 +983,9 @@ export function SourceCard({
       <SourceGlyph glyph={s.glyph} tint={s.tint} />
       <span className="id-text">
         <span className="id-name">{s.name}</span>
-        <span className="id-detail">{detail}</span>
+        <span className="id-detail" data-notice={notice ? true : undefined}>
+          {detail}
+        </span>
       </span>
       <ArrowRightLeft className="id-change" size={14} aria-hidden />
     </button>
@@ -933,9 +1074,17 @@ export interface DestHandlers {
   details: () => void;
 }
 
-function Preflight({ bot, capturing }: { bot: boolean; capturing: number }) {
+function Preflight({
+  bot,
+  botName,
+  capturing,
+}: {
+  bot: boolean;
+  botName: string;
+  capturing: number;
+}) {
   const items: [boolean, string][] = [
-    [bot, bot ? "The bot is ready" : "Set up the Discord bot"],
+    [bot, bot ? `${botName} is ready` : "Set up the Discord bot"],
     [
       capturing > 0,
       capturing > 0
@@ -966,6 +1115,7 @@ export function DestCard({
   compact,
   sourcesCapturing,
   botReady,
+  botName,
   h,
 }: {
   card: Dest;
@@ -974,12 +1124,30 @@ export function DestCard({
   compact?: boolean | undefined;
   sourcesCapturing: number;
   botReady: boolean;
+  botName: string;
   h: DestHandlers;
 }) {
   const server = card.server;
   const channel = card.channel;
   const { host, readout } = useLevel(`dst:${card.uid}`);
-  const sk = statusKey(card.state);
+  const local = card.kind === "playback";
+  const sk = local && card.state === "live" ? "playing" : statusKey(card.state);
+  const statusLabel = local
+    ? card.state === "live"
+      ? "Playing"
+      : card.state === "connecting"
+        ? "Opening"
+        : card.state === "disconnecting"
+          ? "Stopping"
+          : card.state === "fault" || card.state === "cleanup-incomplete"
+            ? "Fault"
+            : "Stopped"
+    : STATUS[statusKey(card.state)];
+  const notice = useIdentityNotice(
+    `${card.kind}:${card.deviceId ?? `${card.serverId}:${card.channelId}`}`,
+    channel.name,
+    card.state === "live",
+  );
   const live = card.state === "live";
   const busy = card.state === "connecting" || card.state === "recovering";
   const faulted = !!(
@@ -997,13 +1165,13 @@ export function DestCard({
         className="btn btn-primary btn-connect"
         onClick={h.connect}
       >
-        Connect
+        {local ? "Play" : "Connect"}
       </button>
     );
   } else if (card.state === "cleanup-incomplete") {
     action = (
       <button type="button" className="btn btn-connect" onClick={h.disconnect}>
-        Retry disconnect
+        {local ? "Retry stop" : "Retry disconnect"}
       </button>
     );
   } else if (card.state === "fault") {
@@ -1016,7 +1184,7 @@ export function DestCard({
     action = (
       <button type="button" className="btn btn-connect" disabled>
         <LoaderCircle size={14} className="spin" />
-        Leaving
+        {local ? "Stopping" : "Leaving"}
       </button>
     );
   } else {
@@ -1027,7 +1195,7 @@ export function DestCard({
         data-on
         onClick={h.disconnect}
       >
-        {busy ? "Cancel" : "Disconnect"}
+        {busy ? "Cancel" : local ? "Stop" : "Disconnect"}
       </button>
     );
   }
@@ -1042,7 +1210,7 @@ export function DestCard({
       title={hasNet ? "Connection details" : undefined}
     >
       <span className="badge-dot" aria-hidden />
-      {STATUS[sk]}
+      {statusLabel}
     </button>
   );
 
@@ -1052,19 +1220,27 @@ export function DestCard({
       className="identity"
       onClick={h.change}
       title="Change room"
-      aria-label="Change room"
+      aria-label={local ? `Change ${channel.name}` : "Change room"}
     >
-      <ServerTile
-        initials={server.initials}
-        tint={server.tint}
-        iconUrl={server.iconUrl}
-      />
+      {local ? (
+        <SourceGlyph glyph="playback" tint="#6b7f8e" />
+      ) : (
+        <ServerTile
+          initials={server.initials}
+          tint={server.tint}
+          iconUrl={server.iconUrl}
+        />
+      )}
       <span className="id-text">
         <span className="id-name">
-          <Volume2 size={14} className="id-channel-icon" aria-hidden />
+          {!local && (
+            <Volume2 size={14} className="id-channel-icon" aria-hidden />
+          )}
           {channel.name}
         </span>
-        <span className="id-detail">{server.name}</span>
+        <span className="id-detail" data-notice={notice ? true : undefined}>
+          {notice ?? server.name}
+        </span>
       </span>
       <ArrowRightLeft className="id-change" size={14} aria-hidden />
     </button>
@@ -1083,14 +1259,14 @@ export function DestCard({
       <div
         className="confirm"
         role="alertdialog"
-        aria-label="Disconnect and remove"
+        aria-label={local ? "Stop and remove" : "Disconnect and remove"}
       >
         <span className="confirm-text">
-          Disconnect from {channel.name} and remove it?
+          {local ? "Stop" : "Disconnect from"} {channel.name} and remove it?
         </span>
         <span className="confirm-actions">
           <button type="button" className="btn btn-danger" onClick={h.remove}>
-            Disconnect &amp; remove
+            {local ? "Stop & remove" : "Disconnect & remove"}
           </button>
           <button
             type="button"
@@ -1117,6 +1293,12 @@ export function DestCard({
           Dismiss
         </button>
       </Slip>
+    );
+  } else if (card.state === "connecting" && local) {
+    body = (
+      <span className="net-line" aria-live="polite">
+        Opening {channel.name}…
+      </span>
     );
   } else if (card.state === "connecting") {
     const idx = STAGES.findIndex((x) => x.id === card.stage);
@@ -1158,14 +1340,14 @@ export function DestCard({
           onClick={h.details}
           title="Connection details"
         >
-          <StatTiles uid={card.uid} />
+          <StatTiles uid={card.uid} local={local} />
         </button>
         <div className="chart-slot d-chart">
-          <NetChart uid={card.uid} seconds={60} />
+          <NetChart uid={card.uid} seconds={60} local={local} />
         </div>
         <span className="net-line tabular d-meta">
-          <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} /> on
-          air
+          <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} />{" "}
+          {local ? "playing" : "on air"}
         </span>
         <button
           type="button"
@@ -1182,12 +1364,37 @@ export function DestCard({
     body = (
       <>
         <div className="d-preflight">
-          <Preflight bot={botReady} capturing={sourcesCapturing} />
+          {local ? (
+            <ul className="preflight">
+              <li data-ok>
+                <Check size={15} aria-hidden />
+                Explicit playback device selected
+              </li>
+              <li data-ok={sourcesCapturing > 0 || undefined}>
+                {sourcesCapturing > 0 ? (
+                  <Check size={15} aria-hidden />
+                ) : (
+                  <TriangleAlert size={15} aria-hidden />
+                )}
+                {sourcesCapturing > 0
+                  ? `${sourcesCapturing} source${sourcesCapturing > 1 ? "s" : ""} capturing`
+                  : "No source is capturing — playback would be silent"}
+              </li>
+            </ul>
+          ) : (
+            <Preflight
+              bot={botReady}
+              botName={botName}
+              capturing={sourcesCapturing}
+            />
+          )}
         </div>
         <span className="net-line quiet d-hint">
           {sourcesCapturing === 0
             ? "No source is capturing yet"
-            : "Ready to join this room"}
+            : local
+              ? "Press Play to start this output"
+              : `Joins as ${botName}`}
         </span>
       </>
     );
@@ -1199,11 +1406,12 @@ export function DestCard({
       id={`card-${card.uid}`}
       className="card dest-card panel"
       data-state={card.state}
+      data-kind={card.kind}
       data-status={sk}
       data-muted={card.muted || undefined}
       data-expand={expand || undefined}
       data-compact={compact || undefined}
-      aria-label={`${channel.name} on ${server.name}, ${STATUS[sk]}`}
+      aria-label={`${channel.name}${local ? ", playback output" : ` on ${server.name}`}, ${statusLabel}`}
     >
       <div className="card-row identity-row">
         {identity}
@@ -1226,7 +1434,7 @@ export function DestCard({
             onCommit={h.commit}
             label={`${channel.name} volume`}
             muted={card.muted}
-            idle={live ? undefined : "Not sending"}
+            idle={live ? undefined : local ? "Not playing" : "Not sending"}
             readout={readout}
           />
         </div>

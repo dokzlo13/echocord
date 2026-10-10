@@ -15,6 +15,7 @@ export const fixtureNames = [
   "faults",
   "connecting",
   "cleanup",
+  "outputs",
 ] as const;
 export type FixtureName = (typeof fixtureNames)[number];
 export function fixtureSnapshot(
@@ -159,6 +160,23 @@ export function fixtureSnapshot(
     };
   }
   const telemetry: MixTelemetry = {
+    destinations:
+      name === "first-run"
+        ? []
+        : [
+            {
+              destinationId: "dest:1",
+              sessionId: 1,
+              levelDbfs:
+                connection.phase === "connected" && name !== "muted"
+                  ? -24
+                  : null,
+              queuedFrames: connection.phase === "connected" ? 480 : 0,
+              droppedFrames: 0,
+              underrunFrames: 0,
+              gatewayPingMs: null,
+            },
+          ],
     mixPreClip: false,
     inputs: inputs.map((s) => ({
       stripId: s.stripId,
@@ -175,7 +193,34 @@ export function fixtureSnapshot(
     underrunFrames: 0,
     gatewayPingMs: null,
   };
-  return {
+  const snapshot: ControlSnapshot = {
+    playbackDevices: [
+      {
+        id: "play:headphones",
+        name: "Preview headphones",
+        available: true,
+        detail: "48 kHz stereo playback",
+      },
+      {
+        id: "play:speakers",
+        name: "Preview speakers",
+        available: true,
+        detail: "48 kHz stereo playback",
+      },
+      {
+        id: "play:cable",
+        name: "Preview cable input",
+        available: true,
+        detail: "48 kHz stereo playback",
+      },
+      {
+        id: "play:unavailable",
+        name: "Unavailable output",
+        available: false,
+        detail: "This device is disconnected.",
+      },
+    ],
+    playbackDiscovery: { phase: "ready" },
     revision: 1,
     sessionId: 1,
     sources,
@@ -187,6 +232,10 @@ export function fixtureSnapshot(
         : [
             {
               destinationId: "dest:1",
+              kind: "discord",
+              deviceId: null,
+              displayName: null,
+              sessionId: 1,
               serverId: "guild:1",
               channelId: "room:1",
               connection,
@@ -220,6 +269,41 @@ export function fixtureSnapshot(
     },
     output: { volumePercent: 50, muted: name === "muted" },
   };
+  if (name === "outputs") {
+    const discord = snapshot.destinations[0];
+    if (discord) discord.connection = { phase: "connected" };
+    for (const [id, index] of [
+      ["play:headphones", 1],
+      ["play:speakers", 2],
+      ["play:cable", 3],
+    ] as const) {
+      const device = snapshot.playbackDevices.find((d) => d.id === id);
+      if (device)
+        snapshot.destinations.push({
+          destinationId: `local:${index}`,
+          sessionId: 1,
+          kind: "playback",
+          deviceId: id,
+          displayName: device.name,
+          serverId: "",
+          channelId: "",
+          connection:
+            index === 2 ? { phase: "disconnected" } : { phase: "connected" },
+          volumeDb: index === 3 ? -12 : 0,
+          muted: index === 3,
+        });
+    }
+    snapshot.telemetry.destinations = snapshot.destinations.map((d) => ({
+      destinationId: d.destinationId,
+      sessionId: d.sessionId,
+      levelDbfs: d.connection.phase === "connected" && !d.muted ? -20 : null,
+      queuedFrames: 480,
+      droppedFrames: 0,
+      underrunFrames: 0,
+      gatewayPingMs: d.kind === "discord" ? 38 : null,
+    }));
+  }
+  return snapshot;
 }
 export class FixtureTransport implements Transport {
   current: ControlSnapshot;
@@ -250,6 +334,31 @@ export class FixtureTransport implements Transport {
     for (const f of this.visibility) f(v);
   }
   emit(patch: Partial<ControlSnapshot>) {
+    if (patch.telemetry) {
+      const t = patch.telemetry;
+      const d = (patch.destinations ?? this.current.destinations).find(
+        (d) => d.kind === "discord",
+      );
+      if (d) {
+        const current = t.destinations.find(
+          (v) => v.destinationId === d.destinationId,
+        );
+        if (current)
+          t.destinations = t.destinations.map((v) =>
+            v.destinationId === d.destinationId
+              ? {
+                  ...v,
+                  sessionId: d.sessionId,
+                  levelDbfs: t.outputLevelDbfs,
+                  queuedFrames: t.queuedFrames,
+                  droppedFrames: t.droppedFrames,
+                  underrunFrames: t.underrunFrames,
+                  gatewayPingMs: t.gatewayPingMs,
+                }
+              : v,
+          );
+      }
+    }
     this.current = {
       ...this.current,
       ...patch,
@@ -345,34 +454,41 @@ export class FixtureTransport implements Transport {
         break;
       }
       case "add-destination":
-        this.current.destinations = [
-          {
-            destinationId: "dest:1",
-            serverId: c.serverId,
-            channelId: c.channelId,
-            connection: { phase: "disconnected" },
-            volumeDb: 0,
-            muted: false,
-          },
-        ];
+        this.current.destinations.push({
+          destinationId: "dest:1",
+          kind: "discord",
+          deviceId: null,
+          displayName: null,
+          sessionId: 1,
+          serverId: c.serverId,
+          channelId: c.channelId,
+          connection: { phase: "disconnected" },
+          volumeDb: 0,
+          muted: false,
+        });
         break;
       case "remove-destination":
-        this.current.destinations = [];
+        this.current.destinations = this.current.destinations.filter(
+          (d) => d.destinationId !== c.destinationId,
+        );
         break;
       case "change-destination": {
         const d = dest(c.destinationId);
         if (d) {
           d.serverId = c.serverId;
           d.channelId = c.channelId;
+          if (d.connection.phase === "connected") d.sessionId++;
         }
         break;
       }
       case "connect-destination": {
         const d = dest(c.destinationId);
-        if (d)
+        if (d) {
+          d.sessionId++;
           d.connection = this.holdConnect
             ? { phase: "connecting", stage: "gateway" }
             : { phase: "connected" };
+        }
         break;
       }
       case "disconnect-destination": {
@@ -396,6 +512,40 @@ export class FixtureTransport implements Transport {
         if (d) d.muted = c.muted;
         break;
       }
+      case "add-playback-destination": {
+        const device = this.current.playbackDevices.find(
+          (d) => d.id === c.deviceId,
+        );
+        if (device)
+          this.current.destinations.push({
+            destinationId: `local:${this.current.destinations.length}`,
+            sessionId: 0,
+            kind: "playback",
+            deviceId: device.id,
+            displayName: device.name,
+            serverId: "",
+            channelId: "",
+            connection: { phase: "disconnected" },
+            volumeDb: 0,
+            muted: false,
+          });
+        break;
+      }
+      case "change-playback-destination": {
+        const d = dest(c.destinationId);
+        const device = this.current.playbackDevices.find(
+          (d) => d.id === c.deviceId,
+        );
+        if (d && device) {
+          d.deviceId = device.id;
+          d.displayName = device.name;
+          if (d.connection.phase === "connected") d.sessionId++;
+        }
+        break;
+      }
+      case "refresh-playback-devices":
+        this.current.playbackDiscovery = { phase: "ready" };
+        break;
       case "set-settings":
         this.current.settings = c.settings;
         break;
@@ -409,6 +559,17 @@ export class FixtureTransport implements Transport {
         this.current.bot = { ...this.current.bot, status: "ready" };
         break;
     }
+    this.current.telemetry.destinations = this.current.destinations.map(
+      (d) => ({
+        destinationId: d.destinationId,
+        sessionId: d.sessionId,
+        levelDbfs: d.connection.phase === "connected" && !d.muted ? -24 : null,
+        queuedFrames: d.connection.phase === "connected" ? 480 : 0,
+        droppedFrames: 0,
+        underrunFrames: 0,
+        gatewayPingMs: null,
+      }),
+    );
     this.emit({
       inputs: this.current.inputs,
       destinations: this.current.destinations,

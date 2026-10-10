@@ -77,6 +77,8 @@ pub enum Failure {
     Authentication,
     Permission,
     Capture,
+    ApplicationCapture,
+    SourceExited,
     Connection,
     Protocol,
 }
@@ -95,7 +97,15 @@ impl Failure {
             ),
             Self::Capture => (
                 ErrorCode::CaptureFailed,
-                "The selected recording source is unavailable.",
+                "The selected audio source is unavailable.",
+            ),
+            Self::ApplicationCapture => (
+                ErrorCode::CaptureFailed,
+                "Application capture is unavailable or stopped unexpectedly. Use a recording input or another running application.",
+            ),
+            Self::SourceExited => (
+                ErrorCode::CaptureFailed,
+                "The selected application exited or is unavailable. Refresh sources and select its new instance.",
             ),
             Self::Connection => (ErrorCode::ConnectionFailed, "The voice connection ended."),
             Self::Protocol => (ErrorCode::Internal, "The engine protocol failed."),

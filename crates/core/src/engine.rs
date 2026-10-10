@@ -385,6 +385,7 @@ async fn run_session(
         },
     };
     let token_file = init.token_file.clone();
+    crate::audio::validate_source(&init.source_id).map_err(|_| Failure::SourceExited)?;
     let token = tokio::task::spawn_blocking(move || protocol::read_token(&token_file))
         .await
         .map_err(|_| Failure::Configuration)?
@@ -452,6 +453,7 @@ async fn run_session(
         }
     });
     let work_stop_rx = stop_rx.clone();
+    let capture_cleanup_failed = Arc::new(AtomicBool::new(false));
     let work = async {
         let startup = async {
             loop {
@@ -506,16 +508,20 @@ async fn run_session(
             work_stop_rx,
             statuses.clone(),
             meters,
+            capture_cleanup_failed.clone(),
         )
         .await
     };
     let mut work = Box::pin(work);
-    let result = tokio::select! {
+    let mut result = tokio::select! {
         biased;
         cause = cancelled(&mut stop_rx) => match cause { StopCause::Failed(f) => Err(f), _ => Ok(()) },
         result = &mut work => result,
     };
     drop(work); // Releases CaptureGuard before awaiting any gateway cleanup.
+    if capture_cleanup_failed.load(std::sync::atomic::Ordering::Acquire) {
+        result = Err(Failure::Capture);
+    }
     // Cancel intent before cleanup. The parent still requires observed process exit.
     stop(&stops, StopCause::Requested);
     signals
@@ -668,11 +674,16 @@ impl songbird::EventHandler for Signals {
 }
 
 #[cfg(windows)]
-struct CaptureGuard(crate::audio::CaptureControl);
+struct CaptureGuard(
+    crate::audio::CaptureControl,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
 #[cfg(windows)]
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
-        self.0.stop();
+        if !self.0.stop() {
+            self.1.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -690,6 +701,7 @@ async fn capture_loop(
     mut stop_rx: watch::Receiver<StopCause>,
     statuses: mpsc::Sender<Status>,
     meters: watch::Sender<Option<Capture>>,
+    cleanup_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), Failure> {
     let mut capture: Option<CaptureGuard> = None;
     let mut missing = RecoveryWindow::new(DEVICE_GRACE);
@@ -761,16 +773,21 @@ async fn capture_loop(
                     capture = None;
                     call.lock().await.stop();
                     meters.send_replace(Some(Capture { phase: phase.clone(), ..ControlSnapshot::default().capture }));
-                    if phase != CapturePhase::Missing { return Err(Failure::Capture); }
+                    if phase != CapturePhase::Missing {
+                        if crate::audio::application::is_application_id(&init.source_id) {
+                            return Err(if crate::audio::validate_source(&init.source_id).is_err() { Failure::SourceExited } else { Failure::ApplicationCapture });
+                        }
+                        return Err(Failure::Capture);
+                    }
                     missing.begin();
                     let _ = statuses.send(Status::DeviceMissing).await;
                 }
                 if missing.expired() { return Err(Failure::Capture); }
                 if capture.is_none() && now >= next_device_try {
                     next_device_try = now + Duration::from_secs(1);
-                    match crate::audio::start_capture(&init.source_id) {
+                    match crate::audio::start_capture_with_cancel(&init.source_id, &|| *stop_rx.borrow() != StopCause::Running) {
                         Ok(session) => {
-                            let guard = CaptureGuard(session.control);
+                            let guard = CaptureGuard(session.control, cleanup_failed.clone());
                             let output = output.borrow_and_update().clone();
                             guard.0.set_output(output.volume_percent, output.muted);
                             if *stop_rx.borrow() != StopCause::Running { return Ok(()); }
@@ -781,7 +798,9 @@ async fn capture_loop(
                             capture = Some(guard); missing.reset();
                             if !recovering.active() { let _ = statuses.send(Status::Connected).await; }
                         }
+                        Err(_) if *stop_rx.borrow() != StopCause::Running => return Ok(()),
                         Err(_) if missing.active() => {},
+                        Err(_) if crate::audio::application::is_application_id(&init.source_id) => return Err(Failure::ApplicationCapture),
                         Err(_) => return Err(Failure::Capture),
                     }
                 }

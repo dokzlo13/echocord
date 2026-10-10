@@ -24,7 +24,7 @@ use windows_sys::Win32::{
     Security::SECURITY_ATTRIBUTES,
     System::{
         JobObjects::{
-            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
             SetInformationJobObject,
         },
@@ -156,6 +156,25 @@ impl EngineProcess {
     /// Diagnostic identity only. Supervision always uses the owned handle.
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Read-only membership check against a caller's held process handle.
+    /// Useful when an owned launcher creates a distinct visible application root.
+    /// This never grants termination rights or supervises a process by PID.
+    pub fn contains_process(&self, process: &OwnedHandle) -> io::Result<bool> {
+        let mut member = 0;
+        // SAFETY: both handles are held for this call and result is a live BOOL output.
+        if unsafe {
+            IsProcessInJob(
+                process.as_raw_handle(),
+                self._job.as_raw_handle(),
+                &mut member,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(member != 0)
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<u32>> {

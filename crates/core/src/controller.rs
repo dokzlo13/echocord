@@ -51,6 +51,7 @@ enum Request {
 }
 enum Event {
     Sources(u64, Result<Vec<RecordingSource>, AppError>),
+    SourceScanFinished(u64, Option<Result<Vec<RecordingSource>, AppError>>),
     Catalog(u64, Result<Catalog, AppError>),
     Unconfigured(u64),
     Configured(u64, Result<(), AppError>),
@@ -167,8 +168,16 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     if bytes.len() as u64 > MAX_SETTINGS_BYTES {
         return Err(Failure::Configuration.error());
     }
-    let prefs: Preferences =
+    let mut prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
+    if prefs
+        .selection
+        .source_id
+        .as_deref()
+        .is_some_and(crate::audio::application::is_application_id)
+    {
+        prefs.selection.source_id = None;
+    }
     if prefs
         .output
         .as_ref()
@@ -218,6 +227,37 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
 struct Catalog {
     servers: Vec<Server>,
     name: String,
+}
+
+async fn source_scan(
+    epoch: u64,
+    events: mpsc::Sender<Event>,
+    mut scan: tokio::task::JoinHandle<Result<Vec<RecordingSource>, AppError>>,
+    deadline: Duration,
+) {
+    match tokio::time::timeout(deadline, &mut scan).await {
+        Ok(result) => {
+            let result = result.map_err(|_| unavailable()).and_then(|result| result);
+            let _ = events
+                .send(Event::SourceScanFinished(epoch, Some(result)))
+                .await;
+        }
+        Err(_) => {
+            let _ = events
+                .send(Event::Sources(
+                    epoch,
+                    Err(error(
+                        ErrorCode::CaptureFailed,
+                        "Audio source discovery timed out. Retry after the current scan finishes.",
+                    )),
+                ))
+                .await;
+            // Blocking work cannot be cancelled by dropping its task. Keep actual occupancy,
+            // discard late data, and preserve the displayed error until an explicit retry.
+            let _ = scan.await;
+            let _ = events.send(Event::SourceScanFinished(epoch, None)).await;
+        }
+    }
 }
 
 fn missing_token(config: &ControllerConfig) -> bool {
@@ -289,7 +329,12 @@ fn generic_failure(code: &ErrorCode) -> bool {
 fn specific_failure(code: Failure) -> bool {
     matches!(
         code,
-        Failure::Configuration | Failure::Authentication | Failure::Permission | Failure::Capture
+        Failure::Configuration
+            | Failure::Authentication
+            | Failure::Permission
+            | Failure::Capture
+            | Failure::ApplicationCapture
+            | Failure::SourceExited
     )
 }
 
@@ -300,6 +345,7 @@ struct Actor {
     events: mpsc::Sender<Event>,
     catalog_epoch: u64,
     source_epoch: u64,
+    source_scanning: bool,
     child: Option<ChildControl>,
     pending: bool,
     preflight: Option<tokio::task::JoinHandle<()>>,
@@ -326,6 +372,7 @@ impl Actor {
             events,
             catalog_epoch: 0,
             source_epoch: 0,
+            source_scanning: false,
             child: None,
             pending: false,
             preflight: None,
@@ -461,30 +508,21 @@ impl Actor {
         });
     }
     fn refresh_sources(&mut self) {
-        if matches!(self.snapshot.source_discovery, Discovery::Loading) {
+        if self.source_scanning {
             return;
         }
+        self.source_scanning = true;
         self.source_epoch = self.source_epoch.wrapping_add(1);
         let epoch = self.source_epoch;
         self.snapshot.source_discovery = Discovery::Loading;
         self.publish();
         let events = self.events.clone();
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                Duration::from_secs(5),
-                tokio::task::spawn_blocking(crate::audio::enumerate_sources),
-            )
-            .await
-            .map_err(|_| {
-                error(
-                    ErrorCode::CaptureFailed,
-                    "Audio source discovery timed out.",
-                )
-            })
-            .and_then(|result| result.map_err(|_| unavailable()))
-            .and_then(|result| result);
-            let _ = events.send(Event::Sources(epoch, result)).await;
-        });
+        tokio::spawn(source_scan(
+            epoch,
+            events,
+            tokio::task::spawn_blocking(crate::audio::enumerate_sources),
+            Duration::from_secs(5),
+        ));
     }
     fn poll_deadline(&mut self) {
         if self.deadline.is_some_and(|d| Instant::now() >= d)
@@ -521,7 +559,7 @@ impl Actor {
                 {
                     return Err(error(
                         ErrorCode::InvalidSelection,
-                        "Select an available recording source.",
+                        "Select an available audio source.",
                     ));
                 }
                 self.snapshot.selection.source_id = Some(source_id);
@@ -723,7 +761,7 @@ impl Actor {
             .ok_or_else(|| {
                 error(
                     ErrorCode::InvalidSelection,
-                    "Select an available recording source.",
+                    "Select an available audio source.",
                 )
             })?;
         let server = self
@@ -829,6 +867,15 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::SourceScanFinished(epoch, result) => {
+                if epoch != self.source_epoch {
+                    return;
+                }
+                self.source_scanning = false;
+                if let Some(result) = result {
+                    self.event(Event::Sources(epoch, result));
+                }
+            }
             Event::Sources(epoch, result) => {
                 if epoch != self.source_epoch || self.shutting_down {
                     return;
@@ -846,10 +893,18 @@ impl Actor {
                                 .find(|source| &source.id == selected)
                                 .cloned()
                         {
-                            previous.available = false;
-                            previous.detail = Some(
-                                "No longer available. Refresh and select a running source.".into(),
-                            );
+                            #[cfg(windows)]
+                            let still_running = previous.kind == SourceKind::Application
+                                && crate::audio::validate_source(&previous.id).is_ok();
+                            #[cfg(not(windows))]
+                            let still_running = false;
+                            previous.available = still_running;
+                            if !still_running {
+                                previous.detail = Some(
+                                    "No longer available. Refresh and select a running source."
+                                        .into(),
+                                );
+                            }
                             sources.push(previous);
                         }
                         self.snapshot.sources = sources;
@@ -1728,6 +1783,42 @@ mod tests {
             a.snapshot.source_discovery,
             Discovery::Error { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn timed_out_source_scan_keeps_occupancy_and_discards_late_results() {
+        let mut a = actor();
+        a.source_epoch = 7;
+        a.source_scanning = true;
+        a.snapshot.source_discovery = Discovery::Loading;
+        let sources = a.snapshot.sources.clone();
+        let (release, released) = std::sync::mpsc::channel();
+        let scan = tokio::task::spawn_blocking(move || {
+            released.recv().unwrap();
+            Ok(Vec::new())
+        });
+        let (events, mut receive) = mpsc::channel(2);
+        let watcher = tokio::spawn(source_scan(7, events, scan, Duration::from_millis(10)));
+        a.event(receive.recv().await.unwrap());
+        assert!(matches!(
+            a.snapshot.source_discovery,
+            Discovery::Error { .. }
+        ));
+        a.command(ControlCommand::RefreshSources).unwrap();
+        assert_eq!(a.source_epoch, 7);
+        assert!(a.source_scanning);
+        release.send(()).unwrap();
+        a.event(receive.recv().await.unwrap());
+        watcher.await.unwrap();
+        assert!(!a.source_scanning);
+        assert_eq!(a.snapshot.sources, sources);
+        assert!(matches!(
+            a.snapshot.source_discovery,
+            Discovery::Error { .. }
+        ));
+        a.command(ControlCommand::RefreshSources).unwrap();
+        assert_eq!(a.source_epoch, 8);
+        assert!(a.source_scanning);
     }
     fn running_actor(mut actor: Actor) -> (Controller, mpsc::Sender<Event>) {
         let (events, event_rx) = mpsc::channel(32);
@@ -2912,6 +3003,23 @@ mod tests {
         let restored = load_preferences(&config).unwrap().output.unwrap();
         assert!(restored.muted);
         assert_eq!(restored.volume_percent, 60);
+        assert_eq!(
+            load_preferences(&config)
+                .unwrap()
+                .selection
+                .source_id
+                .as_deref(),
+            Some("recording")
+        );
+        a.snapshot.selection.source_id = Some("app:42:0000000000000001".into());
+        save_preferences(&config, &a.snapshot).unwrap();
+        let app_restored = load_preferences(&config).unwrap();
+        assert!(app_restored.selection.source_id.is_none());
+        assert_eq!(
+            app_restored.selection.server_id,
+            a.snapshot.selection.server_id
+        );
+        assert_eq!(app_restored.output.unwrap(), a.snapshot.output);
         config.token_file = config.settings_file.clone();
         assert!(save_preferences(&config, &a.snapshot).is_err());
         std::fs::remove_dir_all(directory).unwrap();

@@ -1,12 +1,16 @@
 //! Explicitly selected Windows capture validation; no playback or network.
 //!
-//! --list emits recording descriptors as JSON for caller-owned private output.
+//! --list emits source descriptors as JSON for caller-owned private output.
 //! --source-id ID emits generic counters and local Read timing only. It never
 //! prints the selection, sample values, descriptions, or raw backend errors.
 
 use std::{ffi::OsString, io};
 
-const USAGE: &str = "Usage: capture-probe --list | --source-id ID | --help";
+#[cfg(windows)]
+#[path = "capture_probe/application_suite.rs"]
+mod application_suite;
+
+const USAGE: &str = "Usage: capture-probe --list | --source-id ID | --application-suite | --browser-suite FIREFOX_EXE OWNED_PROFILE FIRST_SYNTHETIC_URL SECOND_SYNTHETIC_URL | --help";
 type ProbeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -371,6 +375,10 @@ mod native {
 }
 
 fn run() -> ProbeResult<()> {
+    #[cfg(windows)]
+    if let Some(result) = application_suite::dispatch() {
+        return result;
+    }
     let mode = parse(std::env::args_os().skip(1))?;
     if mode == Mode::Help {
         println!("{USAGE}");

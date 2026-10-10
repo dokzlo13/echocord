@@ -7,6 +7,8 @@
 //! already returned bytes in the decoder/mixer remain outside this queue's control.
 
 use crate::model::{AppError, Capture, CapturePhase, RecordingSource};
+#[path = "application.rs"]
+pub mod application;
 use rtrb::Consumer;
 #[cfg(any(windows, test))]
 use rtrb::{Producer, RingBuffer};
@@ -42,6 +44,10 @@ const MISSING: u8 = 3;
 const FAILED: u8 = 4;
 const DENIED: u8 = 5;
 const ROUTE_CHANGED: u8 = 6;
+#[cfg(windows)]
+const APPLICATION_EXITED: u8 = 7;
+#[cfg(windows)]
+const CLEANUP_FAILED: u8 = 8;
 
 /// PCM and its independently cloneable control handle. Capture opens only in
 /// `start_capture`; enumeration never opens a stream.
@@ -60,7 +66,17 @@ impl CaptureControl {
     /// Idempotently cancel reads and reject future callback frames, then release
     /// the native stream. CPAL stream destruction can join its native thread;
     /// the parent engine-process exit deadline remains the shutdown guarantee.
-    pub fn stop(&self) {
+    pub fn stop(&self) -> bool {
+        #[cfg(windows)]
+        let _stop = self
+            .owner
+            .stop_gate
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        #[cfg(windows)]
+        if self.owner.shared.status.load(Ordering::Acquire) == CLEANUP_FAILED {
+            return false;
+        }
         self.owner.shared.status.store(STOPPED, Ordering::Release);
         #[cfg(windows)]
         {
@@ -72,7 +88,34 @@ impl CaptureControl {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
             drop(stream);
+            let worker = self
+                .owner
+                .worker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some(worker) = worker {
+                let deadline = Instant::now() + Duration::from_millis(200);
+                while !worker.is_finished() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                if !worker.is_finished() {
+                    self.owner
+                        .shared
+                        .status
+                        .store(CLEANUP_FAILED, Ordering::Release);
+                    return false;
+                }
+                if worker.join().is_err() {
+                    self.owner
+                        .shared
+                        .status
+                        .store(CLEANUP_FAILED, Ordering::Release);
+                    return false;
+                }
+            }
         }
+        true
     }
 
     /// Volume is clamped to 0..=100 as a defensive boundary; the command layer
@@ -126,6 +169,18 @@ impl CaptureControl {
             ROUTE_CHANGED => (
                 CapturePhase::Error,
                 Some("The capture route changed. Select the recording device again."),
+            ),
+            #[cfg(windows)]
+            APPLICATION_EXITED => (
+                CapturePhase::Error,
+                Some(
+                    "The selected application exited. Refresh sources and select its new instance.",
+                ),
+            ),
+            #[cfg(windows)]
+            CLEANUP_FAILED => (
+                CapturePhase::Error,
+                Some("Application capture cleanup did not finish. Disconnect and reconnect."),
             ),
             _ => (
                 CapturePhase::Error,
@@ -233,6 +288,10 @@ struct Owner {
     shared: Arc<Shared>,
     #[cfg(windows)]
     stream: Mutex<Option<cpal::Stream>>,
+    #[cfg(windows)]
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+    #[cfg(windows)]
+    stop_gate: Mutex<()>,
 }
 
 impl Drop for Owner {
@@ -244,6 +303,7 @@ impl Drop for Owner {
 struct Shared {
     status: AtomicU8,
     output: AtomicU64,
+    input_epoch: AtomicU64,
     peak_bits: AtomicU32,
     last_callback_ns: AtomicU64,
     output_meter: OutputMeter,
@@ -311,6 +371,7 @@ struct Frame {
     samples: [f32; 2],
     exposed_ns: u64,
     generation: u64,
+    input_epoch: u64,
 }
 
 /// Nonseekable, unknown-length stereo f32-LE PCM. The mutex makes the rtrb
@@ -442,6 +503,7 @@ impl Reader {
             shared.popped.fetch_add(1, Ordering::Release);
             let output = shared.output.load(Ordering::Acquire);
             if shared.clock.now().saturating_sub(frame.exposed_ns) > MAX_AGE_NS
+                || frame.input_epoch != shared.input_epoch.load(Ordering::Acquire)
                 || frame.generation != output >> GENERATION_SHIFT
                 || output & MUTED != 0
             {
@@ -556,6 +618,7 @@ impl CaptureWriter {
                     samples,
                     exposed_ns,
                     generation: frame_generation,
+                    input_epoch: self.shared.input_epoch.load(Ordering::Acquire),
                 })
                 .is_ok()
             {
@@ -581,6 +644,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
     let shared = Arc::new(Shared {
         status: AtomicU8::new(OPENING),
         output: AtomicU64::new(100),
+        input_epoch: AtomicU64::new(0),
         peak_bits: AtomicU32::new(u32::MAX),
         last_callback_ns: AtomicU64::new(0),
         output_meter: OutputMeter::default(),
@@ -595,6 +659,10 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
         shared: shared.clone(),
         #[cfg(windows)]
         stream: Mutex::new(None),
+        #[cfg(windows)]
+        worker: Mutex::new(None),
+        #[cfg(windows)]
+        stop_gate: Mutex::new(()),
     });
     (
         CaptureWriter {
@@ -622,7 +690,37 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
 }
 
 #[cfg(windows)]
-pub use windows::{enumerate_sources, start_capture};
+pub fn enumerate_sources() -> Result<Vec<RecordingSource>, AppError> {
+    let mut sources = windows::enumerate_sources()?;
+    sources.extend(application::enumerate_sources()?);
+    Ok(sources)
+}
+
+#[cfg(windows)]
+pub fn start_capture(source_id: &str) -> Result<CaptureSession, AppError> {
+    start_capture_with_cancel(source_id, &|| false)
+}
+
+#[cfg(windows)]
+pub fn start_capture_with_cancel(
+    source_id: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CaptureSession, AppError> {
+    if application::is_application_id(source_id) {
+        application::start_capture(source_id, cancelled)
+    } else {
+        windows::start_capture(source_id)
+    }
+}
+
+#[cfg(windows)]
+pub fn validate_source(source_id: &str) -> Result<(), AppError> {
+    if application::is_application_id(source_id) {
+        application::validate_source(source_id)
+    } else {
+        Ok(())
+    }
+}
 
 #[cfg(not(windows))]
 pub fn enumerate_sources() -> Result<Vec<RecordingSource>, AppError> {
@@ -891,6 +989,29 @@ mod tests {
             .status
             .store(RUNNING, Ordering::Release);
         (writer, session, clock)
+    }
+
+    #[test]
+    fn discontinuity_epoch_discards_queued_previous_signal() {
+        let (mut writer, mut session, _) = setup();
+        feed(&mut writer, 100, 0.9, -0.9);
+        writer.shared.input_epoch.fetch_add(1, Ordering::AcqRel);
+        feed(&mut writer, 10, 0.1, -0.1);
+        assert_eq!(frames(&mut session.input, 10), vec![[0.1, -0.1]; 10]);
+        assert_eq!(session.control.snapshot().dropped_frames, 100);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_deadline_failure_remains_terminal_across_repeated_stop() {
+        let (_, session, _) = setup();
+        *session.control.owner.worker.lock().unwrap() = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(350));
+        }));
+        assert!(!session.control.stop());
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Error);
+        assert!(!session.control.stop());
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Error);
     }
 
     fn feed(writer: &mut CaptureWriter, frames: usize, left: f32, right: f32) {

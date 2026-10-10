@@ -385,6 +385,11 @@ mod probe {
 
     fn graceful_and_ignored(exe: &Path) -> io::Result<()> {
         let mut child = spawn(exe, "stop", &[])?;
+        let observer = Observer::open(child.id())?;
+        check(
+            child.contains_process(&observer.0)?,
+            "worker was not in its owned job",
+        )?;
         child.take_stdin().unwrap().write_all(b"Stop\n")?;
         check(child.take_stdin().is_none(), "stdin was taken twice")?;
         exited(&mut child, 0)?;

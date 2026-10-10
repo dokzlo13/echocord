@@ -1341,6 +1341,8 @@ dependencies = [
  "symphonia-core",
  "tokio",
  "ts-rs",
+ "windows 0.62.2",
+ "windows-core",
  "windows-sys 0.61.2",
 ]
 

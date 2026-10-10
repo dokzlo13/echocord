@@ -1429,6 +1429,11 @@ impl Actor {
                     ));
                 }
                 self.validate_destination(&server_id, &channel_id)?;
+                if self.snapshot.destinations[index].server_id == server_id
+                    && self.snapshot.destinations[index].channel_id == channel_id
+                {
+                    return Ok(());
+                }
                 let reconnect = self.child.is_some()
                     || self.pending
                     || matches!(
@@ -5144,5 +5149,38 @@ mod tests {
         assert_eq!(legacy.destinations[0].session_id, 0);
         assert_eq!(legacy.destinations[0].connection, Connection::Disconnected);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn selecting_the_current_discord_room_preserves_its_worker_and_session() {
+        for phase in [
+            Connection::Connecting {
+                stage: ConnectStage::Gateway,
+            },
+            Connection::Connected,
+            Connection::Recovering {
+                attempt: 1,
+                message: "Recovering".into(),
+            },
+        ] {
+            let mut a = actor();
+            a.command(ControlCommand::AddDestination {
+                server_id: "1".into(),
+                channel_id: "2".into(),
+            })
+            .unwrap();
+            a.child = Some(child());
+            a.snapshot.connection = phase;
+            a.publish();
+            let before = a.snapshot.clone();
+            a.command(ControlCommand::ChangeDestination {
+                destination_id: "discord-1".into(),
+                server_id: "1".into(),
+                channel_id: "2".into(),
+            })
+            .unwrap();
+            assert_eq!(a.snapshot, before);
+            assert!(!a.move_pending);
+            assert!(a.child.as_ref().unwrap().stopped_at().is_none());
+        }
     }
 }

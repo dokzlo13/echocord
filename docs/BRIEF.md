@@ -39,6 +39,8 @@ No media player, browser embedding, sound pad, playlist manager, custom decoder 
 
 ## Post-alpha priorities
 
+The current delivery epoch is authorized to ship a polished Windows build with application audio capture alongside the existing recording-device route. Capture must remain restricted to the explicitly selected application process tree. Source selection must explain browser-wide scope and original local playback behavior; app restart requires explicit reselection when identity changes. Independent local playback suppression is conditional on native evidence, not a promised control. Shared mixing and destination fan-out remain a subsequent iteration.
+
 User testing confirms the core live flow, perceived latency, and tray operation. The next iteration emphasizes a deliberately designed compact audio surface, responsive and visible connection progress, fast grouped room navigation, and production-facing settings/copy. Pending route edits must remain distinct from the active route and require explicit apply. Secure in-app bot setup and standard per-user app data replace dependence on development-only setup.
 
 Research before implementation: process/desktop capture while retaining recording inputs; optional virtual endpoints; suppression of local playback without suppressing the stream; multiple sources into one common mix and multiple destinations. No per-source/per-destination routing matrix or advanced DSP is required. Same-server Discord restrictions and local-mute semantics must be established before promising these features.

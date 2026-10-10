@@ -1128,6 +1128,11 @@ impl Actor {
                     .ok_or_else(|| {
                         error(ErrorCode::InvalidSelection, "This source no longer exists.")
                     })?;
+                if input.source_id == source_id
+                    && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                {
+                    return Ok(());
+                }
                 input.source_id = source_id;
                 input.kind = source.kind;
                 input.display_name = source.name;
@@ -1146,6 +1151,9 @@ impl Actor {
                     .ok_or_else(|| {
                         error(ErrorCode::InvalidSelection, "This source no longer exists.")
                     })?;
+                if matches!(input.phase, InputPhase::Opening | InputPhase::Capturing) {
+                    return Ok(());
+                }
                 #[cfg(windows)]
                 if input.kind == SourceKind::Application {
                     crate::audio::validate_source(&input.source_id).map_err(|_| {
@@ -4148,5 +4156,69 @@ mod tests {
             },
         ));
         assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
+    }
+    #[test]
+    fn selecting_or_starting_the_current_active_source_is_idempotent() {
+        for phase in [InputPhase::Opening, InputPhase::Capturing] {
+            let mut a = actor();
+            a.child = Some(child());
+            a.snapshot.connection = Connection::Connected;
+            a.snapshot.inputs.push(InputStrip {
+                strip_id: "input-1".into(),
+                source_id: "recording".into(),
+                kind: SourceKind::Recording,
+                display_name: "Recording".into(),
+                detail: None,
+                phase,
+                fault: None,
+                gain_db: Some(-13.4),
+                muted: true,
+                colour_slot: 2,
+                restored: false,
+            });
+            let before = a.snapshot.clone();
+            a.command(ControlCommand::ReplaceSource {
+                strip_id: "input-1".into(),
+                source_id: "recording".into(),
+            })
+            .unwrap();
+            assert_eq!(a.snapshot, before);
+            a.command(ControlCommand::StartCapture {
+                strip_id: "input-1".into(),
+            })
+            .unwrap();
+            assert_eq!(a.snapshot, before);
+            assert!(a.child.as_ref().unwrap().stopped_at().is_none());
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn selecting_the_current_stopped_or_faulted_source_still_retries_capture() {
+        for phase in [InputPhase::Stopped, InputPhase::Fault] {
+            let mut a = actor();
+            a.snapshot.inputs.push(InputStrip {
+                strip_id: "input-1".into(),
+                source_id: "recording".into(),
+                kind: SourceKind::Recording,
+                display_name: "Recording".into(),
+                detail: None,
+                phase,
+                fault: Some(Failure::Capture.error()),
+                gain_db: Some(-13.4),
+                muted: true,
+                colour_slot: 2,
+                restored: false,
+            });
+            a.command(ControlCommand::ReplaceSource {
+                strip_id: "input-1".into(),
+                source_id: "recording".into(),
+            })
+            .unwrap();
+            assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Opening);
+            assert!(a.snapshot.inputs[0].fault.is_none());
+            assert_eq!(a.snapshot.inputs[0].gain_db, Some(-13.4));
+            assert!(a.snapshot.inputs[0].muted);
+        }
     }
 }

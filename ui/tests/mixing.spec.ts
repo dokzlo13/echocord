@@ -257,7 +257,7 @@ test("live destination removal has inline confirmation and Keep cancels", async 
   await expect(page.locator(".source-card")).toHaveCount(1);
 });
 
-test("one Discord room limit is explicit and room replacement names reconnect", async ({
+test("reserved server is explicit and room replacement names reconnect", async ({
   page,
 }) => {
   await open(page);
@@ -269,7 +269,14 @@ test("one Discord room limit is explicit and room replacement names reconnect", 
     .click();
   await page.getByRole("tab", { name: "Discord", exact: true }).click();
   await expect(
-    page.getByText(/One Discord room is supported currently/),
+    page.getByRole("option", { name: "Сессия", exact: true }),
+  ).toHaveAttribute("aria-disabled", "false");
+  await page.getByRole("button", { name: "Studio group", exact: true }).click();
+  await expect(
+    page.getByRole("option", { name: /Session room/ }),
+  ).toHaveAttribute("aria-disabled", "true");
+  await expect(
+    page.getByText(/Another card reserves Session room/),
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Change room", exact: true }).click();

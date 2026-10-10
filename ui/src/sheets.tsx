@@ -13,12 +13,14 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { NetChart, OnAirTime, StatTiles } from "./cards";
-import { STATUS, statusKey } from "./copy";
+import { GATEWAY_STATUS, STATUS, statusKey } from "./copy";
 import type {
   AppSettings,
   BotProfile,
   Discovery,
+  GatewaySnapshot,
   PlaybackDevice,
+  ServerReservation,
 } from "./generated";
 import { ServerTile, SourceGlyph } from "./icons";
 import type {
@@ -341,7 +343,8 @@ export function SourcePicker({
 
 function DiscordRooms({
   tabs,
-  dests,
+  reservations,
+  full,
   servers,
   error,
   busy,
@@ -352,7 +355,8 @@ function DiscordRooms({
   onClose,
 }: {
   tabs: ReactNode;
-  dests: DestCard[];
+  reservations: ServerReservation[];
+  full: boolean;
   servers: Server[];
   error: string | null;
   busy: boolean;
@@ -363,11 +367,14 @@ function DiscordRooms({
   onClose: () => void;
 }) {
   const [server, setServer] = useState(
-    replacing?.serverId ?? servers[0]?.id ?? "",
+    replacing?.serverId ??
+      servers.find((s) => !reservations.some((r) => r.serverId === s.id))?.id ??
+      servers[0]?.id ??
+      "",
   );
   const [q, setQ] = useState("");
   const [sel, setSel] = useState<{ s: string; c: string } | null>(null);
-  const live = replacing && replacing.state === "live";
+  const live = replacing && !["idle", "fault"].includes(replacing.state);
   const query = q.trim().toLowerCase();
 
   const groups = useMemo(() => {
@@ -395,11 +402,45 @@ function DiscordRooms({
   }, [query, server, servers]);
 
   const blockedBy = (serverId: string) =>
-    dests.find((d) => d.serverId === serverId && d.uid !== replacing?.uid);
-
-  const chosen = sel
-    ? servers.find((s) => s.id === sel.s)?.channels.find((c) => c.id === sel.c)
+    reservations.find(
+      (r) =>
+        r.serverId === serverId &&
+        (r.destinationId !== replacing?.uid ||
+          r.phase === "leaving" ||
+          r.phase === "blocked"),
+    );
+  const retiring = replacing
+    ? reservations.find(
+        (r) =>
+          r.destinationId === replacing.uid &&
+          (r.phase === "leaving" || r.phase === "blocked"),
+      )
     : undefined;
+  const retiringRoom = retiring
+    ? (servers
+        .find((s) => s.id === retiring.serverId)
+        ?.channels.find((c) => c.id === retiring.channelId)?.name ??
+      "the previous room")
+    : null;
+  const isCurrent = (s: string, c: string) =>
+    replacing?.serverId === s && replacing.channelId === c;
+  const canPick = (s: string, c: string) =>
+    !full && !busy && !retiring && !blockedBy(s) && !isCurrent(s, c);
+  useEffect(() => {
+    if (servers.some((s) => s.id === server)) return;
+    setServer(
+      servers.find((s) => !reservations.some((r) => r.serverId === s.id))?.id ??
+        servers[0]?.id ??
+        "",
+    );
+  }, [server, servers, reservations]);
+
+  const chosen =
+    sel && canPick(sel.s, sel.c)
+      ? servers
+          .find((s) => s.id === sel.s)
+          ?.channels.find((c) => c.id === sel.c)
+      : undefined;
   let primary = replacing ? "Choose a room" : "Add room";
   if (chosen) {
     if (!replacing) primary = `Add ${chosen.name}`;
@@ -429,7 +470,7 @@ function DiscordRooms({
             type="button"
             className="btn btn-primary"
             disabled={!chosen || busy}
-            onClick={() => sel && onPick(sel.s, sel.c)}
+            onClick={() => sel && canPick(sel.s, sel.c) && onPick(sel.s, sel.c)}
           >
             {primary}
           </button>
@@ -437,6 +478,16 @@ function DiscordRooms({
       }
     >
       {tabs}
+      {retiring && (
+        <p className="room-note">
+          Finish cleanup for {retiringRoom} before changing this destination.
+        </p>
+      )}
+      {full && (
+        <p className="room-note">
+          Four destinations are supported. Remove one to add another.
+        </p>
+      )}
       {error && (
         <p className="field-error" role="alert">
           {error}
@@ -485,10 +536,9 @@ function DiscordRooms({
                   <div key={cat} className="room-cat">
                     <div className="room-cat-name">{cat}</div>
                     {chans.map((c) => {
-                      const isCurrent =
-                        replacing?.serverId === g.server.id &&
-                        replacing.channelId === c.id;
-                      const disabled = !!blocker || isCurrent;
+                      const current = isCurrent(g.server.id, c.id);
+                      const disabled =
+                        !!blocker || !!retiring || current || full;
                       return (
                         <button
                           key={c.id}
@@ -499,13 +549,15 @@ function DiscordRooms({
                           aria-disabled={disabled}
                           data-disabled={disabled || undefined}
                           onClick={() =>
-                            !disabled && setSel({ s: g.server.id, c: c.id })
+                            !disabled &&
+                            !busy &&
+                            setSel({ s: g.server.id, c: c.id })
                           }
                           onDoubleClick={() =>
-                            !disabled && onPick(g.server.id, c.id)
+                            !disabled && !busy && onPick(g.server.id, c.id)
                           }
                           onKeyDown={(e) => {
-                            if (e.key === "Enter" && !disabled) {
+                            if (e.key === "Enter" && !disabled && !busy) {
                               e.preventDefault();
                               onPick(g.server.id, c.id);
                             }
@@ -518,10 +570,17 @@ function DiscordRooms({
                           />
                           <span className="room-name">{c.name}</span>
                           <span className="room-meta tabular">
-                            {isCurrent ? (
+                            {current ? (
                               <span className="tag">Current</span>
                             ) : blocker ? (
-                              <span className="tag">Bot busy here</span>
+                              <span className="tag">
+                                {blocker.phase === "leaving" ||
+                                blocker.phase === "blocked"
+                                  ? "Cleaning up"
+                                  : "Reserved"}
+                              </span>
+                            ) : retiring ? (
+                              <span className="tag">Cleaning up</span>
                             ) : null}
                             {sel?.c === c.id && (
                               <Check size={16} className="pick-check" />
@@ -534,8 +593,15 @@ function DiscordRooms({
                 ))}
                 {blocker && (
                   <p className="room-note">
-                    The bot can be in one room per server. It's already used for{" "}
-                    {blocker.channel.name}.
+                    {blocker.phase === "leaving" || blocker.phase === "blocked"
+                      ? "Finishing cleanup for"
+                      : "Another card reserves"}{" "}
+                    {g.server.channels.find((c) => c.id === blocker.channelId)
+                      ?.name ?? "a saved voice room"}
+                    .
+                    {blocker.phase === "leaving" || blocker.phase === "blocked"
+                      ? " Choose another server."
+                      : " One room per server."}
                   </p>
                 )}
               </div>
@@ -559,6 +625,7 @@ function DiscordRooms({
 /** The approved full-window picker gains a second native destination type. */
 export function RoomPicker({
   dests,
+  reservations,
   sources,
   servers,
   devices,
@@ -576,6 +643,7 @@ export function RoomPicker({
   onClose,
 }: {
   dests: DestCard[];
+  reservations: ServerReservation[];
   sources: SourceCard[];
   servers: Server[];
   devices: PlaybackDevice[];
@@ -615,14 +683,13 @@ export function RoomPicker({
   const inUse = new Set(
     dests.filter((d) => d.kind === "playback").map((d) => d.deviceId),
   );
-  const chosen = devices.find(
-    (d) => d.id === selected && d.available && !inUse.has(d.id),
-  );
+  const full = dests.length >= 4 && !replacing;
   const limit =
-    dests.filter((d) => d.kind === "playback").length >= 3 && !replacing;
-  const discordLimit = dests.some(
-    (d) => d.kind === "discord" && d.uid !== replacing?.uid,
-  );
+    (full || dests.filter((d) => d.kind === "playback").length >= 3) &&
+    !replacing;
+  const chosen = !limit
+    ? devices.find((d) => d.id === selected && d.available && !inUse.has(d.id))
+    : undefined;
   const tabs = (
     <div
       className="tabs destination-tabs"
@@ -673,10 +740,11 @@ export function RoomPicker({
       ))}
     </div>
   );
-  if (tab === "discord" && botReady && !discordLimit)
+  if (tab === "discord" && botReady)
     return (
       <DiscordRooms
-        dests={dests.filter((d) => d.kind === "discord")}
+        reservations={reservations}
+        full={full}
         servers={servers}
         discovery={discovery}
         error={error}
@@ -708,7 +776,7 @@ export function RoomPicker({
               type="button"
               className="btn btn-primary"
               disabled={!chosen || busy || limit}
-              onClick={() => chosen && onPlayback(chosen.id)}
+              onClick={() => chosen && !limit && !busy && onPlayback(chosen.id)}
             >
               {chosen
                 ? `${replacing ? "Use" : "Add"} ${chosen.name}`
@@ -730,9 +798,8 @@ export function RoomPicker({
       )}
       {tab === "discord" ? (
         <div className="pick-empty">
-          {discordLimit
-            ? "One Discord room is supported currently. Add a playback output, or change the existing Discord card."
-            : "Set up a Discord bot to choose a voice room. Playback works without a bot."}
+          Set up a Discord bot to choose a voice room. Playback works without a
+          bot.
         </div>
       ) : (
         <>
@@ -747,7 +814,11 @@ export function RoomPicker({
             </p>
           )}
           {limit && (
-            <p className="room-note">Three playback outputs are supported.</p>
+            <p className="room-note">
+              {full
+                ? "Four destinations are supported. Remove one to add another."
+                : "Three playback outputs are supported."}
+            </p>
           )}
           <div
             className="pick-list"
@@ -762,7 +833,9 @@ export function RoomPicker({
                 : used && !current
                   ? "Already an output"
                   : limit
-                    ? "Three playback outputs are supported."
+                    ? full
+                      ? "Four destinations are supported."
+                      : "Three playback outputs are supported."
                     : undefined;
               const disabled = current || !!why;
               return (
@@ -1093,18 +1166,20 @@ export function Settings({
 }
 
 export function BotInfo({
-  dests,
   servers,
   bot,
+  gateway,
+  reservations,
   live,
   busy,
   onRecheck,
   onReplaceToken,
   onClose,
 }: {
-  dests: DestCard[];
   servers: Server[];
   bot: BotProfile;
+  gateway: GatewaySnapshot;
+  reservations: ServerReservation[];
   live: boolean;
   busy: boolean;
   onRecheck: () => void;
@@ -1146,13 +1221,55 @@ export function BotInfo({
           </span>
         </span>
       </div>
+      <section className="set-group" aria-label="Shared Discord connection">
+        <h3 className="set-title">Discord connection</h3>
+        <div className="set-row">
+          <span className="bot-status" data-gateway={gateway.phase}>
+            <span className="bot-dot" aria-hidden />
+            {GATEWAY_STATUS[gateway.phase]}
+          </span>
+        </div>
+        {gateway.message && (
+          <p
+            className="conn-note"
+            role={
+              gateway.phase === "error" ||
+              gateway.phase === "cleanup-incomplete"
+                ? "alert"
+                : "status"
+            }
+          >
+            {gateway.message}
+          </p>
+        )}
+        <p className="conn-note">
+          This connection serves all Discord rooms. Sources and playback stay
+          independent.
+        </p>
+      </section>
       <section className="set-group">
         <h3 className="set-title">Servers</h3>
         <ul className="perm-list">
           {servers.map((s) => {
-            const inRoom = dests.find(
-              (d) => d.serverId === s.id && d.state === "live",
-            );
+            const reservation =
+              reservations.find(
+                (r) =>
+                  r.serverId === s.id &&
+                  (r.phase === "leaving" || r.phase === "blocked"),
+              ) ?? reservations.find((r) => r.serverId === s.id);
+            const reservedRoom = reservation
+              ? (s.channels.find((c) => c.id === reservation.channelId)?.name ??
+                "a saved voice room")
+              : null;
+            const reservationLabel =
+              reservation &&
+              {
+                selected: "Reserved for",
+                joining: "Joining",
+                connected: "In",
+                leaving: "Leaving",
+                blocked: "Cleanup incomplete for",
+              }[reservation.phase];
             return (
               <li key={s.id} className="perm-row">
                 <ServerTile
@@ -1163,8 +1280,8 @@ export function BotInfo({
                 <span className="set-text">
                   <span className="set-name">{s.name}</span>
                   <span className="set-sub">
-                    {inRoom
-                      ? `In ${inRoom.channel.name} now`
+                    {reservation
+                      ? `${reservationLabel} ${reservedRoom}${reservation.phase === "connected" ? " now" : ""}`
                       : `${s.channels.length} voice rooms`}
                   </span>
                 </span>

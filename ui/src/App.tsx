@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { ControlAdapter } from "./adapter";
 import { DestCard, Empty, SlotHead, SourceCard } from "./cards";
+import { GATEWAY_STATUS } from "./copy";
 import type { Connection, ControlSnapshot } from "./generated";
 import { Mark } from "./icons";
 import {
@@ -266,9 +267,19 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       : undefined;
   const netDest =
     sheet?.kind === "net" ? dests.find((d) => d.uid === sheet.uid) : undefined;
-  const live = dests.some(
-    (d) => d.kind === "discord" && !["idle", "fault"].includes(d.state),
-  );
+  const live =
+    dests.some(
+      (d) => d.kind === "discord" && !["idle", "fault"].includes(d.state),
+    ) ||
+    (!!snapshot &&
+      ([
+        "connecting",
+        "connected",
+        "recovering",
+        "disconnecting",
+        "cleanup-incomplete",
+      ].includes(snapshot.gateway.phase) ||
+        snapshot.serverReservations.some((r) => r.phase !== "selected")));
   const playing = dests.filter(
     (d) => d.kind === "playback" && d.state === "live",
   ).length;
@@ -306,11 +317,19 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             type="button"
             className="bot-chip"
             data-bot={bot}
+            data-gateway={snapshot?.gateway.phase}
+            aria-label={
+              bot === "ready"
+                ? `${botName}, Discord connection ${GATEWAY_STATUS[snapshot?.gateway.phase ?? "disconnected"].toLowerCase()}`
+                : undefined
+            }
             onClick={() =>
               open(bot === "ready" ? { kind: "bot-info" } : { kind: "bot" })
             }
             title={
-              bot === "ready" ? "Discord bot details" : "Set up the Discord bot"
+              bot === "ready"
+                ? `Discord bot details · ${GATEWAY_STATUS[snapshot?.gateway.phase ?? "disconnected"]}`
+                : "Set up the Discord bot"
             }
           >
             {bot === "ready" ? (
@@ -326,7 +345,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   : "Set up bot"}
             </span>
             {bot === "ready" && (
-              <span className="bot-dot" title="Token verified" aria-hidden />
+              <span
+                className="bot-dot"
+                title={`Token verified · ${GATEWAY_STATUS[snapshot?.gateway.phase ?? "disconnected"]}`}
+                aria-hidden
+              />
             )}
           </button>
           <button
@@ -600,6 +623,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
         {sheet?.kind === "room" && snapshot && (
           <RoomPicker
             dests={dests}
+            reservations={snapshot.serverReservations}
             servers={servers}
             devices={snapshot.playbackDevices}
             sources={sources}
@@ -680,9 +704,10 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
         {netDest && <ConnectionSheet dest={netDest} onClose={close} />}
         {sheet?.kind === "bot-info" && snapshot && (
           <BotInfo
-            dests={dests}
             servers={servers}
             bot={snapshot.bot}
+            gateway={snapshot.gateway}
+            reservations={snapshot.serverReservations}
             live={live}
             busy={
               snapshot.bot.status === "checking" ||

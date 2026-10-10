@@ -176,3 +176,25 @@ body {
     flex: 1 1 0;
   }
 }
+
+[data-gateway="error"].bot-chip .bot-dot,
+[data-gateway="error"].bot-status .bot-dot,
+[data-gateway="cleanup-incomplete"].bot-chip .bot-dot,
+[data-gateway="cleanup-incomplete"].bot-status .bot-dot {
+  background: var(--fault);
+}
+[data-gateway="recovering"].bot-chip .bot-dot,
+[data-gateway="recovering"].bot-status .bot-dot {
+  background: var(--standby);
+}
+.bot-status[data-gateway="disconnected"] .bot-dot,
+.bot-status[data-gateway="connecting"] .bot-dot,
+.bot-status[data-gateway="disconnecting"] .bot-dot {
+  background: var(--ink-3);
+}
+
+/* Preserve one gain line during font loading and for fractional native dB. */
+.cf-gain {
+  min-width: 0;
+  white-space: nowrap;
+}

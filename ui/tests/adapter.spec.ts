@@ -394,3 +394,31 @@ test("fixture destination identities remain unique across rapid adds and removal
     t.current.destinations.length,
   );
 });
+
+test("fixture room joins share a gateway lifetime while joining or recovering peers remain", async () => {
+  const t = new FixtureTransport("rooms-restored");
+  await t.dispatch({ type: "connect-destination", destinationId: "dest:1" });
+  const generation = t.current.gateway.generation;
+  t.holdConnect = true;
+  await t.dispatch({ type: "connect-destination", destinationId: "dest:2" });
+  expect(t.current.gateway).toMatchObject({ phase: "connected", generation });
+  expect(
+    t.current.destinations.find((d) => d.destinationId === "dest:2")
+      ?.connection,
+  ).toEqual({ phase: "connecting", stage: "join" });
+  await t.dispatch({ type: "disconnect-destination", destinationId: "dest:1" });
+  expect(t.current.gateway).toMatchObject({ phase: "connected", generation });
+  const ds = structuredClone(t.current.destinations);
+  const recovering = ds.find((d) => d.destinationId === "dest:3");
+  if (recovering)
+    recovering.connection = {
+      phase: "recovering",
+      attempt: 1,
+      message: "Rejoining this room.",
+    };
+  t.emit({ destinations: ds });
+  await t.dispatch({ type: "disconnect-destination", destinationId: "dest:2" });
+  expect(t.current.gateway).toMatchObject({ phase: "connected", generation });
+  await t.dispatch({ type: "disconnect-destination", destinationId: "dest:3" });
+  expect(t.current.gateway.phase).toBe("disconnected");
+});

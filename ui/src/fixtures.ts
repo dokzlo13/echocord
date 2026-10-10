@@ -4,7 +4,32 @@ import type {
   ControlCommand,
   ControlSnapshot,
   MixTelemetry,
+  ServerReservation,
 } from "./generated";
+
+function selectedReservations(
+  destinations: ControlSnapshot["destinations"],
+): ServerReservation[] {
+  return destinations
+    .filter((d) => d.kind === "discord")
+    .map((d) => ({
+      serverId: d.serverId,
+      channelId: d.channelId,
+      destinationId: d.destinationId,
+      sessionId: d.sessionId,
+      phase:
+        d.connection.phase === "cleanup-incomplete"
+          ? "blocked"
+          : d.connection.phase === "disconnecting"
+            ? "leaving"
+            : d.connection.phase === "connected"
+              ? "connected"
+              : d.connection.phase === "connecting" ||
+                  d.connection.phase === "recovering"
+                ? "joining"
+                : "selected",
+    }));
+}
 export const fixtureNames = [
   "first-run",
   "disconnected",
@@ -196,6 +221,19 @@ export function fixtureSnapshot(
     gatewayPingMs: null,
   };
   const snapshot: ControlSnapshot = {
+    gateway: {
+      phase:
+        connection.phase === "connected"
+          ? "connected"
+          : connection.phase === "connecting"
+            ? "connecting"
+            : connection.phase === "cleanup-incomplete"
+              ? "cleanup-incomplete"
+              : "disconnected",
+      generation: 1,
+      message: null,
+    },
+    serverReservations: [],
     playbackDevices: [
       {
         id: "play:headphones",
@@ -372,6 +410,8 @@ export function fixtureSnapshot(
       gatewayPingMs: d.kind === "discord" ? 38 : null,
     }));
   }
+  snapshot.serverReservations = selectedReservations(snapshot.destinations);
+  if (name === "rooms") snapshot.gateway.phase = "connected";
   return snapshot;
 }
 export class FixtureTransport implements Transport {
@@ -404,6 +444,24 @@ export class FixtureTransport implements Transport {
     for (const f of this.visibility) f(v);
   }
   emit(patch: Partial<ControlSnapshot>) {
+    if (patch.destinations && !patch.serverReservations) {
+      const retained = this.current.serverReservations.filter(
+        (r) => r.phase === "leaving" || r.phase === "blocked",
+      );
+      patch.serverReservations = [
+        ...selectedReservations(patch.destinations).filter(
+          (r) =>
+            !retained.some(
+              (old) =>
+                old.destinationId === r.destinationId &&
+                old.serverId === r.serverId &&
+                old.channelId === r.channelId &&
+                old.sessionId === r.sessionId,
+            ),
+        ),
+        ...retained,
+      ];
+    }
     if (patch.telemetry) {
       const t = patch.telemetry;
       const d = (patch.destinations ?? this.current.destinations).find(
@@ -524,6 +582,19 @@ export class FixtureTransport implements Transport {
         break;
       }
       case "add-destination":
+        if (this.current.destinations.length >= 4)
+          throw {
+            code: "invalid-selection",
+            message: "Four destinations are supported. Remove one first.",
+          };
+        if (
+          this.current.serverReservations.some((r) => r.serverId === c.serverId)
+        )
+          throw {
+            code: "invalid-selection",
+            message:
+              "Another destination reserves this server. Choose a different server.",
+          };
         this.current.destinations.push({
           destinationId: `fixture-output:${++this.nextDestination}`,
           kind: "discord",
@@ -541,10 +612,39 @@ export class FixtureTransport implements Transport {
         this.current.destinations = this.current.destinations.filter(
           (d) => d.destinationId !== c.destinationId,
         );
+        // Removal completes synchronously only in this owned fixture.
+        this.current.serverReservations =
+          this.current.serverReservations.filter(
+            (r) => r.destinationId !== c.destinationId,
+          );
         break;
       case "change-destination": {
         const d = dest(c.destinationId);
         if (d) {
+          if (d.serverId === c.serverId && d.channelId === c.channelId) break;
+          if (
+            this.current.serverReservations.some(
+              (r) =>
+                r.destinationId === d.destinationId &&
+                (r.phase === "leaving" || r.phase === "blocked"),
+            )
+          )
+            throw {
+              code: "busy",
+              message: "Room cleanup has not finished. Retry disconnect first.",
+            };
+          if (
+            this.current.serverReservations.some(
+              (r) =>
+                r.serverId === c.serverId &&
+                r.destinationId !== d.destinationId,
+            )
+          )
+            throw {
+              code: "invalid-selection",
+              message:
+                "Another destination reserves this server. Choose a different server.",
+            };
           d.serverId = c.serverId;
           d.channelId = c.channelId;
           if (d.connection.phase === "connected") d.sessionId++;
@@ -554,22 +654,57 @@ export class FixtureTransport implements Transport {
       case "connect-destination": {
         const d = dest(c.destinationId);
         if (d) {
+          const sharedReady = this.current.gateway.phase === "connected";
           d.sessionId++;
           d.connection = this.holdConnect
-            ? { phase: "connecting", stage: "gateway" }
+            ? {
+                phase: "connecting",
+                stage:
+                  d.kind === "playback"
+                    ? "capture"
+                    : sharedReady
+                      ? "join"
+                      : "gateway",
+              }
             : { phase: "connected" };
+          if (d.kind === "discord" && !sharedReady)
+            this.current.gateway = {
+              phase: this.holdConnect ? "connecting" : "connected",
+              generation: ["connecting", "recovering"].includes(
+                this.current.gateway.phase,
+              )
+                ? this.current.gateway.generation
+                : this.current.gateway.generation + 1,
+              message: null,
+            };
         }
         break;
       }
       case "disconnect-destination": {
         const d = dest(c.destinationId);
-        if (d)
+        if (d) {
           d.connection = this.holdDisconnect
             ? {
                 phase: "cleanup-incomplete",
                 message: "Audio cleanup has not finished.",
               }
             : { phase: "disconnected" };
+          // A successful fixture Stop is an explicit observed cleanup receipt.
+          if (!this.holdDisconnect)
+            this.current.serverReservations =
+              this.current.serverReservations.filter(
+                (r) => r.destinationId !== d.destinationId,
+              );
+          const owned =
+            this.current.destinations.some(
+              (peer) =>
+                peer.kind === "discord" &&
+                !["disconnected", "error"].includes(peer.connection.phase),
+            ) ||
+            this.current.serverReservations.some((r) => r.phase !== "selected");
+          if (d.kind === "discord" && !owned)
+            this.current.gateway.phase = "disconnected";
+        }
         break;
       }
       case "set-destination-volume": {
@@ -583,6 +718,15 @@ export class FixtureTransport implements Transport {
         break;
       }
       case "add-playback-destination": {
+        if (
+          this.current.destinations.length >= 4 ||
+          this.current.destinations.filter((d) => d.kind === "playback")
+            .length >= 3
+        )
+          throw {
+            code: "invalid-selection",
+            message: "Output capacity is full. Remove one first.",
+          };
         const device = this.current.playbackDevices.find(
           (d) => d.id === c.deviceId,
         );

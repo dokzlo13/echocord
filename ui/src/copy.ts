@@ -1,3 +1,4 @@
+import type { GatewayPhase } from "./generated";
 import type { DestState, Stage } from "./model";
 
 /** Destination status words (On Air world, Precision-style badge). */
@@ -44,4 +45,14 @@ export const stageLine = (stage: Stage | undefined, room: string) => {
     default:
       return "Connecting…";
   }
+};
+
+export const GATEWAY_STATUS: Record<GatewayPhase, string> = {
+  disconnected: "Disconnected",
+  connecting: "Connecting",
+  connected: "Connected",
+  recovering: "Reconnecting",
+  disconnecting: "Disconnecting",
+  "cleanup-incomplete": "Cleanup incomplete",
+  error: "Connection error",
 };

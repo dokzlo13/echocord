@@ -2,7 +2,11 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
-## Next pickup order
+## Active mixing epoch
+
+Owner confirmed application capture and accepted the On Air Stack redesign. The current 2–3 hour epoch adopts the actual prototype and delivers multiple inputs feeding one shared native mix, capture before Connect and targeted card edits, with one Discord destination. EC-023 owns native contracts/core, EC-024 owns frontend/manifests, EC-025 independent review, EC-026 shell/integration. Future fan-out stays EC-020. Older Apply/compact-popover decisions are superseded.
+
+## Next pickup order after this epoch
 
 1. **Owner feedback on the delivered build:** application-to-Discord listening, app selection/reselection, compact pickers and meter motion. The earlier recording route remains available. Native synthetic/browser evidence is recorded; new live app delivery is not yet owner-confirmed.
 2. **EC-020:** design and review multiple sources feeding one shared mix and destination fan-out before implementation. Account for source overlap/clock alignment and Discord's one-channel-per-guild-per-bot constraint. Avoid another broad redesign as a prerequisite.
@@ -35,5 +39,9 @@ The capture delivery epoch is complete: EC-021 polish, EC-017 native capture and
 | EC-020 | One shared mix and destination fan-out | blocked | EC-017, reviewed architecture | unassigned; later iteration | — | [task](EC-020.md) |
 | EC-021 | Picker clarity, queued changes and meter motion | done | EC-013, EC-018, EC-019 | UI worker / a1; coordinator integration | main | [task](EC-021.md), d417bc3; combined/native checks passed |
 | EC-022 | Application-source selection | done | EC-021; accepted EC-017 source-contract milestone | UI worker / a1; coordinator integration | main | [task](EC-022.md), 8921a87; 53 browser tests and native app checks passed |
+| EC-023 | Persistent capture and shared native mix | active | EC-017, EC-022; architecture review checkpoint | native worker / a1 | agent/EC-023-a1 | [task](EC-023.md) |
+| EC-024 | Adopt approved On Air prototype | active | approved design, EC-021/022; EC-023 contract milestone | UI worker / a1 | agent/EC-024-a1 | [task](EC-024.md) |
+| EC-025 | Independent mixing review | active | owner-authorized epoch | reviewer / r1 | read-only | [task](EC-025.md) |
+| EC-026 | Native window and integration | active | approved shell; EC-023 contract milestone | coordinator / a1 | main | [task](EC-026.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

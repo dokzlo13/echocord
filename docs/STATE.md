@@ -8,7 +8,7 @@ Final checks: portable core formatting/Clippy/tests and generated types; 40 brow
 
 Post-implementation user testing confirms the updated app and live meters work. EC-021 records follow-up improvements to server/channel hierarchy, readable queued-change entries and meter smoothness. Specific layouts and cadence changes remain proposals; no further implementation was started.
 
-Session scope is complete. Workers and accepted branches/worktrees are cleaned up, main is linear, and redundant agent-generated private artifacts were removed. Original notes, credentials, settings, launcher and a concise evidence/design-reference set remain ignored. Read private LOCAL.md if present for local runtime details.
+The next implementation epoch is active: bounded usability polish (EC-021), then a reviewed and integrated application-capture path (EC-017), ending in a Windows build for owner testing. Prior work was clean and linear at pickup. Original notes, credentials, settings, launcher and concise evidence/design references remain ignored. Read private LOCAL.md if present for local runtime details.
 
 Next-session order is explicit in BOARD: first a bounded EC-021 usability pass, then EC-017 better driver-free app capture as the next major feature, followed by EC-020 one shared mix and destination fan-out. Avoid another broad redesign before capture. EC-017 proceeds from an isolation/local-suppression experiment through reviewed source selection to a usable integrated capture path. CAPTURE.md records feasibility and Discord constraints. No new capture type, mixer, virtual driver or multi-destination functionality is shipped.
 

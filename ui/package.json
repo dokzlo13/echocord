@@ -17,11 +17,12 @@
     "check": "npm run lint && npm test"
   },
   "dependencies": {
-    "@mantine/core": "9.7.1",
-    "@mantine/hooks": "9.7.1",
     "@tauri-apps/api": "2.12.2",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "@fontsource-variable/sofia-sans": "5.3.0",
+    "@fontsource-variable/sofia-sans-condensed": "5.3.0",
+    "lucide-react": "1.55.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",

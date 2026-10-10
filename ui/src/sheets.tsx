@@ -597,6 +597,21 @@ export function RoomPicker({
   );
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const visibleDevices = devices.filter((d) =>
+    `${d.name} ${d.detail ?? ""}`
+      .toLowerCase()
+      .includes(q.trim().toLowerCase()),
+  );
+  const keyboardTab = useRef(false);
+  useEffect(() => {
+    if (!keyboardTab.current) return;
+    document
+      .querySelector<HTMLButtonElement>(
+        `.destination-tabs .tab[value="${tab}"]`,
+      )
+      ?.focus();
+    keyboardTab.current = false;
+  }, [tab]);
   const inUse = new Set(
     dests.filter((d) => d.kind === "playback").map((d) => d.deviceId),
   );
@@ -619,8 +634,33 @@ export function RoomPicker({
           key={kind}
           type="button"
           role="tab"
+          value={kind}
           className="tab"
           aria-selected={tab === kind}
+          tabIndex={tab === kind ? 0 : -1}
+          onKeyDown={(e) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key))
+              return;
+            e.preventDefault();
+            keyboardTab.current = true;
+            const items = Array.from(
+              e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                "button:not(:disabled)",
+              ) ?? [],
+            );
+            const current = items.indexOf(e.currentTarget);
+            const next =
+              e.key === "Home"
+                ? 0
+                : e.key === "End"
+                  ? items.length - 1
+                  : (current +
+                      (e.key === "ArrowRight" ? 1 : -1) +
+                      items.length) %
+                    items.length;
+            items[next]?.focus();
+            items[next]?.click();
+          }}
           disabled={!!replacing && replacing.kind !== kind}
           onClick={() => {
             setTab(kind);
@@ -714,66 +754,62 @@ export function RoomPicker({
             role="listbox"
             aria-label="Playback devices"
           >
-            {devices
-              .filter((d) =>
-                `${d.name} ${d.detail ?? ""}`
-                  .toLowerCase()
-                  .includes(q.trim().toLowerCase()),
-              )
-              .map((device) => {
-                const current = device.id === replacing?.deviceId;
-                const used = inUse.has(device.id);
-                const why = !device.available
-                  ? (device.detail ?? "This playback device is unavailable.")
-                  : used && !current
-                    ? "Already an output"
-                    : limit
-                      ? "Three playback outputs are supported."
-                      : undefined;
-                const disabled = current || !!why;
-                return (
-                  <button
-                    key={device.id}
-                    type="button"
-                    role="option"
-                    className="pick-row"
-                    aria-selected={selected === device.id}
-                    aria-disabled={disabled}
-                    data-disabled={disabled || undefined}
-                    onClick={() => !disabled && setSelected(device.id)}
-                    onDoubleClick={() => !disabled && onPlayback(device.id)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !disabled) {
-                        e.preventDefault();
-                        onPlayback(device.id);
-                      }
-                    }}
-                  >
-                    <SourceGlyph glyph="playback" tint="#6b7f8e" size={22} />
-                    <span className="pick-text">
-                      <span className="pick-name">{device.name}</span>
-                      <span className="pick-detail">
-                        {why ?? device.detail ?? "Windows playback endpoint"}
-                      </span>
+            {visibleDevices.map((device) => {
+              const current = device.id === replacing?.deviceId;
+              const used = inUse.has(device.id);
+              const why = !device.available
+                ? (device.detail ?? "This playback device is unavailable.")
+                : used && !current
+                  ? "Already an output"
+                  : limit
+                    ? "Three playback outputs are supported."
+                    : undefined;
+              const disabled = current || !!why;
+              return (
+                <button
+                  key={device.id}
+                  type="button"
+                  role="option"
+                  className="pick-row"
+                  aria-selected={selected === device.id}
+                  aria-disabled={disabled}
+                  data-disabled={disabled || undefined}
+                  onClick={() => !disabled && setSelected(device.id)}
+                  onDoubleClick={() => !disabled && onPlayback(device.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !disabled) {
+                      e.preventDefault();
+                      onPlayback(device.id);
+                    }
+                  }}
+                >
+                  <SourceGlyph glyph="playback" tint="#6b7f8e" size={22} />
+                  <span className="pick-text">
+                    <span className="pick-name">{device.name}</span>
+                    <span className="pick-detail">
+                      {why ?? device.detail ?? "Windows playback endpoint"}
                     </span>
-                    <span className="pick-meta">
-                      {current ? (
-                        <span className="tag">Current</span>
-                      ) : used ? (
-                        <span className="tag">In use</span>
-                      ) : null}
-                      {selected === device.id && (
-                        <Check size={16} className="pick-check" />
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
-            {devices.length === 0 && (
+                  </span>
+                  <span className="pick-meta">
+                    {current ? (
+                      <span className="tag">Current</span>
+                    ) : used ? (
+                      <span className="tag">In use</span>
+                    ) : null}
+                    {selected === device.id && (
+                      <Check size={16} className="pick-check" />
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+            {visibleDevices.length === 0 && (
               <div className="pick-empty">
                 {playbackDiscovery.phase === "loading"
                   ? "Looking for playback devices…"
-                  : "No playback devices found. Connect a device and refresh."}
+                  : q
+                    ? `No playback device matches “${q}”.`
+                    : "No playback devices found. Connect a device and refresh."}
               </div>
             )}
           </div>

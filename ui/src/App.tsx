@@ -467,7 +467,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               </div>
             )}
           </section>
-          <section className="slot dst-slot" aria-label="Destinations">
+          <section
+            className="slot dst-slot"
+            aria-label="Destinations"
+            data-many={dests.length > 1 || undefined}
+          >
             <SlotHead
               title={dests.length > 1 ? "Destinations" : "Destination"}
               summary={destinationSummary}

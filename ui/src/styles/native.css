@@ -167,3 +167,12 @@ body {
     container-type: size scroll-state;
   }
 }
+/* Multi-output wide lists keep both sets of controls within their columns. */
+@container win (min-width: 700px) {
+  .window:has(.dst-slot[data-many]) .src-slot {
+    flex: 1.25 1 0;
+  }
+  .window:has(.dst-slot[data-many]) .dst-slot {
+    flex: 1 1 0;
+  }
+}

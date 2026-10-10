@@ -248,7 +248,17 @@ for (const [w, h] of [
       const sl = document.querySelector(".src-list")?.getBoundingClientRect();
       const dst = document.querySelector(".dest-card")?.getBoundingClientRect();
       const dl = document.querySelector(".dst-list")?.getBoundingClientRect();
+      const controlsFit = Array.from(
+        document.querySelectorAll(".card .controls-row"),
+      ).every((row) => {
+        const box = row.getBoundingClientRect();
+        return Array.from(row.children).every((el) => {
+          const r = el.getBoundingClientRect();
+          return r.left >= box.left - 1 && r.right <= box.right + 1;
+        });
+      });
       return {
+        controlsFit,
         source: !!src && !!sl && src.bottom <= sl.bottom + 1,
         destination: !!dst && !!dl && dst.bottom <= dl.bottom + 1,
         doc: [
@@ -257,7 +267,12 @@ for (const [w, h] of [
         ],
       };
     });
-    expect(fit).toEqual({ source: true, destination: true, doc: [w, h] });
+    expect(fit).toEqual({
+      controlsFit: true,
+      source: true,
+      destination: true,
+      doc: [w, h],
+    });
     await page
       .getByRole("button", { name: "Show Preview cable input", exact: true })
       .click();
@@ -316,4 +331,122 @@ test("observed identity notices distinguish pending selection from successful ca
   await expect(
     page.locator(".source-card").first().locator(".id-detail"),
   ).toHaveText("Switched from Preview player");
+});
+
+test("destination type tabs support arrows and keep Playback independent of setup", async ({
+  page,
+}) => {
+  await start(page, "first-run");
+  await page
+    .getByRole("button", { name: "Add destination", exact: true })
+    .last()
+    .click();
+  await page.getByRole("tab", { name: "Playback", exact: true }).focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(
+    page.getByRole("tab", { name: "Discord", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("ArrowRight");
+  await expect(
+    page.getByRole("tab", { name: "Playback", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expect(
+    page.getByRole("searchbox", { name: "Search playback devices" }),
+  ).toBeVisible();
+});
+
+test("a slow observed replacement receives its completed notice after pending text expires", async ({
+  page,
+}) => {
+  await start(page);
+  await page.clock.install();
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    const inputs = structuredClone(t.current.inputs);
+    const s = inputs[0];
+    if (s) {
+      s.sourceId = "app:browser:2";
+      s.phase = "opening";
+      s.displayName = "Preview browser";
+    }
+    t.emit({ inputs });
+  });
+  await expect(page.locator(".source-card .id-detail").first()).toHaveText(
+    "Selected instead of Preview player",
+  );
+  await page.clock.fastForward(3500);
+  await expect(
+    page.locator(".source-card .id-detail").first(),
+  ).not.toContainText("Selected instead");
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    const inputs = structuredClone(t.current.inputs);
+    if (inputs[0]) inputs[0].phase = "capturing";
+    t.emit({ inputs });
+  });
+  await expect(page.locator(".source-card .id-detail").first()).toHaveText(
+    "Switched from Preview player",
+  );
+});
+
+test("compact trends appear only for observed values when the full chart is hidden", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 455, height: 455 });
+  await start(page);
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.emit({ settings: { ...t.current.settings, meterStyle: "history" } });
+  });
+  await page.evaluate(() => {
+    const h = window.uiHarness;
+    const t = h.transport;
+    h.adapter.telemetry.ingest({
+      ...t.current.telemetry,
+      destinations: t.current.telemetry.destinations.map((d) => ({
+        ...d,
+        gatewayPingMs: null,
+        queuedFrames: 480,
+      })),
+    });
+  });
+  await page.waitForTimeout(550);
+  await page.evaluate(() => {
+    const h = window.uiHarness;
+    const t = h.transport;
+    h.adapter.telemetry.ingest({
+      ...t.current.telemetry,
+      destinations: t.current.telemetry.destinations.map((d) => ({
+        ...d,
+        gatewayPingMs: null,
+        queuedFrames: 960,
+      })),
+    });
+  });
+  const sparks = page.locator(".dest-card .spark");
+  await expect(sparks.nth(0)).toHaveAttribute("data-available", "false");
+  await expect(sparks.nth(1)).toHaveAttribute("data-available", "true");
+  await expect(sparks.nth(1)).toBeVisible();
+});
+
+test("playback search reports no matches and local graph hover never invents gateway facts", async ({
+  page,
+}) => {
+  await start(page);
+  await page
+    .getByRole("button", { name: "Add destination", exact: true })
+    .click();
+  await page.getByRole("tab", { name: "Playback", exact: true }).click();
+  await page
+    .getByRole("searchbox", { name: "Search playback devices" })
+    .fill("no-such-output");
+  await expect(page.getByText(/No playback device matches/)).toBeVisible();
+  await page.keyboard.press("Escape");
+  const local = await addPlayback(page);
+  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: "Playing", exact: true }).click();
+  const sheet = page.getByRole("dialog", { name: /Playback output details/ });
+  await sheet.locator(".net-plot").hover();
+  await expect(sheet.locator(".net-tip")).toBeVisible();
+  await expect(sheet.locator(".net-tip")).not.toContainText("Gateway");
 });

@@ -225,7 +225,7 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
             ? "Level unavailable"
             : peak > 0
               ? `Peak ${fmtDb(db)} dBFS`
-              : "Silent";
+              : "Below −60 dBFS";
         }
       },
       10,
@@ -557,7 +557,8 @@ export function NetChart({
             const buffer = n.buffer2m.at(k);
             const gateway = n.ping2m.at(k);
             if (Number.isFinite(buffer)) max = Math.max(max, buffer);
-            if (Number.isFinite(gateway)) max = Math.max(max, gateway);
+            if (!local && Number.isFinite(gateway))
+              max = Math.max(max, gateway);
           }
           const top = Math.max(60, Math.ceil(max / 20) * 20);
           const right = 30 * dpr;
@@ -619,7 +620,7 @@ export function NetChart({
             if (at !== null) {
               const v = n.buffer2m.at(at);
               const gateway = n.ping2m.at(at);
-              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 2)} s`} · Gateway ${Number.isFinite(gateway) ? `${Math.round(gateway)} ms` : "unavailable"} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
+              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 2)} s`}${local ? "" : ` · Gateway ${Number.isFinite(gateway) ? `${Math.round(gateway)} ms` : "unavailable"}`} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
               tooltip.style.left = `${Math.max(0, Math.min(cv.clientWidth - 150, x(at) / dpr + 12))}px`;
               ctx.fillStyle = cs.getPropertyValue("--crosshair").trim();
               ctx.fillRect(
@@ -855,7 +856,12 @@ function MuteToggle({
   );
 }
 
-function useIdentityNotice(key: string, name: string, ready: boolean) {
+function useIdentityNotice(
+  key: string,
+  name: string,
+  ready: boolean,
+  failed = false,
+) {
   const previous = useRef({ key, name });
   const pending = useRef<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -865,6 +871,7 @@ function useIdentityNotice(key: string, name: string, ready: boolean) {
       pending.current = previous.current.name;
       previous.current = { key, name };
     } else previous.current.name = name;
+    if (failed) pending.current = null;
     const from = pending.current;
     if (!from) return;
     if (timer.current) clearTimeout(timer.current);
@@ -872,9 +879,8 @@ function useIdentityNotice(key: string, name: string, ready: boolean) {
     if (ready) pending.current = null;
     timer.current = setTimeout(() => {
       setNotice(null);
-      pending.current = null;
     }, 2800);
-  }, [key, name, ready]);
+  }, [key, name, ready, failed]);
   useEffect(
     () => () => {
       if (timer.current) clearTimeout(timer.current);
@@ -928,6 +934,7 @@ export function SourceCard({
     card.sourceId,
     s.name,
     card.state === "capturing",
+    card.state === "fault",
   );
   const detail =
     notice ??
@@ -1147,6 +1154,7 @@ export function DestCard({
     `${card.kind}:${card.deviceId ?? `${card.serverId}:${card.channelId}`}`,
     channel.name,
     card.state === "live",
+    card.state === "fault" || card.state === "cleanup-incomplete",
   );
   const live = card.state === "live";
   const busy = card.state === "connecting" || card.state === "recovering";

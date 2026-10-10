@@ -27,6 +27,16 @@ pub fn dispatch() -> Option<ProbeResult<()>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--application-suite") if args.len() == 1 => Some(suite()),
+        Some("--mixing-suite") if args.len() == 1 => Some(mixing_suite()),
+        Some("--audio-worker") if args.len() == 2 => {
+            let result = args[1]
+                .parse::<usize>()
+                .map_err(|_| "invalid audio handle")
+                .and_then(|raw| {
+                    echocord_core::mixing::run_worker(raw).map_err(|_| "audio worker failed")
+                });
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
+        }
         Some("--browser-suite") if args.len() == 5 => Some(browser_suite(&args[1..])),
         Some("--synthetic-render") if args.len() == 4 => Some(render(&args[1..])),
         _ => None,
@@ -563,5 +573,190 @@ fn suite() -> ProbeResult<()> {
         "localAudibility":"not physically measured; owned session mute/volume are observed at the capture boundary",
         "independentLocalSuppression":false,"queueAgeBoundary":"native sample exposure to reader only; no listener latency"});
     println!("{}", serde_json::to_string(&report)?);
+    Ok(())
+}
+
+fn mixing_suite() -> ProbeResult<()> {
+    use echocord_core::{mix_bus, mixing::AudioHost, model::*};
+    use std::os::windows::io::IntoRawHandle;
+    let mut first = OwnedRenderer::spawn(48_000, 997, false)?;
+    let mut second = OwnedRenderer::spawn(44_100, 1499, false)?;
+    let _unselected = OwnedRenderer::spawn(48_000, 2233, false)?;
+    let source = |id: &str, process: &OwnedRenderer| -> ProbeResult<InputStrip> {
+        Ok(InputStrip {
+            strip_id: id.into(),
+            source_id: application::identity_for_pid(process.process.id())?,
+            kind: SourceKind::Application,
+            display_name: "Owned synthetic source".into(),
+            detail: None,
+            phase: InputPhase::Opening,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        })
+    };
+    let mut inputs = vec![source("first", &first)?, source("second", &second)?];
+    let host = AudioHost::launch(std::env::current_exe()?)?;
+    host.sources(inputs.clone());
+    let wait = |predicate: &dyn Fn(&echocord_core::mixing::AudioSnapshot) -> bool| -> ProbeResult<echocord_core::mixing::AudioSnapshot> {
+        let until = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < until {
+            if host.exit.load(Ordering::Acquire) != 0 { return Err("audio worker exited unexpectedly".into()); }
+            if let Some(snapshot) = host.snapshot() && predicate(&snapshot) { return Ok(snapshot); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("audio worker observation timed out".into())
+    };
+    let preview = wait(&|s| {
+        s.inputs.len() == 2
+            && s.inputs.iter().all(|i| i.phase == InputPhase::Capturing)
+            && s.telemetry
+                .iter()
+                .all(|t| t.level_dbfs.is_some_and(|level| level > -70.0))
+    })?;
+    require(
+        preview.telemetry.iter().all(|t| t.queued_frames <= 1920),
+        "preview queue exceeded its bound",
+    )?;
+    std::thread::sleep(Duration::from_millis(800));
+    let idle = wait(&|s| s.telemetry.len() == 2)?;
+    require(
+        idle.telemetry.iter().all(|t| t.dropped_frames < 4800),
+        "capture without destination accumulated overflow",
+    )?;
+    let clock_view =
+        mix_bus::Mapping::inherited(host.bus.inheritable()?.into_raw_handle() as usize)?;
+    let cursor = clock_view.bus().cursor();
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    let frames_per_second =
+        (clock_view.bus().cursor() - cursor) as f64 / started.elapsed().as_secs_f64();
+    require(
+        (47_000.0..=49_000.0).contains(&frames_per_second),
+        "shared producer clock is not approximately 48000 frames/sec",
+    )?;
+    println!("native-shared-mix producer frames/sec: {frames_per_second:.1}");
+    drop(clock_view);
+    let handle = host.bus.inheritable()?;
+    let mut destination =
+        mix_bus::capture(&format!("mix-handle:{}", handle.into_raw_handle() as usize))?;
+    let _ = measure(&mut destination, 300)?;
+    let live = measure(&mut destination, 1000)?;
+    require(
+        live.root_left > 0.002 && live.root_right > 0.002 && live.child_left > 0.002,
+        "two native sources did not reach the stereo mix",
+    )?;
+    require(
+        live.unselected_left < live.root_left * 0.05,
+        "unselected application leaked into the mix",
+    )?;
+    inputs[0].muted = true;
+    host.sources(inputs.clone());
+    let muted_meter = wait(&|s| {
+        s.inputs.first().is_some_and(|i| i.muted)
+            && s.telemetry
+                .iter()
+                .any(|t| t.strip_id == "first" && t.level_dbfs.is_some_and(|v| v > -70.0))
+    })?;
+    require(
+        !muted_meter.telemetry.is_empty(),
+        "muted source meter missing",
+    )?;
+    let _ = measure(&mut destination, 200)?;
+    let muted = measure(&mut destination, 800)?;
+    require(
+        muted.root_left < live.root_left * 0.08 && muted.child_left > live.child_left * 0.6,
+        "source mute affected the wrong mix signal",
+    )?;
+    inputs[0].muted = false;
+    inputs[0].gain_db = Some(-12.0412);
+    host.sources(inputs.clone());
+    wait(&|s| {
+        s.inputs
+            .iter()
+            .any(|i| i.strip_id == "first" && i.gain_db == Some(-12.0412))
+    })?;
+    let _ = measure(&mut destination, 200)?;
+    let gained = measure(&mut destination, 800)?;
+    require(
+        gained.root_left > live.root_left * 0.1 && gained.root_left < live.root_left * 0.4,
+        "fractional source gain did not reach native PCM",
+    )?;
+    destination.control.set_linear_output(0.125, false);
+    let output = measure(&mut destination, 800)?;
+    require(
+        output.child_left < gained.child_left * 0.2 && output.child_left > gained.child_left * 0.05,
+        "destination gain did not reach native PCM",
+    )?;
+    destination.control.set_linear_output(1.0, true);
+    let silence = measure(&mut destination, 300)?;
+    require(
+        silence.peak == 0.0,
+        "destination mute did not produce silence",
+    )?;
+    destination.control.set_linear_output(1.0, false);
+    second.terminate()?;
+    wait(&|s| {
+        s.inputs
+            .iter()
+            .any(|i| i.strip_id == "second" && i.phase == InputPhase::Fault)
+    })?;
+    let _ = measure(&mut destination, 250)?;
+    let fault = measure(&mut destination, 800)?;
+    require(
+        fault.root_left > 0.0005 && fault.child_left < live.child_left * 0.08,
+        "one source fault stopped or contaminated the shared mix",
+    )?;
+    first.command("silence")?;
+    let _ = measure(&mut destination, 250)?;
+    require(
+        measure(&mut destination, 300)?.peak == 0.0,
+        "source silence did not remain connected silence",
+    )?;
+    first.command("resume")?;
+    let _ = measure(&mut destination, 200)?;
+    require(
+        measure(&mut destination, 500)?.root_left > 0.0005,
+        "source signal did not resume",
+    )?;
+    inputs.remove(1);
+    inputs[0].phase = InputPhase::Stopped;
+    host.sources(inputs.clone());
+    wait(&|s| s.inputs.len() == 1 && s.inputs[0].phase == InputPhase::Stopped)?;
+    inputs[0].phase = InputPhase::Opening;
+    host.sources(inputs.clone());
+    wait(&|s| s.inputs.len() == 1 && s.inputs[0].phase == InputPhase::Capturing)?;
+    // Rapid remove/add of the same physical source must serialize retirement.
+    host.sources(Vec::new());
+    inputs[0].strip_id = "replacement".into();
+    host.sources(inputs.clone());
+    wait(&|s| {
+        s.inputs.len() == 1
+            && s.inputs[0].strip_id == "replacement"
+            && s.inputs[0].phase == InputPhase::Capturing
+    })?;
+    let _ = measure(&mut destination, 250)?;
+    require(
+        measure(&mut destination, 500)?.root_left > 0.0005,
+        "stable mix reader did not survive source replacement",
+    )?;
+    require(
+        destination.control.stop(),
+        "destination PCM reader cleanup failed",
+    )?;
+    host.stop();
+    let until = Instant::now() + Duration::from_secs(5);
+    while host.exit.load(Ordering::Acquire) == 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    require(
+        host.exit.load(Ordering::Acquire) == 1,
+        "audio worker exit was not observed",
+    )?;
+    println!(
+        "native-shared-mix: passed; two sources, no credentials, idle drain, stereo isolation, fractional gains, source/destination mute, source fault, silence/resume, stop/start/replace, observed cleanup"
+    );
     Ok(())
 }

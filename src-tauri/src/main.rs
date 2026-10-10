@@ -1,5 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod window_state;
+
 use echocord_core::{
     controller::{Controller, ControllerConfig},
     model::{AppError, BotStatus, Connection, ControlCommand, ControlSnapshot, Discovery},
@@ -72,6 +74,7 @@ fn show_window(app: &tauri::AppHandle) {
 }
 
 fn request_quit(app: &tauri::AppHandle) {
+    window_state::persist(app);
     let state = app.state::<ShellState>();
     if state.exiting.swap(true, Ordering::SeqCst) {
         return;
@@ -139,6 +142,21 @@ fn parse_options() -> Result<(ControllerConfig, Option<PathBuf>), &'static str> 
 }
 
 fn main() {
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--audio-worker") {
+        let result = std::env::args()
+            .nth(2)
+            .and_then(|s| s.parse::<usize>().ok())
+            .ok_or_else(|| {
+                AppError::new(
+                    echocord_core::model::ErrorCode::Internal,
+                    "Invalid audio worker handle.",
+                )
+            })
+            .and_then(echocord_core::mixing::run_worker);
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
     // The engine must never initialize a second WebView or tray icon.
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--engine-worker")) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -159,11 +177,15 @@ fn main() {
         eprintln!("{message}");
         std::process::exit(2);
     });
+    let window_preferences = window_state::preference_path(
+        configuration.settings_file.as_deref(),
+        configuration.token_file.as_deref(),
+    );
     let expect_authenticated = configuration
         .token_file
         .as_ref()
         .is_some_and(|p| p.is_file());
-    let controller = tauri::async_runtime::block_on(async { Controller::spawn(configuration) });
+    let controller = tauri::async_runtime::block_on(async { Controller::prepare(configuration) });
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(
             |app, _arguments, _directory| {
@@ -187,15 +209,33 @@ fn main() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                window_state::remember(window);
+                window_state::persist(window.app_handle());
+                if !window
+                    .app_handle()
+                    .state::<ShellState>()
+                    .controller
+                    .snapshot()
+                    .settings
+                    .keep_in_tray
+                {
+                    request_quit(window.app_handle());
+                    return;
+                }
                 let _ = window.hide();
                 publish_visibility(window.app_handle());
             } else if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(_)) {
                 // Losing focus alone does not hide a visible window. Native
                 // minimize/restore changes are observed through window state.
+                if matches!(event, WindowEvent::Resized(_)) {
+                    window_state::remember(window);
+                }
                 publish_visibility(window.app_handle());
             }
         })
         .setup(move |app| {
+            window_state::install(app, window_preferences.clone());
+            app.state::<ShellState>().controller.activate();
             let open = MenuItem::with_id(app, "open", "Open Echocord", true, None::<&str>)?;
             let mute =
                 CheckMenuItem::with_id(app, "mute", "Mute output", true, false, None::<&str>)?;
@@ -254,6 +294,7 @@ fn main() {
                         let _ = tray.set_tooltip(Some(format!("Echocord — {label}")));
                         last_tray = Some(tray_state);
                     }
+                    let _ = handle.emit("echocord://telemetry", &snapshot.telemetry);
                     let _ = handle.emit("echocord://snapshot", &snapshot);
                     if snapshots.changed().await.is_err() {
                         break;

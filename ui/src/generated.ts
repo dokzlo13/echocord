@@ -1,6 +1,6 @@
 // Generated from Rust model types. Do not edit by hand.
 export type InputPhase = "stopped" | "opening" | "capturing" | "fault";
-export type InputStrip = { stripId: string, sourceId: string, kind: SourceKind, displayName: string, detail: string | null, phase: InputPhase, fault: AppError | null, 
+export type InputStrip = { stripId: string, sourceId: string, kind: SourceKind, displayName: string, detail: string | null, phase: InputPhase, fault: AppError | null,
 /**
  * null means Off; otherwise -60..=0 dB, with fractional precision.
  */
@@ -9,7 +9,7 @@ export type DestinationStrip = { destinationId: string, serverId: string, channe
 export type AppSettings = { restoreSetup: boolean, keepInTray: boolean, meterStyle: MeterStyle, };
 export type MeterStyle = "simple" | "history";
 export type InputTelemetry = { stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
-export type MixTelemetry = { inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, 
+export type MixTelemetry = { mixPreClip: boolean, inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number,
 /**
  * Unavailable until measured; never a simulated voice-network statistic.
  */
@@ -28,6 +28,6 @@ export type ConnectStage = "checking" | "preflight" | "gateway" | "join" | "capt
 export type Connection = { "phase": "disconnected" } | { "phase": "connecting", stage: ConnectStage, } | { "phase": "connected" } | { "phase": "recovering", attempt: number, message: string, } | { "phase": "disconnecting" } | { "phase": "cleanup-incomplete", message: string, } | { "phase": "error", code: ErrorCode, message: string, };
 export type CapturePhase = "stopped" | "opening" | "running" | "missing" | "error";
 export type Capture = { phase: CapturePhase, levelDbfs: number | null, outputLevelDbfs: number | null, message: string | null, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
-export type Output = { volumePercent: number, muted: boolean, };
+export type Output = { volumeLinear?: number, volumePercent: number, muted: boolean, };
 export type ControlSnapshot = { inputs: Array<InputStrip>, destinations: Array<DestinationStrip>, settings: AppSettings, telemetry: MixTelemetry, revision: number, sessionId: number, sources: Array<RecordingSource>, servers: Array<Server>, selection: Selection, bot: BotProfile, discovery: Discovery, sourceDiscovery: Discovery, connection: Connection, capture: Capture, output: Output, };
 export type ControlCommand = { "type": "add-source", sourceId: string, } | { "type": "remove-source", stripId: string, } | { "type": "replace-source", stripId: string, sourceId: string, } | { "type": "start-capture", stripId: string, } | { "type": "stop-capture", stripId: string, } | { "type": "set-source-muted", stripId: string, muted: boolean, } | { "type": "set-source-gain", stripId: string, gainDb: number | null, } | { "type": "add-destination", serverId: string, channelId: string, } | { "type": "remove-destination", destinationId: string, } | { "type": "change-destination", destinationId: string, serverId: string, channelId: string, } | { "type": "connect-destination", destinationId: string, } | { "type": "disconnect-destination", destinationId: string, } | { "type": "set-destination-volume", destinationId: string, volumeDb: number | null, } | { "type": "set-destination-muted", destinationId: string, muted: boolean, } | { "type": "set-settings", settings: AppSettings, } | { "type": "refresh-sources" } | { "type": "refresh-catalog" } | { "type": "recheck-configuration" } | { "type": "select-source", sourceId: string, } | { "type": "select-destination", serverId: string, channelId: string | null, } | { "type": "connect" } | { "type": "disconnect" } | { "type": "set-volume", percent: number, } | { "type": "set-muted", muted: boolean, };

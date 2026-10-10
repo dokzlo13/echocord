@@ -11,7 +11,7 @@ use std::{
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 pub const VERSION: u8 = 1;
-pub const MAX_LINE_BYTES: usize = 8192;
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,6 +253,10 @@ pub fn validate_init(init: &Init) -> Result<(), ProtocolError> {
         || init.source_id.is_empty()
         || init.source_id.len() > 1024
         || init.output.volume_percent > 100
+        || init
+            .output
+            .volume_linear
+            .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
         || discord_id(&init.server_id).is_none()
         || discord_id(&init.channel_id).is_none()
     {
@@ -416,6 +420,7 @@ mod tests {
             server_id: "1".into(),
             channel_id: "2".into(),
             output: Output {
+                volume_linear: None,
                 volume_percent: 100,
                 muted: false,
             },

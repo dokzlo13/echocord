@@ -18,7 +18,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
 };
 use symphonia_core::io::MediaSource;
@@ -34,8 +34,8 @@ const MAX_AGE_NS: u64 = 40_000_000;
 const WAIT_SLICE_NS: u64 = 2_000_000;
 const METER_AGE_NS: u64 = 200_000_000;
 const SILENCE_DBFS: f32 = -96.0;
-const MUTED: u64 = 1 << 8;
-const GENERATION_SHIFT: u32 = 9;
+const MUTED: u64 = 1 << 32;
+const GENERATION_SHIFT: u32 = 33;
 const STOPPED: u8 = 0;
 const OPENING: u8 = 1;
 const RUNNING: u8 = 2;
@@ -123,13 +123,22 @@ impl CaptureControl {
     /// Every mute transition invalidates older queued frames, even if unmuted
     /// before the reader runs. At most one already-started frame is staged here.
     pub fn set_output(&self, volume_percent: u8, muted: bool) {
+        self.set_linear_output(volume_percent.min(100) as f32 / 100.0, muted);
+    }
+
+    pub fn set_linear_output(&self, gain: f32, muted: bool) {
+        let gain = if gain.is_finite() {
+            gain.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let shared = &self.owner.shared;
         let mut old = shared.output.load(Ordering::Acquire);
         loop {
             let generation =
                 (old >> GENERATION_SHIFT).wrapping_add(u64::from((old & MUTED != 0) != muted));
             let new = (generation << GENERATION_SHIFT)
-                | u64::from(volume_percent.min(100))
+                | u64::from(gain.clamp(0.0, 1.0).to_bits())
                 | if muted { MUTED } else { 0 };
             match shared
                 .output
@@ -139,6 +148,11 @@ impl CaptureControl {
                 Err(actual) => old = actual,
             }
         }
+    }
+
+    /// Latches every native pre-gain clipping observation until consumed.
+    pub fn take_pre_clip(&self) -> bool {
+        self.owner.shared.pre_clip.swap(false, Ordering::AcqRel)
     }
 
     /// Number of nonterminal native underrun/overrun/discontinuity notifications.
@@ -305,6 +319,7 @@ struct Shared {
     output: AtomicU64,
     input_epoch: AtomicU64,
     peak_bits: AtomicU32,
+    pre_clip: AtomicBool,
     last_callback_ns: AtomicU64,
     output_meter: OutputMeter,
     pushed: AtomicU64,
@@ -510,7 +525,7 @@ impl Reader {
                 shared.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            let gain = (output & 0xff) as f32 / 100.0;
+            let gain = f32::from_bits(output as u32);
             return ([frame.samples[0] * gain, frame.samples[1] * gain], output);
         }
         // Intentional mute is not an underrun. Muted reads still
@@ -529,6 +544,22 @@ impl Reader {
             }
             shared.popped.fetch_add(1, Ordering::Release);
             shared.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl LivePcm {
+    /// The shared mixer owns pacing. This bounded drain never waits for a source.
+    pub fn drain_frames(&mut self, frames: &mut [[f32; 2]]) {
+        let shared = &self.owner.shared;
+        let reader = self.reader.get_mut().unwrap_or_else(|e| e.into_inner());
+        let mut budget = QUEUE_FRAMES;
+        for frame in frames {
+            *frame = if matches!(shared.status.load(Ordering::Acquire), RUNNING | OPENING) {
+                reader.next_frame(shared, &mut budget).0
+            } else {
+                [0.0; 2]
+            };
         }
     }
 }
@@ -599,6 +630,9 @@ impl CaptureWriter {
                 0.0
             };
             peak = peak.max(sample.abs());
+            if sample.abs() >= 1.0 {
+                self.shared.pre_clip.store(true, Ordering::Release);
+            }
             let output = self.shared.output.load(Ordering::Acquire);
             let generation = output >> GENERATION_SHIFT;
             let (samples, exposed_ns, frame_generation) = if channels == 1 {
@@ -643,9 +677,10 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
     let (producer, consumer) = RingBuffer::new(QUEUE_FRAMES);
     let shared = Arc::new(Shared {
         status: AtomicU8::new(OPENING),
-        output: AtomicU64::new(100),
+        output: AtomicU64::new(u64::from(1.0_f32.to_bits())),
         input_epoch: AtomicU64::new(0),
         peak_bits: AtomicU32::new(u32::MAX),
+        pre_clip: AtomicBool::new(false),
         last_callback_ns: AtomicU64::new(0),
         output_meter: OutputMeter::default(),
         pushed: AtomicU64::new(0),
@@ -706,6 +741,9 @@ pub fn start_capture_with_cancel(
     source_id: &str,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<CaptureSession, AppError> {
+    if source_id.starts_with("mix-handle:") {
+        return crate::mix_bus::capture(source_id);
+    }
     if application::is_application_id(source_id) {
         application::start_capture(source_id, cancelled)
     } else {
@@ -930,6 +968,39 @@ mod windows {
     }
 }
 
+#[cfg(windows)]
+pub(crate) fn bus_capture(
+    mut pump: impl FnMut(&mut [[f32; 2]]) + Send + 'static,
+) -> CaptureSession {
+    let (mut writer, session) = pipeline(Arc::new(SystemClock(Instant::now())));
+    let shared = writer.shared.clone();
+    shared.status.store(RUNNING, Ordering::Release);
+    let thread = std::thread::spawn(move || {
+        let mut frames = [[0.0; 2]; QUANTUM_FRAMES];
+        let mut next = Instant::now();
+        while shared.status.load(Ordering::Acquire) == RUNNING {
+            pump(&mut frames);
+            for frame in frames {
+                writer.write(&frame, 2, |x| x);
+            }
+            next += Duration::from_millis(5);
+            let now = Instant::now();
+            if now < next {
+                std::thread::sleep(next - now);
+            } else if now.duration_since(next) > Duration::from_millis(5) {
+                next = now;
+            }
+        }
+    });
+    *session
+        .control
+        .owner
+        .worker
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(thread);
+    session
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,6 +1113,38 @@ mod tests {
         assert_traits::<CaptureSession>();
     }
 
+    #[test]
+    fn native_preclip_latches_between_telemetry_polls() {
+        let (mut writer, session, _) = setup();
+        feed(&mut writer, 1, 1.0, -0.5);
+        feed(&mut writer, 240, 0.01, -0.01);
+        assert!(session.control.snapshot().level_dbfs.unwrap() < -30.0);
+        assert!(session.control.take_pre_clip());
+        assert!(!session.control.take_pre_clip());
+    }
+
+    #[test]
+    fn nonblocking_mix_drains_share_external_timeline_and_keep_precise_output_gain() {
+        let (mut first_writer, mut first, first_clock) = setup();
+        let (mut second_writer, mut second, second_clock) = setup();
+        feed(&mut first_writer, 240, 0.5, -0.25);
+        feed(&mut second_writer, 240, 0.125, -0.5);
+        let mut a = [[0.0; 2]; 240];
+        let mut b = a;
+        first.input.drain_frames(&mut a);
+        second.input.drain_frames(&mut b);
+        assert_eq!(a, [[0.5, -0.25]; 240]);
+        assert_eq!(b, [[0.125, -0.5]; 240]);
+        first.input.drain_frames(&mut a);
+        assert_eq!(a, [[0.0; 2]; 240]);
+        assert_eq!(first_clock.now(), 0);
+        assert_eq!(second_clock.now(), 0);
+        first.control.set_linear_output(0.004_25, false);
+        feed(&mut first_writer, 1, 0.5, -1.0);
+        assert_eq!(frames(&mut first.input, 1), vec![[0.002_125, -0.004_25]]);
+        first.control.set_linear_output(0.003_75, false);
+        assert_eq!(first.control.snapshot().output_level_dbfs, None);
+    }
     #[test]
     fn short_reads_preserve_every_byte_and_stereo_channel() {
         let (mut writer, mut session, _) = setup();

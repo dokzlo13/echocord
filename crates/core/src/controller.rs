@@ -43,6 +43,7 @@ pub struct Controller {
 }
 
 enum Request {
+    Activate,
     Dispatch(ControlCommand, oneshot::Sender<Result<(), AppError>>),
     // Intentionally nonserialized and without Debug: only the shell's private
     // configuration RPC may carry this short-lived secret into the actor.
@@ -68,10 +69,21 @@ enum Event {
 impl Controller {
     /// Requires a Tokio runtime. Startup performs REST discovery only.
     pub fn spawn(config: ControllerConfig) -> Self {
+        Self::spawn_mode(config, true)
+    }
+    /// Prepare the control channel without discovery, capture or worker creation.
+    /// The desktop shell activates it only after single-instance admission.
+    pub fn prepare(config: ControllerConfig) -> Self {
+        Self::spawn_mode(config, false)
+    }
+    pub fn activate(&self) {
+        let _ = self.commands.try_send(Request::Activate);
+    }
+    fn spawn_mode(config: ControllerConfig, active: bool) -> Self {
         let (commands, receiver) = mpsc::channel(32);
         let (snapshots, snapshot_rx) = watch::channel(ControlSnapshot::default());
         let (events, event_rx) = mpsc::channel(32);
-        tokio::spawn(Actor::new(config, snapshots, events).run(receiver, event_rx));
+        tokio::spawn(Actor::new(config, snapshots, events).run(receiver, event_rx, active));
         Self {
             commands,
             snapshots: snapshot_rx,
@@ -133,8 +145,17 @@ fn cleanup_error() -> AppError {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preferences {
+    #[serde(default)]
+    version: u8,
+    #[serde(default)]
     selection: Selection,
     output: Option<Output>,
+    #[serde(default)]
+    inputs: Vec<InputStrip>,
+    #[serde(default)]
+    destinations: Vec<DestinationStrip>,
+    #[serde(default)]
+    settings: AppSettings,
 }
 
 fn separate_settings(config: &ControllerConfig) -> bool {
@@ -170,6 +191,112 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     let mut prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
+    if prefs.version > 2
+        || prefs.inputs.len() > MAX_INPUTS
+        || prefs.destinations.len() > 1
+        || prefs
+            .inputs
+            .iter()
+            .any(|i| !crate::mixing::valid_gain(i.gain_db))
+        || prefs
+            .destinations
+            .iter()
+            .any(|d| !crate::mixing::valid_gain(d.volume_db))
+    {
+        return Err(Failure::Configuration.error());
+    }
+    if prefs.version < 2 {
+        if let Some(source_id) = &prefs.selection.source_id
+            && !crate::audio::application::is_application_id(source_id)
+        {
+            prefs.inputs.push(InputStrip {
+                strip_id: "input-1".into(),
+                source_id: source_id.clone(),
+                kind: SourceKind::Recording,
+                display_name: "Saved recording input".into(),
+                detail: None,
+                phase: InputPhase::Stopped,
+                fault: None,
+                gain_db: Some(0.0),
+                muted: false,
+                colour_slot: 0,
+                restored: true,
+            });
+        }
+        if let (Some(server_id), Some(channel_id)) =
+            (&prefs.selection.server_id, &prefs.selection.channel_id)
+        {
+            let output = prefs
+                .output
+                .clone()
+                .unwrap_or(ControlSnapshot::default().output);
+            prefs.destinations.push(DestinationStrip {
+                destination_id: "discord-1".into(),
+                server_id: server_id.clone(),
+                channel_id: channel_id.clone(),
+                connection: Connection::Disconnected,
+                volume_db: if output.volume_percent == 0 {
+                    None
+                } else {
+                    Some(20.0 * (output.volume_percent as f32 / 100.0).log10())
+                },
+                muted: output.muted,
+            });
+        }
+    }
+    let mut strips = std::collections::HashSet::new();
+    let mut sources = std::collections::HashSet::new();
+    for input in &mut prefs.inputs {
+        if input.source_id.is_empty()
+            || input.source_id.len() > 1024
+            || input.source_id.starts_with("mix-handle:")
+            || input.strip_id.is_empty()
+            || input.strip_id.len() > 64
+            || input.display_name.len() > 1024
+            || input.display_name.chars().any(char::is_control)
+            || input.source_id.chars().any(char::is_control)
+            || input
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.chars().any(char::is_control))
+            || input
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.len() > 1024)
+            || !strips.insert(input.strip_id.clone())
+            || !sources.insert(input.source_id.clone())
+        {
+            return Err(Failure::Configuration.error());
+        }
+        input.kind = if crate::audio::application::is_application_id(&input.source_id) {
+            SourceKind::Application
+        } else {
+            SourceKind::Recording
+        };
+    }
+    if prefs.destinations.iter().any(|d| {
+        d.destination_id != "discord-1"
+            || protocol::discord_id(&d.server_id).is_none()
+            || protocol::discord_id(&d.channel_id).is_none()
+    }) {
+        return Err(Failure::Configuration.error());
+    }
+    for input in &mut prefs.inputs {
+        input.phase = if input.kind == SourceKind::Recording && prefs.settings.restore_setup {
+            InputPhase::Opening
+        } else {
+            InputPhase::Stopped
+        };
+        input.fault = None;
+        input.restored = true;
+    }
+    for destination in &mut prefs.destinations {
+        destination.connection = Connection::Disconnected;
+    }
+    if !prefs.settings.restore_setup {
+        prefs.inputs.clear();
+        prefs.destinations.clear();
+    }
     if prefs
         .selection
         .source_id
@@ -178,11 +305,11 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     {
         prefs.selection.source_id = None;
     }
-    if prefs
-        .output
-        .as_ref()
-        .is_some_and(|o| o.volume_percent > 100)
-    {
+    if prefs.output.as_ref().is_some_and(|o| {
+        o.volume_percent > 100
+            || o.volume_linear
+                .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
+    }) {
         return Err(Failure::Configuration.error());
     }
     Ok(prefs)
@@ -195,7 +322,45 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
     let Some(path) = &config.settings_file else {
         return Ok(());
     };
+    if let Ok(file) = std::fs::File::open(path) {
+        let mut old = Vec::new();
+        if file
+            .take(MAX_SETTINGS_BYTES + 1)
+            .read_to_end(&mut old)
+            .is_ok()
+            && serde_json::from_slice::<serde_json::Value>(&old)
+                .ok()
+                .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
+                .is_some_and(|version| version > 2)
+        {
+            return Err(error(
+                ErrorCode::Configuration,
+                "These preferences were written by a newer Echocord version and were preserved.",
+            ));
+        }
+    }
     let bytes = serde_json::to_vec(&Preferences {
+        version: 2,
+        inputs: snapshot
+            .inputs
+            .iter()
+            .cloned()
+            .map(|mut i| {
+                i.phase = InputPhase::Stopped;
+                i.fault = None;
+                i
+            })
+            .collect(),
+        destinations: snapshot
+            .destinations
+            .iter()
+            .cloned()
+            .map(|mut d| {
+                d.connection = Connection::Disconnected;
+                d
+            })
+            .collect(),
+        settings: snapshot.settings.clone(),
         selection: snapshot.selection.clone(),
         output: Some(snapshot.output.clone()),
     })
@@ -339,6 +504,11 @@ fn specific_failure(code: Failure) -> bool {
 }
 
 struct Actor {
+    #[cfg(windows)]
+    audio: Option<crate::mixing::AudioHost>,
+    audio_failed: bool,
+    next_strip: u64,
+    move_pending: bool,
     config: ControllerConfig,
     snapshot: ControlSnapshot,
     snapshots: watch::Sender<ControlSnapshot>,
@@ -366,6 +536,11 @@ impl Actor {
         events: mpsc::Sender<Event>,
     ) -> Self {
         Self {
+            #[cfg(windows)]
+            audio: None,
+            audio_failed: false,
+            next_strip: 1,
+            move_pending: false,
             config,
             snapshot: ControlSnapshot::default(),
             snapshots,
@@ -388,15 +563,66 @@ impl Actor {
         }
     }
     fn publish(&mut self) {
+        if let Some(destination) = self.snapshot.destinations.first_mut() {
+            destination.connection = self.snapshot.connection.clone();
+        }
+        self.snapshot.telemetry.output_level_dbfs = self.snapshot.capture.output_level_dbfs;
+        self.snapshot.telemetry.queued_frames = self.snapshot.capture.queued_frames;
+        self.snapshot.telemetry.dropped_frames = self.snapshot.capture.dropped_frames;
+        self.snapshot.telemetry.underrun_frames = self.snapshot.capture.underrun_frames;
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
         self.snapshots.send_replace(self.snapshot.clone());
     }
-    async fn run(mut self, commands: mpsc::Receiver<Request>, events: mpsc::Receiver<Event>) {
+    async fn run(
+        mut self,
+        mut commands: mpsc::Receiver<Request>,
+        events: mpsc::Receiver<Event>,
+        active: bool,
+    ) {
+        if !active {
+            loop {
+                match commands.recv().await {
+                    Some(Request::Activate) => break,
+                    Some(Request::Shutdown(reply)) => {
+                        let _ = reply.send(Ok(()));
+                        return;
+                    }
+                    Some(Request::Dispatch(_, reply)) | Some(Request::ConfigureToken(_, reply)) => {
+                        let _ = reply.send(Err(busy()));
+                    }
+                    None => return,
+                }
+            }
+        }
         match load_preferences(&self.config) {
             Ok(prefs) => {
+                self.snapshot.inputs = prefs.inputs;
+                self.snapshot.destinations = prefs.destinations;
+                self.snapshot.settings = prefs.settings;
+                self.next_strip = self
+                    .snapshot
+                    .inputs
+                    .iter()
+                    .filter_map(|i| {
+                        i.strip_id
+                            .strip_prefix("input-")
+                            .and_then(|n| n.parse::<u64>().ok())
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 self.snapshot.selection = prefs.selection;
+                if let Some(destination) = self.snapshot.destinations.first() {
+                    self.snapshot.selection.server_id = Some(destination.server_id.clone());
+                    self.snapshot.selection.channel_id = Some(destination.channel_id.clone());
+                }
                 if let Some(output) = prefs.output {
                     self.snapshot.output = output;
+                }
+                if let Some(destination) = self.snapshot.destinations.first() {
+                    self.snapshot.output.volume_linear =
+                        Some(crate::mixing::linear(destination.volume_db));
+                    self.snapshot.output.muted = destination.muted;
                 }
             }
             Err(_) => {
@@ -404,6 +630,13 @@ impl Actor {
                     ErrorCode::Configuration,
                     "Saved preferences could not be loaded. Select a route again.",
                 ))
+            }
+        }
+        if let Err(error) = self.sync_audio() {
+            self.audio_failed = true;
+            for input in &mut self.snapshot.inputs {
+                input.phase = InputPhase::Fault;
+                input.fault = Some(error.clone());
             }
         }
         self.refresh();
@@ -418,6 +651,7 @@ impl Actor {
         loop {
             tokio::select! {
                 request = commands.recv(), if !self.shutting_down => match request {
+                    Some(Request::Activate) => {},
                     Some(Request::Dispatch(command, reply)) => { let result = self.command(command); let _ = reply.send(result); }
                     Some(Request::ConfigureToken(token, reply)) => self.configure_token(token, reply),
                     Some(Request::Shutdown(reply)) => { self.shutdown_waiters.push(reply); self.begin_shutdown(); }
@@ -432,10 +666,16 @@ impl Actor {
                             if let Some(capture) = capture { self.snapshot.capture = protocol::clean_capture(capture); self.publish(); }
                         }
                     }
+                    self.poll_audio();
+                    if self.move_pending && self.child.is_none() && !self.pending && !self.shutting_down && self.next_launch.is_none_or(|at| Instant::now() >= at) {
+                        self.move_pending = false;
+                        if let Err(error) = self.connect() { self.fail(error); }
+                    }
                     self.poll_deadline();
                 }
             }
             if self.shutting_down
+                && self.audio_stopped()
                 && self.configuration.is_none()
                 && (self.child.is_none()
                     || matches!(
@@ -443,7 +683,7 @@ impl Actor {
                         Connection::CleanupIncomplete { .. }
                     ))
             {
-                let result = if self.child.is_some() {
+                let result = if self.child.is_some() || self.audio_cleanup_incomplete() {
                     Err(cleanup_error())
                 } else {
                     Ok(())
@@ -458,6 +698,10 @@ impl Actor {
     }
     fn begin_shutdown(&mut self) {
         self.shutting_down = true;
+        #[cfg(windows)]
+        if let Some(audio) = &self.audio {
+            audio.stop();
+        }
         self.disconnect();
         if self
             .configuration
@@ -599,23 +843,36 @@ impl Actor {
                     ));
                 }
                 self.snapshot.output.volume_percent = percent;
+                self.snapshot.output.volume_linear = None;
+                if let Some(d) = self.snapshot.destinations.first_mut() {
+                    d.volume_db = if percent == 0 {
+                        None
+                    } else {
+                        Some(20.0 * (percent as f32 / 100.0).log10())
+                    };
+                }
                 if let Some(child) = &self.child {
                     child.output(self.snapshot.output.clone());
                 }
             }
             ControlCommand::SetMuted { muted } => {
                 self.snapshot.output.muted = muted;
+                if let Some(d) = self.snapshot.destinations.first_mut() {
+                    d.muted = muted;
+                }
                 if let Some(child) = &self.child {
                     child.output(self.snapshot.output.clone());
                 }
             }
             ControlCommand::Connect => return self.connect(),
             ControlCommand::Disconnect => {
+                self.move_pending = false;
                 self.terminal_error = None;
                 self.retired = None;
                 self.disconnect();
                 return Ok(());
             }
+            command => return self.mix_command(command),
         }
         self.publish();
         save_preferences(&self.config, &self.snapshot)?;
@@ -624,6 +881,435 @@ impl Actor {
             self.publish();
         }
         Ok(())
+    }
+    fn sync_audio(&mut self) -> Result<(), AppError> {
+        if self.audio_failed {
+            return Err(error(
+                ErrorCode::CaptureFailed,
+                "The audio worker stopped. Restart Echocord.",
+            ));
+        }
+        #[cfg(windows)]
+        {
+            if self.audio.is_none() {
+                self.audio = Some(crate::mixing::AudioHost::launch(
+                    self.config.executable.clone(),
+                )?);
+            }
+            if let Some(audio) = &self.audio {
+                audio.sources(self.snapshot.inputs.clone());
+            }
+        }
+        Ok(())
+    }
+    fn audio_cleanup_incomplete(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.audio
+                .as_ref()
+                .is_some_and(|a| a.exit.load(std::sync::atomic::Ordering::Acquire) == 2)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+    fn audio_stopped(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.audio
+                .as_ref()
+                .is_none_or(|a| a.exit.load(std::sync::atomic::Ordering::Acquire) != 0)
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+    fn poll_audio(&mut self) {
+        #[cfg(windows)]
+        if let Some(audio) = &self.audio {
+            let exit = audio.exit.load(std::sync::atomic::Ordering::Acquire);
+            if exit != 0 && !self.audio_failed {
+                self.audio_failed = true;
+                for input in &mut self.snapshot.inputs {
+                    input.phase = InputPhase::Fault;
+                    input.fault = Some(error(
+                        if exit == 2 {
+                            ErrorCode::CleanupIncomplete
+                        } else {
+                            ErrorCode::CaptureFailed
+                        },
+                        "The audio worker stopped. Restart Echocord.",
+                    ));
+                }
+                self.snapshot.telemetry.inputs.clear();
+                // Network worker remains owned; the dead producer yields paced silence.
+                self.publish();
+            } else if let Some(observation) = audio.snapshot() {
+                for observed in observation.inputs {
+                    if let Some(input) = self.snapshot.inputs.iter_mut().find(|i| {
+                        i.strip_id == observed.strip_id && i.source_id == observed.source_id
+                    }) && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                    {
+                        input.phase = observed.phase;
+                        input.fault = observed.fault;
+                        input.restored = observed.restored;
+                    }
+                }
+                self.snapshot.telemetry.mix_pre_clip = observation.mix_pre_clip;
+                self.snapshot.telemetry.inputs = observation.telemetry;
+                self.publish();
+            }
+        }
+    }
+    fn source_for_add(
+        &self,
+        source_id: &str,
+        replacing: Option<&str>,
+    ) -> Result<RecordingSource, AppError> {
+        let source = self
+            .snapshot
+            .sources
+            .iter()
+            .find(|s| s.id == source_id && s.available)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::InvalidSelection,
+                    "Select an available audio source.",
+                )
+            })?;
+        if source.name.chars().any(char::is_control)
+            || source.id.chars().any(char::is_control)
+            || source
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.chars().any(char::is_control))
+            || source.id.len() > 1024
+            || source.id.starts_with("mix-handle:")
+            || source.name.len() > 1024
+            || source
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail.len() > 1024)
+        {
+            return Err(error(
+                ErrorCode::InvalidSelection,
+                "This source descriptor exceeds the supported size.",
+            ));
+        }
+        for input in self
+            .snapshot
+            .inputs
+            .iter()
+            .filter(|i| Some(i.strip_id.as_str()) != replacing)
+        {
+            if input.source_id == source_id {
+                return Err(error(
+                    ErrorCode::InvalidSelection,
+                    "This source is already in the mix.",
+                ));
+            }
+            #[cfg(windows)]
+            if source.kind == SourceKind::Application
+                && input.kind == SourceKind::Application
+                && crate::audio::application::roots_overlap(&input.source_id, source_id)?
+            {
+                return Err(error(
+                    ErrorCode::InvalidSelection,
+                    "This application overlaps a source already in the mix.",
+                ));
+            }
+        }
+        Ok(source)
+    }
+    fn destination_exists(&self, id: &str) -> Result<(), AppError> {
+        if self
+            .snapshot
+            .destinations
+            .iter()
+            .any(|d| d.destination_id == id)
+        {
+            Ok(())
+        } else {
+            Err(error(
+                ErrorCode::InvalidSelection,
+                "This destination no longer exists.",
+            ))
+        }
+    }
+    fn validate_destination(&self, server: &str, channel: &str) -> Result<(), AppError> {
+        if self
+            .snapshot
+            .servers
+            .iter()
+            .any(|s| s.id == server && s.channels.iter().any(|c| c.id == channel))
+        {
+            Ok(())
+        } else {
+            Err(error(
+                ErrorCode::InvalidSelection,
+                "Select an available voice room.",
+            ))
+        }
+    }
+    fn mix_command(&mut self, command: ControlCommand) -> Result<(), AppError> {
+        if self.audio_failed
+            && matches!(
+                command,
+                ControlCommand::AddSource { .. }
+                    | ControlCommand::ReplaceSource { .. }
+                    | ControlCommand::StartCapture { .. }
+                    | ControlCommand::StopCapture { .. }
+                    | ControlCommand::RemoveSource { .. }
+                    | ControlCommand::SetSourceGain { .. }
+                    | ControlCommand::SetSourceMuted { .. }
+            )
+        {
+            return Err(error(
+                ErrorCode::CaptureFailed,
+                "The audio worker stopped. Restart Echocord.",
+            ));
+        }
+        match command {
+            ControlCommand::AddSource { source_id } => {
+                if self.snapshot.inputs.len() >= MAX_INPUTS {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "The mix supports up to eight sources.",
+                    ));
+                }
+                let source = self.source_for_add(&source_id, None)?;
+                let strip_id = format!("input-{}", self.next_strip);
+                self.next_strip += 1;
+                let colour_slot = (self.next_strip.saturating_sub(2)).min(5) as u8;
+                self.snapshot.inputs.push(InputStrip {
+                    strip_id,
+                    source_id,
+                    kind: source.kind,
+                    display_name: source.name,
+                    detail: source.detail,
+                    phase: InputPhase::Opening,
+                    fault: None,
+                    gain_db: Some(0.0),
+                    muted: false,
+                    colour_slot,
+                    restored: false,
+                });
+                self.sync_audio()?;
+            }
+            ControlCommand::RemoveSource { strip_id } => {
+                if !self.snapshot.inputs.iter().any(|i| i.strip_id == strip_id) {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "This source no longer exists.",
+                    ));
+                }
+                self.snapshot.inputs.retain(|i| i.strip_id != strip_id);
+                self.snapshot
+                    .telemetry
+                    .inputs
+                    .retain(|i| i.strip_id != strip_id);
+                self.sync_audio()?;
+            }
+            ControlCommand::ReplaceSource {
+                strip_id,
+                source_id,
+            } => {
+                let source = self.source_for_add(&source_id, Some(&strip_id))?;
+                let input = self
+                    .snapshot
+                    .inputs
+                    .iter_mut()
+                    .find(|i| i.strip_id == strip_id)
+                    .ok_or_else(|| {
+                        error(ErrorCode::InvalidSelection, "This source no longer exists.")
+                    })?;
+                input.source_id = source_id;
+                input.kind = source.kind;
+                input.display_name = source.name;
+                input.detail = source.detail;
+                input.phase = InputPhase::Opening;
+                input.fault = None;
+                input.restored = false;
+                self.sync_audio()?;
+            }
+            ControlCommand::StartCapture { strip_id } => {
+                let input = self
+                    .snapshot
+                    .inputs
+                    .iter_mut()
+                    .find(|i| i.strip_id == strip_id)
+                    .ok_or_else(|| {
+                        error(ErrorCode::InvalidSelection, "This source no longer exists.")
+                    })?;
+                #[cfg(windows)]
+                if input.kind == SourceKind::Application {
+                    crate::audio::validate_source(&input.source_id).map_err(|_| {
+                        error(
+                            ErrorCode::InvalidSelection,
+                            "This app instance is no longer running. Select the app again.",
+                        )
+                    })?;
+                }
+                input.phase = InputPhase::Opening;
+                input.fault = None;
+                self.sync_audio()?;
+            }
+            ControlCommand::StopCapture { strip_id } => {
+                let input = self
+                    .snapshot
+                    .inputs
+                    .iter_mut()
+                    .find(|i| i.strip_id == strip_id)
+                    .ok_or_else(|| {
+                        error(ErrorCode::InvalidSelection, "This source no longer exists.")
+                    })?;
+                input.phase = InputPhase::Stopped;
+                input.fault = None;
+                self.sync_audio()?;
+            }
+            ControlCommand::SetSourceMuted { strip_id, muted } => {
+                let input = self
+                    .snapshot
+                    .inputs
+                    .iter_mut()
+                    .find(|i| i.strip_id == strip_id)
+                    .ok_or_else(|| {
+                        error(ErrorCode::InvalidSelection, "This source no longer exists.")
+                    })?;
+                input.muted = muted;
+                self.sync_audio()?;
+            }
+            ControlCommand::SetSourceGain { strip_id, gain_db } => {
+                if !crate::mixing::valid_gain(gain_db) {
+                    return Err(error(
+                        ErrorCode::InvalidVolume,
+                        "Gain must be Off or between −60 and 0 dB.",
+                    ));
+                }
+                let input = self
+                    .snapshot
+                    .inputs
+                    .iter_mut()
+                    .find(|i| i.strip_id == strip_id)
+                    .ok_or_else(|| {
+                        error(ErrorCode::InvalidSelection, "This source no longer exists.")
+                    })?;
+                input.gain_db = gain_db;
+                self.sync_audio()?;
+            }
+            ControlCommand::AddDestination {
+                server_id,
+                channel_id,
+            } => {
+                if self.child.is_some() || self.pending {
+                    return Err(busy());
+                }
+                if !self.snapshot.destinations.is_empty() {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "One Discord room is supported.",
+                    ));
+                }
+                self.validate_destination(&server_id, &channel_id)?;
+                self.snapshot.selection.server_id = Some(server_id.clone());
+                self.snapshot.selection.channel_id = Some(channel_id.clone());
+                self.snapshot.connection = Connection::Disconnected;
+                self.snapshot.destinations.push(DestinationStrip {
+                    destination_id: "discord-1".into(),
+                    server_id,
+                    channel_id,
+                    connection: Connection::Disconnected,
+                    volume_db: Some(0.0),
+                    muted: false,
+                });
+                self.snapshot.output = Output {
+                    volume_linear: Some(1.0),
+                    volume_percent: 100,
+                    muted: false,
+                };
+            }
+            ControlCommand::RemoveDestination { destination_id } => {
+                self.destination_exists(&destination_id)?;
+                self.move_pending = false;
+                self.disconnect();
+                self.snapshot.destinations.clear();
+                self.snapshot.selection.server_id = None;
+                self.snapshot.selection.channel_id = None;
+            }
+            ControlCommand::ChangeDestination {
+                destination_id,
+                server_id,
+                channel_id,
+            } => {
+                self.destination_exists(&destination_id)?;
+                self.validate_destination(&server_id, &channel_id)?;
+                let reconnect = self.child.is_some()
+                    || self.pending
+                    || matches!(
+                        self.snapshot.connection,
+                        Connection::Connected | Connection::Recovering { .. }
+                    );
+                if reconnect {
+                    self.disconnect();
+                    self.move_pending = true;
+                }
+                self.snapshot.selection.server_id = Some(server_id.clone());
+                self.snapshot.selection.channel_id = Some(channel_id.clone());
+                let destination = &mut self.snapshot.destinations[0];
+                destination.server_id = server_id;
+                destination.channel_id = channel_id;
+            }
+            ControlCommand::ConnectDestination { destination_id } => {
+                self.destination_exists(&destination_id)?;
+                return self.connect();
+            }
+            ControlCommand::DisconnectDestination { destination_id } => {
+                self.destination_exists(&destination_id)?;
+                self.move_pending = false;
+                self.terminal_error = None;
+                self.retired = None;
+                self.disconnect();
+            }
+            ControlCommand::SetDestinationVolume {
+                destination_id,
+                volume_db,
+            } => {
+                self.destination_exists(&destination_id)?;
+                if !crate::mixing::valid_gain(volume_db) {
+                    return Err(error(
+                        ErrorCode::InvalidVolume,
+                        "Volume must be Off or between −60 and 0 dB.",
+                    ));
+                }
+                self.snapshot.destinations[0].volume_db = volume_db;
+                self.snapshot.output.volume_linear = Some(crate::mixing::linear(volume_db));
+                self.snapshot.output.volume_percent =
+                    (crate::mixing::linear(volume_db) * 100.0).round() as u8;
+                if let Some(child) = &self.child {
+                    child.output(self.snapshot.output.clone());
+                }
+            }
+            ControlCommand::SetDestinationMuted {
+                destination_id,
+                muted,
+            } => {
+                self.destination_exists(&destination_id)?;
+                self.snapshot.destinations[0].muted = muted;
+                self.snapshot.output.muted = muted;
+                if let Some(child) = &self.child {
+                    child.output(self.snapshot.output.clone());
+                }
+            }
+            ControlCommand::SetSettings { settings } => {
+                self.snapshot.settings = settings;
+            }
+            _ => return Err(error(ErrorCode::Internal, "Unsupported command.")),
+        }
+        self.publish();
+        save_preferences(&self.config, &self.snapshot)
     }
     fn connect(&mut self) -> Result<(), AppError> {
         if self.child.is_some() || self.pending || self.snapshot.connection.locks_route() {
@@ -640,6 +1326,7 @@ impl Actor {
         {
             return Err(Failure::Configuration.error());
         }
+        self.sync_audio()?;
         self.initialization()?;
         self.snapshot.session_id = self
             .snapshot
@@ -753,17 +1440,6 @@ impl Actor {
     }
     fn initialization(&self) -> Result<Init, AppError> {
         let selection = &self.snapshot.selection;
-        let source = self
-            .snapshot
-            .sources
-            .iter()
-            .find(|s| Some(&s.id) == selection.source_id.as_ref() && s.available)
-            .ok_or_else(|| {
-                error(
-                    ErrorCode::InvalidSelection,
-                    "Select an available audio source.",
-                )
-            })?;
         let server = self
             .snapshot
             .servers
@@ -786,7 +1462,7 @@ impl Actor {
                 .token_file
                 .clone()
                 .ok_or_else(|| Failure::Configuration.error())?,
-            source_id: source.id.clone(),
+            source_id: "shared-mix".into(),
             server_id: server.id.clone(),
             channel_id: channel.id.clone(),
             output: self.snapshot.output.clone(),
@@ -906,6 +1582,14 @@ impl Actor {
                                 );
                             }
                             sources.push(previous);
+                        }
+                        for input in &mut self.snapshot.inputs {
+                            if let Some(source) =
+                                sources.iter().find(|source| source.id == input.source_id)
+                            {
+                                input.display_name = source.name.clone();
+                                input.detail = source.detail.clone();
+                            }
                         }
                         self.snapshot.sources = sources;
                         self.snapshot.source_discovery = Discovery::Ready;
@@ -1052,6 +1736,8 @@ impl Actor {
                     generation,
                     init,
                     self.events.clone(),
+                    #[cfg(windows)]
+                    self.audio.as_ref().map(|a| a.bus.clone()),
                 ));
             }
             Event::LaunchFailed(generation) => {
@@ -1324,7 +2010,28 @@ fn launch(
     generation: u32,
     init: Init,
     events: mpsc::Sender<Event>,
+    #[cfg(windows)] bus: Option<Arc<crate::mix_bus::BusHandle>>,
 ) -> ChildControl {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+        let inherited = bus
+            .ok_or_else(|| std::io::Error::other("Audio mix unavailable"))
+            .and_then(|bus| bus.inheritable());
+        let mut init = init;
+        if let Ok(handle) = &inherited {
+            init.source_id = format!("mix-handle:{}", handle.as_raw_handle() as usize);
+        }
+        launch_with(generation, init, events, move || {
+            let handle = inherited?;
+            OwnedProcess::spawn_with_handles(
+                &executable,
+                &["--engine-worker".into()],
+                &[handle.as_handle()],
+            )
+        })
+    }
+    #[cfg(not(windows))]
     launch_with(generation, init, events, move || {
         OwnedProcess::spawn(&executable, &["--engine-worker".into()])
     })
@@ -2517,6 +3224,7 @@ mod tests {
                 });
                 // The sole blocking thread is occupied: this writer is queued.
                 control.output(Output {
+                    volume_linear: None,
                     muted: true,
                     volume_percent: 37,
                 });
@@ -2887,6 +3595,7 @@ mod tests {
         a.child = Some(child());
         a.snapshot.connection = Connection::Connected;
         a.snapshot.output = Output {
+            volume_linear: None,
             volume_percent: 40,
             muted: true,
         };
@@ -2919,6 +3628,7 @@ mod tests {
         let child = child();
         for i in 0..10000 {
             child.output(Output {
+                volume_linear: None,
                 volume_percent: (i % 101) as u8,
                 muted: i % 2 == 0,
             });
@@ -2933,6 +3643,7 @@ mod tests {
         child.stop();
         let stopped = child.stopped_at();
         child.output(Output {
+            volume_linear: None,
             volume_percent: 100,
             muted: false,
         });
@@ -3075,6 +3786,7 @@ mod tests {
         let mut blocked = false;
         for _ in 0..1024 {
             child.output(Output {
+                volume_linear: None,
                 volume_percent: 50,
                 muted: true,
             });
@@ -3172,5 +3884,165 @@ mod tests {
         .await
         .expect("stdout EOF must initiate bounded stop of a live worker");
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn targeted_source_controls_leave_live_destination_owned_and_running() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.snapshot.sources.push(RecordingSource {
+            id: "second".into(),
+            name: "Second".into(),
+            kind: SourceKind::Recording,
+            available: true,
+            detail: None,
+        });
+        a.command(ControlCommand::AddSource {
+            source_id: "recording".into(),
+        })
+        .unwrap();
+        a.command(ControlCommand::AddSource {
+            source_id: "second".into(),
+        })
+        .unwrap();
+        let first = a.snapshot.inputs[0].strip_id.clone();
+        a.command(ControlCommand::SetSourceGain {
+            strip_id: first.clone(),
+            gain_db: Some(-59.5),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetSourceMuted {
+            strip_id: first.clone(),
+            muted: true,
+        })
+        .unwrap();
+        a.command(ControlCommand::StopCapture {
+            strip_id: first.clone(),
+        })
+        .unwrap();
+        a.command(ControlCommand::StartCapture {
+            strip_id: first.clone(),
+        })
+        .unwrap();
+        a.command(ControlCommand::RemoveSource { strip_id: first })
+            .unwrap();
+        assert_eq!(a.snapshot.connection, Connection::Connected);
+        assert!(a.child.as_ref().unwrap().stopped_at().is_none());
+        assert_eq!(a.snapshot.inputs.len(), 1);
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn duplicate_sources_and_ninth_source_are_rejected_without_changing_mix() {
+        let mut a = actor();
+        for index in 0..9 {
+            a.snapshot.sources.push(RecordingSource {
+                id: format!("source-{index}"),
+                name: "Source".into(),
+                kind: SourceKind::Recording,
+                available: true,
+                detail: None,
+            });
+        }
+        for index in 0..8 {
+            a.command(ControlCommand::AddSource {
+                source_id: format!("source-{index}"),
+            })
+            .unwrap();
+        }
+        assert!(
+            a.command(ControlCommand::AddSource {
+                source_id: "source-0".into()
+            })
+            .is_err()
+        );
+        assert!(
+            a.command(ControlCommand::AddSource {
+                source_id: "source-8".into()
+            })
+            .is_err()
+        );
+        assert_eq!(a.snapshot.inputs.len(), MAX_INPUTS);
+        assert_eq!(
+            a.snapshot
+                .inputs
+                .iter()
+                .map(|i| i.colour_slot)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5, 5, 5]
+        );
+    }
+    #[test]
+    fn destination_gain_preserves_fractional_db_and_one_destination_limit() {
+        let mut a = actor();
+        a.command(ControlCommand::AddDestination {
+            server_id: "1".into(),
+            channel_id: "2".into(),
+        })
+        .unwrap();
+        assert!(
+            a.command(ControlCommand::AddDestination {
+                server_id: "1".into(),
+                channel_id: "2".into()
+            })
+            .is_err()
+        );
+        a.command(ControlCommand::SetDestinationVolume {
+            destination_id: "discord-1".into(),
+            volume_db: Some(-59.5),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations[0].volume_db, Some(-59.5));
+        assert!(a.snapshot.output.volume_linear.unwrap() > 0.001);
+        assert_eq!(a.snapshot.output.volume_percent, 0); // Legacy percent is not the native gain.
+        assert!(
+            a.command(ControlCommand::SetDestinationVolume {
+                destination_id: "discord-1".into(),
+                volume_db: Some(f32::NAN)
+            })
+            .is_err()
+        );
+    }
+    #[test]
+    fn versioned_preferences_migrate_restore_safely_and_preserve_future_files() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-mixing-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut config = config();
+        config.settings_file = Some(path.clone());
+        std::fs::write(&path, r#"{"selection":{"sourceId":"recording","serverId":"1","channelId":"2"},"output":{"volumePercent":37,"muted":true}}"#).unwrap();
+        let legacy = load_preferences(&config).unwrap();
+        assert_eq!(legacy.inputs.len(), 1);
+        assert_eq!(legacy.inputs[0].phase, InputPhase::Opening);
+        assert_eq!(legacy.destinations[0].connection, Connection::Disconnected);
+        assert!(legacy.destinations[0].muted);
+        let mut snapshot = ControlSnapshot {
+            inputs: legacy.inputs,
+            destinations: legacy.destinations,
+            ..ControlSnapshot::default()
+        };
+        snapshot.inputs[0].source_id = "app:42:0000000000000001".into();
+        snapshot.inputs[0].kind = SourceKind::Recording; // Do not trust serialized kind.
+        save_preferences(&config, &snapshot).unwrap();
+        let restored = load_preferences(&config).unwrap();
+        assert_eq!(restored.inputs[0].kind, SourceKind::Application);
+        assert_eq!(restored.inputs[0].phase, InputPhase::Stopped);
+        snapshot.settings.restore_setup = false;
+        save_preferences(&config, &snapshot).unwrap();
+        assert!(load_preferences(&config).unwrap().inputs.is_empty());
+        let future = r#"{"version":99,"futureSetting":"preserve"}"#;
+        std::fs::write(&path, future).unwrap();
+        assert!(load_preferences(&config).is_err());
+        assert!(save_preferences(&config, &snapshot).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[tokio::test]
+    async fn prepared_controller_is_inert_until_single_instance_admission() {
+        let controller = Controller::prepare(config());
+        tokio::task::yield_now().await;
+        assert_eq!(controller.snapshot(), ControlSnapshot::default());
+        controller.shutdown().await.unwrap();
     }
 }

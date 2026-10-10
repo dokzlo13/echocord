@@ -71,6 +71,15 @@ impl EngineProcess {
     /// by process-probe). Successful creation does not imply successful engine
     /// initialization.
     pub fn spawn(executable: &Path, args: &[OsString]) -> io::Result<Self> {
+        Self::spawn_with_handles(executable, args, &[])
+    }
+
+    /// Additional handles are narrowly inheritable duplicates owned by the caller.
+    pub fn spawn_with_handles(
+        executable: &Path,
+        args: &[OsString],
+        extra: &[std::os::windows::io::BorrowedHandle<'_>],
+    ) -> io::Result<Self> {
         let (application, mut command_line) = command_line(executable, args)?;
         let job = create_job()?;
         let (stdin_read, stdin_write) = pipe(false)?;
@@ -80,11 +89,12 @@ impl EngineProcess {
         // Attribute values must stay alive until the list is deleted. Neither
         // the job nor any parent-side pipe end appears in the inheritance list.
         let jobs = [job.as_raw_handle()];
-        let inherited = [
+        let mut inherited = vec![
             stdin_read.as_raw_handle(),
             stdout_write.as_raw_handle(),
             stderr_write.as_raw_handle(),
         ];
+        inherited.extend(extra.iter().map(AsRawHandle::as_raw_handle));
         let attributes = AttributeList::new(&jobs, &inherited)?;
 
         let mut startup = STARTUPINFOEXW::default();

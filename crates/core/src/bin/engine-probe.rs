@@ -76,6 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 server_id: "1".into(),
                 channel_id: "2".into(),
                 output: Output {
+                    volume_linear: None,
                     volume_percent: 0,
                     muted: true,
                 },

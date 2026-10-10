@@ -46,7 +46,9 @@ fn error(message: &str) -> AppError {
 }
 
 #[cfg(windows)]
-pub use native::{enumerate_sources, identity_for_pid, start_capture, validate_source};
+pub use native::{
+    enumerate_sources, identity_for_pid, roots_overlap, start_capture, validate_source,
+};
 
 #[cfg(windows)]
 mod native {
@@ -200,6 +202,40 @@ mod native {
     }
     pub fn validate_source(id: &str) -> Result<(), AppError> {
         Target::selected(id).map(|_| ())
+    }
+
+    pub fn roots_overlap(a: &str, b: &str) -> Result<bool, AppError> {
+        let a = Identity::parse(a)?;
+        let b = Identity::parse(b)?;
+        if a.pid == b.pid {
+            return Ok(true);
+        }
+        let snapshot = handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })
+            .map_err(|_| error("Application ancestry is unavailable. Refresh sources."))?;
+        let mut parents = std::collections::HashMap::new();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut present = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        while present {
+            parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+            present = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
+        }
+        let contains = |mut pid: u32, root: u32| {
+            let mut seen = HashSet::new();
+            while seen.insert(pid) {
+                if pid == root {
+                    return true;
+                }
+                let Some(parent) = parents.get(&pid) else {
+                    break;
+                };
+                pid = *parent;
+            }
+            false
+        };
+        Ok(contains(a.pid, b.pid) || contains(b.pid, a.pid))
     }
 
     fn own_tree() -> HashSet<u32> {
@@ -431,6 +467,17 @@ mod native {
         Ok(())
     }
 
+    fn stopped_opening(session: &CaptureSession, cause: AppError) -> AppError {
+        if session.control.stop() {
+            cause
+        } else {
+            AppError::new(
+                ErrorCode::CleanupIncomplete,
+                "Native capture cleanup did not finish. Restart Echocord.",
+            )
+        }
+    }
+
     pub fn start_capture(
         id: &str,
         cancelled: &dyn Fn() -> bool,
@@ -458,27 +505,32 @@ mod native {
         let deadline = Instant::now() + OPEN_DEADLINE + Duration::from_millis(500);
         loop {
             if cancelled() {
-                session.control.stop();
-                return Err(error("Application capture was cancelled."));
+                return Err(stopped_opening(
+                    &session,
+                    error("Application capture was cancelled."),
+                ));
             }
             match result.recv_timeout(Duration::from_millis(10)) {
                 Ok(Ok(())) if !cancelled() => return Ok(session),
                 Ok(Ok(())) => {
-                    session.control.stop();
-                    return Err(error("Application capture was cancelled."));
+                    return Err(stopped_opening(
+                        &session,
+                        error("Application capture was cancelled."),
+                    ));
                 }
                 Ok(Err(error)) => {
-                    session.control.stop();
-                    return Err(error);
+                    return Err(stopped_opening(&session, error));
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    session.control.stop();
-                    return Err(error("Application capture stopped while opening."));
+                    return Err(stopped_opening(
+                        &session,
+                        error("Application capture stopped while opening."),
+                    ));
                 }
                 Err(_) if Instant::now() >= deadline => {
-                    session.control.stop();
-                    return Err(error(
-                        "Application capture opening timed out. Reconnect and retry.",
+                    return Err(stopped_opening(
+                        &session,
+                        error("Application capture opening timed out. Reconnect and retry."),
                     ));
                 }
                 Err(_) => {}

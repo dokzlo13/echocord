@@ -263,7 +263,12 @@ async fn input_loop(
                 stop(&stop_sender, StopCause::Requested);
                 break;
             }
-            Command::Output { output: next } if next.volume_percent <= 100 => {
+            Command::Output { output: next }
+                if next.volume_percent <= 100
+                    && next
+                        .volume_linear
+                        .is_none_or(|gain| gain.is_finite() && (0.0..=1.0).contains(&gain)) =>
+            {
                 output.send_replace(next);
             }
             _ => {
@@ -753,7 +758,7 @@ async fn capture_loop(
                 match control {
                     LiveControl::Closed => return Ok(()),
                     LiveControl::Output(output) => {
-                        if let Some(capture) = &capture { capture.0.set_output(output.volume_percent, output.muted); }
+                        if let Some(capture) = &capture { capture.0.set_linear_output(output.volume_linear.unwrap_or(output.volume_percent as f32 / 100.0), output.muted); }
                     }
                     LiveControl::Permission(Ok(())) => {
                         permission_missing = false;
@@ -798,7 +803,7 @@ async fn capture_loop(
                         Ok(session) => {
                             let guard = CaptureGuard(session.control, cleanup_failed.clone());
                             let output = output.borrow_and_update().clone();
-                            guard.0.set_output(output.volume_percent, output.muted);
+                            guard.0.set_linear_output(output.volume_linear.unwrap_or(output.volume_percent as f32 / 100.0), output.muted);
                             if let Some(result) = capture_handoff_stop(*stop_rx.borrow()) { return result; }
                             let mut call = call.lock().await;
                             if call.current_channel().map(|id| id.0.get()) != Some(signals.channel.get()) { return Err(Failure::Permission); }
@@ -867,6 +872,7 @@ mod tests {
     async fn eof_and_stop_are_terminal_during_join_or_recovery() {
         for bytes in [Vec::new(), frame(2, Command::Stop)] {
             let (output, _) = watch::channel(Output {
+                volume_linear: None,
                 volume_percent: 100,
                 muted: false,
             });
@@ -886,12 +892,14 @@ mod tests {
             server_id: "1".into(),
             channel_id: "2".into(),
             output: Output {
+                volume_linear: None,
                 volume_percent: 100,
                 muted: false,
             },
         };
         for bytes in [frame(1, Command::Stop), frame(2, Command::Init(init))] {
             let (output, _) = watch::channel(Output {
+                volume_linear: None,
                 volume_percent: 100,
                 muted: false,
             });
@@ -960,6 +968,7 @@ mod tests {
             stop_rx,
         );
         let initial = Output {
+            volume_linear: None,
             volume_percent: 100,
             muted: false,
         };
@@ -969,10 +978,12 @@ mod tests {
         started_rx.await.unwrap();
         for next in [
             Output {
+                volume_linear: None,
                 volume_percent: 40,
                 muted: true,
             },
             Output {
+                volume_linear: None,
                 volume_percent: 0,
                 muted: false,
             },

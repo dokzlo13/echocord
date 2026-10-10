@@ -177,6 +177,9 @@ pub struct Capture {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Output {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub volume_linear: Option<f32>,
     pub volume_percent: u8,
     pub muted: bool,
 }
@@ -186,7 +189,12 @@ pub const MAX_INPUTS: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "kebab-case")]
-pub enum InputPhase { Stopped, Opening, Capturing, Fault }
+pub enum InputPhase {
+    Stopped,
+    Opening,
+    Capturing,
+    Fault,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
@@ -225,9 +233,18 @@ pub struct AppSettings {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "kebab-case")]
-pub enum MeterStyle { Simple, History }
+pub enum MeterStyle {
+    Simple,
+    History,
+}
 impl Default for AppSettings {
-    fn default() -> Self { Self { restore_setup: true, keep_in_tray: true, meter_style: MeterStyle::Simple } }
+    fn default() -> Self {
+        Self {
+            restore_setup: true,
+            keep_in_tray: true,
+            meter_style: MeterStyle::Simple,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
@@ -244,6 +261,8 @@ pub struct InputTelemetry {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MixTelemetry {
+    #[serde(default)]
+    pub mix_pre_clip: bool,
     pub inputs: Vec<InputTelemetry>,
     pub output_level_dbfs: Option<f32>,
     pub queued_frames: u32,
@@ -308,6 +327,7 @@ impl Default for ControlSnapshot {
                 queued_frames: 0,
             },
             output: Output {
+                volume_linear: None,
                 volume_percent: 100,
                 muted: false,
             },
@@ -322,21 +342,59 @@ impl Default for ControlSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum ControlCommand {
-    AddSource { source_id: String },
-    RemoveSource { strip_id: String },
-    ReplaceSource { strip_id: String, source_id: String },
-    StartCapture { strip_id: String },
-    StopCapture { strip_id: String },
-    SetSourceMuted { strip_id: String, muted: bool },
-    SetSourceGain { strip_id: String, gain_db: Option<f32> },
-    AddDestination { server_id: String, channel_id: String },
-    RemoveDestination { destination_id: String },
-    ChangeDestination { destination_id: String, server_id: String, channel_id: String },
-    ConnectDestination { destination_id: String },
-    DisconnectDestination { destination_id: String },
-    SetDestinationVolume { destination_id: String, volume_db: Option<f32> },
-    SetDestinationMuted { destination_id: String, muted: bool },
-    SetSettings { settings: AppSettings },
+    AddSource {
+        source_id: String,
+    },
+    RemoveSource {
+        strip_id: String,
+    },
+    ReplaceSource {
+        strip_id: String,
+        source_id: String,
+    },
+    StartCapture {
+        strip_id: String,
+    },
+    StopCapture {
+        strip_id: String,
+    },
+    SetSourceMuted {
+        strip_id: String,
+        muted: bool,
+    },
+    SetSourceGain {
+        strip_id: String,
+        gain_db: Option<f32>,
+    },
+    AddDestination {
+        server_id: String,
+        channel_id: String,
+    },
+    RemoveDestination {
+        destination_id: String,
+    },
+    ChangeDestination {
+        destination_id: String,
+        server_id: String,
+        channel_id: String,
+    },
+    ConnectDestination {
+        destination_id: String,
+    },
+    DisconnectDestination {
+        destination_id: String,
+    },
+    SetDestinationVolume {
+        destination_id: String,
+        volume_db: Option<f32>,
+    },
+    SetDestinationMuted {
+        destination_id: String,
+        muted: bool,
+    },
+    SetSettings {
+        settings: AppSettings,
+    },
     RefreshSources,
     RefreshCatalog,
     RecheckConfiguration,
@@ -388,7 +446,13 @@ pub fn typescript_contract() -> String {
     let mut result = String::from("// Generated from Rust model types. Do not edit by hand.\n");
     for declaration in declarations {
         result.push_str("export ");
-        result.push_str(&declaration);
+        result.push_str(
+            &declaration
+                .lines()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
         result.push('\n');
     }
     result

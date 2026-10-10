@@ -27,6 +27,14 @@ Use a compact utility layout with clear source, destination, streaming state, an
 
 ## Audio acceptance experiment
 
+### Application-capture gate
+
+Before shipping EC-017, review the direct Windows adapter's process identity, activation pointer lifetime, COM ownership, packet release, cancellation during opening/running, and terminal cleanup behavior. Native tests use only owned synthetic sources and no Discord credentials: distinguish selected root/children from unrelated audio; verify stereo, silence/resume, supported render rates, stale identity/source exit, bounded queue behavior and cancellation. Check browser scope separately with an isolated test profile when available. A silent stream is valid input; an exited process never triggers capture of a replacement PID or a broader source.
+
+Local application/session mute effects and original playback audibility are separate evidence. Do not infer independent local suppression from successful process capture. Endpoint changes, protected/exclusive audio, sleep/resume, audible Discord delivery and long-session stability remain explicit acceptance boundaries unless actually exercised. Browser tests cover source-kind selection, source refresh without credentials/network, staging/apply/discard, unavailable sources, compact pickers, focus/keyboard, and preservation of control/telemetry isolation. Native shell checks still cover WebView/tray behavior.
+
+### Pipeline and session targets
+
 Proposed targets, to calibrate against the first working prototype:
 
 | Measure | Initial target | Boundary and method |

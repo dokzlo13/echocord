@@ -181,9 +181,89 @@ pub struct Output {
     pub muted: bool,
 }
 
+/// One fixed native mix supports at most eight explicitly selected inputs.
+pub const MAX_INPUTS: usize = 8;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum InputPhase { Stopped, Opening, Capturing, Fault }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InputStrip {
+    pub strip_id: String,
+    pub source_id: String,
+    pub kind: SourceKind,
+    pub display_name: String,
+    pub detail: Option<String>,
+    pub phase: InputPhase,
+    pub fault: Option<AppError>,
+    /// null means Off; otherwise -60..=0 dB, with fractional precision.
+    pub gain_db: Option<f32>,
+    pub muted: bool,
+    pub colour_slot: u8,
+    pub restored: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationStrip {
+    pub destination_id: String,
+    pub server_id: String,
+    pub channel_id: String,
+    pub connection: Connection,
+    pub volume_db: Option<f32>,
+    pub muted: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub restore_setup: bool,
+    pub keep_in_tray: bool,
+    pub meter_style: MeterStyle,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum MeterStyle { Simple, History }
+impl Default for AppSettings {
+    fn default() -> Self { Self { restore_setup: true, keep_in_tray: true, meter_style: MeterStyle::Simple } }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct InputTelemetry {
+    pub strip_id: String,
+    pub level_dbfs: Option<f32>,
+    pub pre_clip: bool,
+    pub dropped_frames: u32,
+    pub underrun_frames: u32,
+    pub queued_frames: u32,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MixTelemetry {
+    pub inputs: Vec<InputTelemetry>,
+    pub output_level_dbfs: Option<f32>,
+    pub queued_frames: u32,
+    pub dropped_frames: u32,
+    pub underrun_frames: u32,
+    /// Unavailable until measured; never a simulated voice-network statistic.
+    pub gateway_ping_ms: Option<f32>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlSnapshot {
+    #[serde(default)]
+    pub inputs: Vec<InputStrip>,
+    #[serde(default)]
+    pub destinations: Vec<DestinationStrip>,
+    #[serde(default)]
+    pub settings: AppSettings,
+    #[serde(default)]
+    pub telemetry: MixTelemetry,
     pub revision: u32,
     pub session_id: u32,
     pub sources: Vec<RecordingSource>,
@@ -201,6 +281,10 @@ pub struct ControlSnapshot {
 impl Default for ControlSnapshot {
     fn default() -> Self {
         Self {
+            inputs: Vec::new(),
+            destinations: Vec::new(),
+            settings: AppSettings::default(),
+            telemetry: MixTelemetry::default(),
             revision: 0,
             session_id: 0,
             sources: Vec::new(),
@@ -238,6 +322,21 @@ impl Default for ControlSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum ControlCommand {
+    AddSource { source_id: String },
+    RemoveSource { strip_id: String },
+    ReplaceSource { strip_id: String, source_id: String },
+    StartCapture { strip_id: String },
+    StopCapture { strip_id: String },
+    SetSourceMuted { strip_id: String, muted: bool },
+    SetSourceGain { strip_id: String, gain_db: Option<f32> },
+    AddDestination { server_id: String, channel_id: String },
+    RemoveDestination { destination_id: String },
+    ChangeDestination { destination_id: String, server_id: String, channel_id: String },
+    ConnectDestination { destination_id: String },
+    DisconnectDestination { destination_id: String },
+    SetDestinationVolume { destination_id: String, volume_db: Option<f32> },
+    SetDestinationMuted { destination_id: String, muted: bool },
+    SetSettings { settings: AppSettings },
     RefreshSources,
     RefreshCatalog,
     RecheckConfiguration,
@@ -261,6 +360,13 @@ pub enum ControlCommand {
 pub fn typescript_contract() -> String {
     let config = ts_rs::Config::default();
     let declarations = [
+        InputPhase::decl(&config),
+        InputStrip::decl(&config),
+        DestinationStrip::decl(&config),
+        AppSettings::decl(&config),
+        MeterStyle::decl(&config),
+        InputTelemetry::decl(&config),
+        MixTelemetry::decl(&config),
         SourceKind::decl(&config),
         RecordingSource::decl(&config),
         VoiceChannel::decl(&config),

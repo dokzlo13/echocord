@@ -20,4 +20,6 @@ The entire main surface, including pending/error actions, fits 480Ã—600 and 420Ã
 
 ## Review and validation seam
 
+Owner feedback in the current epoch identifies the near-full-width selection drawers as oversized for their purpose. Their containment and size are under bounded EC-021 review; narrower panels, anchored pickers and separate windows are proposals pending research and rendered review. Keep essential transport accessible while resolving this correction. The remaining visual contract stays in force.
+
 Owner accepted the private refined Signal Bridge direction before implementation. This document is the implementation authority. Production screenshots, behavior, keyboard, fit, rendering and visibility evidence are collected privately; sanitized results and remaining native acceptance are recorded in EC-013. Coordinator owns independent review, native shell integration and final acceptance.

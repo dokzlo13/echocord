@@ -270,6 +270,7 @@ fn main() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let mut last_tray = None;
+                let mut last_control: Option<ControlSnapshot> = None;
                 loop {
                     let snapshot = snapshots.borrow_and_update().clone();
                     let label = match &snapshot.connection {
@@ -295,7 +296,13 @@ fn main() {
                         last_tray = Some(tray_state);
                     }
                     let _ = handle.emit("echocord://telemetry", &snapshot.telemetry);
-                    let _ = handle.emit("echocord://snapshot", &snapshot);
+                    if last_control
+                        .as_ref()
+                        .is_none_or(|last| !snapshot.same_control_state(last))
+                    {
+                        let _ = handle.emit("echocord://snapshot", &snapshot);
+                        last_control = Some(snapshot);
+                    }
                     if snapshots.changed().await.is_err() {
                         break;
                     }

@@ -304,6 +304,79 @@ pub struct ControlSnapshot {
     pub output: Output,
 }
 
+/// Borrowed control-event comparison state. Exhaustive destructuring below
+/// requires new snapshot/capture fields to be classified explicitly.
+#[derive(PartialEq)]
+struct ControlEventKey<'a> {
+    session_id: u32,
+    inputs: &'a [InputStrip],
+    destinations: &'a [DestinationStrip],
+    settings: &'a AppSettings,
+    sources: &'a [RecordingSource],
+    servers: &'a [Server],
+    selection: &'a Selection,
+    bot: &'a BotProfile,
+    discovery: &'a Discovery,
+    source_discovery: &'a Discovery,
+    connection: &'a Connection,
+    capture_phase: &'a CapturePhase,
+    capture_message: &'a Option<String>,
+    output: &'a Output,
+}
+
+impl ControlSnapshot {
+    fn control_event_key(&self) -> ControlEventKey<'_> {
+        let Self {
+            revision: _,
+            telemetry: _,
+            session_id,
+            inputs,
+            destinations,
+            settings,
+            sources,
+            servers,
+            selection,
+            bot,
+            discovery,
+            source_discovery,
+            connection,
+            output,
+            capture:
+                Capture {
+                    phase,
+                    message,
+                    level_dbfs: _,
+                    output_level_dbfs: _,
+                    dropped_frames: _,
+                    underrun_frames: _,
+                    queued_frames: _,
+                },
+        } = self;
+        ControlEventKey {
+            session_id: *session_id,
+            inputs,
+            destinations,
+            settings,
+            sources,
+            servers,
+            selection,
+            bot,
+            discovery,
+            source_discovery,
+            connection,
+            capture_phase: phase,
+            capture_message: message,
+            output,
+        }
+    }
+
+    /// Meter-only observations use the telemetry event. This comparison borrows
+    /// the full snapshots and never alters the measurements in an emitted payload.
+    pub fn same_control_state(&self, other: &Self) -> bool {
+        self.control_event_key() == other.control_event_key()
+    }
+}
+
 impl Default for ControlSnapshot {
     fn default() -> Self {
         Self {
@@ -470,6 +543,105 @@ pub fn typescript_contract() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meter_bursts_do_not_change_control_state_or_erase_snapshot_measurements() {
+        let first = ControlSnapshot::default();
+        for index in 1..=1000 {
+            let mut measured = first.clone();
+            measured.revision = index;
+            measured.capture.level_dbfs = Some(-12.0);
+            measured.capture.output_level_dbfs = Some(-18.0);
+            measured.capture.dropped_frames = index;
+            measured.capture.underrun_frames = index * 2;
+            measured.capture.queued_frames = index % 1920;
+            measured.telemetry = MixTelemetry {
+                mix_pre_clip: true,
+                inputs: vec![InputTelemetry {
+                    strip_id: "input-1".into(),
+                    level_dbfs: Some(-6.0),
+                    pre_clip: true,
+                    dropped_frames: index,
+                    underrun_frames: index,
+                    queued_frames: 240,
+                }],
+                output_level_dbfs: Some(-18.0),
+                queued_frames: 480,
+                dropped_frames: index,
+                underrun_frames: index,
+                gateway_ping_ms: Some(12.5),
+            };
+            let payload = serde_json::to_value(&measured).unwrap();
+            assert!(first.same_control_state(&measured));
+            assert_eq!(serde_json::to_value(&measured).unwrap(), payload);
+            assert_eq!(measured.telemetry.output_level_dbfs, Some(-18.0));
+        }
+    }
+
+    #[test]
+    fn control_state_keeps_lifecycle_identity_settings_and_catalog_changes() {
+        let first = ControlSnapshot::default();
+        let changes: [fn(&mut ControlSnapshot); 15] = [
+            |s| s.session_id = 1,
+            |s| s.capture.phase = CapturePhase::Opening,
+            |s| s.capture.message = Some("Capture stopped.".into()),
+            |s| s.connection = Connection::Connected,
+            |s| s.settings.meter_style = MeterStyle::History,
+            |s| s.output.muted = true,
+            |s| s.bot.id = Some("1234567890123456789".into()),
+            |s| s.bot.avatar_url = Some("https://cdn.discordapp.com/avatars/1/avatar.png".into()),
+            |s| s.selection.source_id = Some("recording".into()),
+            |s| s.source_discovery = Discovery::Loading,
+            |s| s.discovery = Discovery::Loading,
+            |s| {
+                s.servers.push(Server {
+                    id: "1".into(),
+                    name: "Server".into(),
+                    icon_url: None,
+                    channels: Vec::new(),
+                })
+            },
+            |s| {
+                s.sources.push(RecordingSource {
+                    id: "recording".into(),
+                    name: "Input".into(),
+                    kind: SourceKind::Recording,
+                    available: true,
+                    detail: None,
+                })
+            },
+            |s| {
+                s.inputs.push(InputStrip {
+                    strip_id: "input-1".into(),
+                    source_id: "recording".into(),
+                    kind: SourceKind::Recording,
+                    display_name: "Input".into(),
+                    detail: None,
+                    phase: InputPhase::Capturing,
+                    fault: None,
+                    gain_db: Some(-6.0),
+                    muted: true,
+                    colour_slot: 0,
+                    restored: false,
+                })
+            },
+            |s| {
+                s.destinations.push(DestinationStrip {
+                    destination_id: "discord-1".into(),
+                    server_id: "1".into(),
+                    channel_id: "2".into(),
+                    connection: Connection::Disconnected,
+                    volume_db: Some(-6.0),
+                    muted: true,
+                })
+            },
+        ];
+        for change in changes {
+            let mut changed = first.clone();
+            change(&mut changed);
+            assert!(!first.same_control_state(&changed));
+        }
+    }
 
     #[test]
     fn legacy_source_descriptors_default_to_recording() {

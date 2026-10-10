@@ -47,7 +47,6 @@ The owner confirmed the preceding application-capture route and perceived low de
 | EC-024 | Adopt approved On Air prototype | done | approved design, EC-021/022; EC-023 contract milestone | UI worker / a1; coordinator integration | main | [task](EC-024.md) |
 | EC-025 | Independent mixing review | done | owner-authorized epoch | reviewer / r1 | read-only | [task](EC-025.md) |
 | EC-026 | Native window and integration | done | approved shell; EC-023 contract milestone | coordinator / a1 | main | [task](EC-026.md) |
-
 | EC-027 | Prototype fidelity and destination UI | active | EC-024/026; EC-020 contract checkpoint | UI worker / a1 | agent/EC-027-a1 | [task](EC-027.md) |
 | EC-028 | Independent destination/fidelity review | active | owner-authorized continuation | reviewer / r1 | read-only | [task](EC-028.md) |
 | EC-029 | Destination continuation integration | active | EC-020/027/028 checkpoints | coordinator / a1 | main | [task](EC-029.md) |

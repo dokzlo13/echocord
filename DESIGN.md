@@ -22,9 +22,9 @@ Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12p
 
 ## Shell, slots and cards
 
-Default 440×640, minimum420×420, resizable and size remembered. A 36px custom title bar holds brand, bot identity/status, settings, minimize and close-to-tray; no maximize. The two slots are Sources above Destination, becoming side-by-side at700px. Each header has a summary, numbered jump chips when useful and Add. This epoch supports up to eight sources and one destination; destination Add explains its limit.
+Default 440×640, minimum 420×420, resizable and size remembered. A 36px custom title bar holds brand, bot identity/status, settings, minimize and close-to-tray; no maximize. The two slots are Sources above Destination, becoming side-by-side at 700px. Each header has a summary, numbered jump chips when useful and Add. This epoch supports up to eight sources and one destination; destination Add explains its limit.
 
-Both lists scroll independently. Their heights follow content, preserve access to whole-card controls, and give spare height to useful destination telemetry. Short windows compress spacing and diagnostics; wide lone-source views may show observed level history. Use fallback layout when advanced container/scroll-state features are unavailable. Do not scroll the whole document.
+Both lists scroll independently. Their heights follow content, preserve access to whole-card controls, and give spare height to useful destination telemetry. Short windows compress spacing and diagnostics. In wide layouts, one or two source cards expand into observed level histories and fill their list, matching the accepted prototype. Compact History diagnostics retain measured sparklines. Completed source/room changes briefly show the observed previous identity; pending work must not claim completion. Use fallback layout when advanced container/scroll-state features are unavailable. Do not scroll the whole document.
 
 A source card has identity, state/remove, Capture/Stop, mix-only Mute, and a combined gain/meter. Destination cards have identity, connection badge/remove, Connect/Cancel/Disconnect, destination Mute/volume and progressive diagnostics. Identity is one actionable unit opening the corresponding full-window picker. Normal source faults stay on their own cards; live destination removal asks for inline confirmation. The shared mix exists in Rust but has no separate Mix bar.
 
@@ -47,3 +47,9 @@ The bot chip opens real configuration/status and available metadata; token entry
 ## Review and acceptance
 
 The owner approved the prototype and explicitly authorized direct source adoption. The coordinator records technical decisions, independent review and integration in EC-023–026. Compare actual production output at440×640,455×455,420×420,760×440 and1000×640 with the accepted reference. Test keyboard/focus, full-sheet sizing, multiple-card density, source faults, connection cancellation, native titlebar/tray and telemetry isolation. Native/audio evidence and owner listening feedback remain distinct.
+
+## Destination continuation
+
+EC-027 compares production against the actual accepted prototype at equivalent states and logical sizes. That comparison takes precedence over earlier prose that limited expanded source history to a lone source. Fonts, tokens and measured compact geometry match; two-source expansion, compact history trends and observed swap notices are restored as deliberate fidelity corrections.
+
+The reviewed output extension retains this visual language: up to four cards, one Discord room and three Windows playback devices. Destination type selection belongs inside the full-window picker. Playback requires explicit Play/Stop and uses local device identity, availability and post-gain/mute output telemetry; it must not display Discord On air or gateway facts. Red remains reserved for Discord On air. New and restored output cards stay idle. A concise routing note explains feedback when playback returns into a captured recording input. No routing matrix, implicit monitoring or default-device fallback is introduced.

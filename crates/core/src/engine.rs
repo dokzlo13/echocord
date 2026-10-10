@@ -734,16 +734,31 @@ async fn capture_loop(
         stops.clone(),
         stop_rx.clone(),
     );
+    let ping_statuses = statuses.clone();
+    let mut next_ping = tokio::time::Instant::now();
     let _gateway_monitor = monitor_gateway(
         move || {
             let shard_manager = shard_manager.clone();
+            let statuses = ping_statuses.clone();
+            let publish_ping = tokio::time::Instant::now() >= next_ping;
+            if publish_ping {
+                next_ping = tokio::time::Instant::now() + Duration::from_secs(1);
+            }
             async move {
-                shard_manager
-                    .runners
-                    .lock()
-                    .await
-                    .get(&serenity::all::ShardId(0))
-                    .map(|runner| runner.stage == serenity::gateway::ConnectionStage::Connected)
+                let runners = shard_manager.runners.lock().await;
+                let runner = runners.get(&serenity::all::ShardId(0));
+                let connected = runner
+                    .map(|runner| runner.stage == serenity::gateway::ConnectionStage::Connected);
+                if publish_ping {
+                    let milliseconds = runner
+                        .filter(|runner| {
+                            runner.stage == serenity::gateway::ConnectionStage::Connected
+                        })
+                        .and_then(|runner| runner.latency)
+                        .map(|latency| latency.as_secs_f32() * 1000.0);
+                    let _ = statuses.try_send(Status::GatewayLatency { milliseconds });
+                }
+                connected
             }
         },
         signals.recovering.clone(),

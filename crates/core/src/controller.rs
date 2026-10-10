@@ -67,7 +67,7 @@ enum Event {
 }
 
 impl Controller {
-    /// Requires a Tokio runtime. Startup performs REST discovery only.
+    /// Requires a Tokio runtime. Starts capture restoration and REST discovery.
     pub fn spawn(config: ControllerConfig) -> Self {
         Self::spawn_mode(config, true)
     }
@@ -390,6 +390,8 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
 }
 
 struct Catalog {
+    id: Option<String>,
+    avatar_url: Option<String>,
     servers: Vec<Server>,
     name: String,
 }
@@ -1061,8 +1063,6 @@ impl Actor {
                 ControlCommand::AddSource { .. }
                     | ControlCommand::ReplaceSource { .. }
                     | ControlCommand::StartCapture { .. }
-                    | ControlCommand::StopCapture { .. }
-                    | ControlCommand::RemoveSource { .. }
                     | ControlCommand::SetSourceGain { .. }
                     | ControlCommand::SetSourceMuted { .. }
             )
@@ -1111,7 +1111,9 @@ impl Actor {
                     .telemetry
                     .inputs
                     .retain(|i| i.strip_id != strip_id);
-                self.sync_audio()?;
+                if !self.audio_failed {
+                    self.sync_audio()?;
+                }
             }
             ControlCommand::ReplaceSource {
                 strip_id,
@@ -1168,7 +1170,9 @@ impl Actor {
                     })?;
                 input.phase = InputPhase::Stopped;
                 input.fault = None;
-                self.sync_audio()?;
+                if !self.audio_failed {
+                    self.sync_audio()?;
+                }
             }
             ControlCommand::SetSourceMuted { strip_id, muted } => {
                 let input = self
@@ -1396,6 +1400,8 @@ impl Actor {
         let bot = self.snapshot.bot.clone();
         let discovery = self.snapshot.discovery.clone();
         self.snapshot.bot = BotProfile {
+            id: None,
+            avatar_url: None,
             status: BotStatus::Checking,
             name: None,
             message: None,
@@ -1471,6 +1477,7 @@ impl Actor {
         Ok(init)
     }
     fn disconnect(&mut self) {
+        self.snapshot.telemetry.gateway_ping_ms = None;
         self.pending = false;
         if let Some(preflight) = self.preflight.take() {
             preflight.abort();
@@ -1607,6 +1614,8 @@ impl Actor {
                     return;
                 }
                 self.snapshot.bot = BotProfile {
+                    id: None,
+                    avatar_url: None,
                     status: BotStatus::Unconfigured,
                     name: None,
                     message: None,
@@ -1664,6 +1673,8 @@ impl Actor {
                     Ok(catalog) => {
                         self.snapshot.servers = catalog.servers;
                         self.snapshot.bot = BotProfile {
+                            id: catalog.id,
+                            avatar_url: catalog.avatar_url,
                             status: BotStatus::Ready,
                             name: Some(catalog.name),
                             message: None,
@@ -1677,6 +1688,8 @@ impl Actor {
                     }
                     Err(e) => {
                         self.snapshot.bot = BotProfile {
+                            id: None,
+                            avatar_url: None,
                             status: if self.config.token_file.is_none() {
                                 BotStatus::Unconfigured
                             } else if e.code == ErrorCode::Authentication {
@@ -1811,6 +1824,10 @@ impl Actor {
                         self.snapshot.capture.phase = CapturePhase::Missing;
                         self.snapshot.capture.level_dbfs = None;
                         self.snapshot.capture.output_level_dbfs = None;
+                    }
+                    Status::GatewayLatency { milliseconds } => {
+                        self.snapshot.telemetry.gateway_ping_ms = milliseconds
+                            .filter(|value| value.is_finite() && (0.0..=60_000.0).contains(value));
                     }
                     Status::Meter { capture } => {
                         self.snapshot.capture = protocol::clean_capture(capture)
@@ -2400,6 +2417,8 @@ async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
         after = guilds.last().map(|g| g.id);
         if complete {
             return Ok(Catalog {
+                id: Some(user.id.to_string()),
+                avatar_url: user.avatar_url(),
                 servers,
                 name: user.name.clone(),
             });
@@ -2779,6 +2798,8 @@ mod tests {
         let previous = a.snapshot.bot.clone();
         let stale_epoch = a.catalog_epoch;
         let stale_catalog = Catalog {
+            id: None,
+            avatar_url: None,
             servers: a.snapshot.servers.clone(),
             name: "Stale bot".into(),
         };
@@ -3510,6 +3531,8 @@ mod tests {
         a.event(Event::Exited(4, false));
         a.refresh();
         let catalog = Catalog {
+            id: None,
+            avatar_url: None,
             servers: a.snapshot.servers.clone(),
             name: "Rechecked Bot".into(),
         };
@@ -3685,6 +3708,8 @@ mod tests {
         let mut a = actor();
         a.preferences_error = Some(Failure::Configuration.error());
         let catalog = Catalog {
+            id: None,
+            avatar_url: None,
             servers: a.snapshot.servers.clone(),
             name: "Bot".into(),
         };
@@ -4044,5 +4069,84 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(controller.snapshot(), ControlSnapshot::default());
         controller.shutdown().await.unwrap();
+    }
+    #[test]
+    fn failed_audio_worker_rejects_new_intent_without_phantom_cards_but_allows_cleanup() {
+        let mut a = actor();
+        a.audio_failed = true;
+        a.snapshot.inputs.push(InputStrip {
+            strip_id: "input-1".into(),
+            source_id: "recording".into(),
+            kind: SourceKind::Recording,
+            display_name: "Recording".into(),
+            detail: None,
+            phase: InputPhase::Fault,
+            fault: Some(Failure::Capture.error()),
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        });
+        let before = a.snapshot.clone();
+        for command in [
+            ControlCommand::AddSource {
+                source_id: "recording".into(),
+            },
+            ControlCommand::ReplaceSource {
+                strip_id: "input-1".into(),
+                source_id: "recording".into(),
+            },
+            ControlCommand::StartCapture {
+                strip_id: "input-1".into(),
+            },
+        ] {
+            assert!(a.command(command).is_err());
+            assert_eq!(a.snapshot, before);
+        }
+        a.command(ControlCommand::StopCapture {
+            strip_id: "input-1".into(),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Stopped);
+        a.command(ControlCommand::RemoveSource {
+            strip_id: "input-1".into(),
+        })
+        .unwrap();
+        assert!(a.snapshot.inputs.is_empty());
+    }
+    #[test]
+    fn gateway_latency_is_measured_sanitized_session_scoped_and_cleared_on_stop() {
+        let mut a = actor();
+        a.child = Some(child());
+        a.snapshot.connection = Connection::Connected;
+        a.event(Event::Status(
+            3,
+            Status::GatewayLatency {
+                milliseconds: Some(12.0),
+            },
+        ));
+        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
+        a.event(Event::Status(
+            4,
+            Status::GatewayLatency {
+                milliseconds: Some(-1.0),
+            },
+        ));
+        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
+        a.event(Event::Status(
+            4,
+            Status::GatewayLatency {
+                milliseconds: Some(12.5),
+            },
+        ));
+        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, Some(12.5));
+        a.disconnect();
+        a.event(Event::Status(
+            4,
+            Status::GatewayLatency {
+                milliseconds: Some(15.0),
+            },
+        ));
+        assert_eq!(a.snapshot.telemetry.gateway_ping_ms, None);
     }
 }

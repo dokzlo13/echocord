@@ -57,7 +57,14 @@ pub enum BotStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct BotProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_url: Option<String>,
     pub status: BotStatus,
     pub name: Option<String>,
     pub message: Option<String>,
@@ -310,6 +317,8 @@ impl Default for ControlSnapshot {
             servers: Vec::new(),
             selection: Selection::default(),
             bot: BotProfile {
+                id: None,
+                avatar_url: None,
                 status: BotStatus::Unconfigured,
                 name: None,
                 message: None,

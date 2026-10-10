@@ -67,6 +67,7 @@ pub enum Status {
     Failed { code: Failure },
     Stopped,
     Meter { capture: Capture },
+    GatewayLatency { milliseconds: Option<f32> },
 }
 
 // Closed vocabulary: no library error strings or remote payloads cross stdout.

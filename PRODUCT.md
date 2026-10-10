@@ -14,13 +14,13 @@ People running tabletop sessions or other voice meetings route selected local au
 
 ## Operating context
 
-Current flow: an explicitly selected Windows recording endpoint feeds one Discord bot/channel. Capture and joining start only on explicit action. Users hear the bot through Discord; local monitoring is not required. The alpha's live routing, perceived delay, and tray behavior have been confirmed in user testing; five-hour stability is not yet established.
+Current flow: one explicitly selected application process tree or Windows recording endpoint feeds one Discord bot/channel. Capture and joining start only on explicit action. The recording route's audible delivery, perceived delay, tray behavior and meters were confirmed in owner testing. Application capture has native synthetic/browser evidence and awaits owner listening feedback; five-hour stability is not established.
 
 ## Capabilities and constraints
 
 Rust owns audio, recovery, and credentials; React/TypeScript/Mantine owns controls. Development/builds remain in WSL with small Windows runtime needs. Preserve input isolation, bounded recovery, reliable cancel/quit, and a visible distinction between selected settings and applied routing. No silent fallback to a microphone or another destination.
 
-Settings and onboarding should support ordinary desktop users, with platform-standard local data and protected credentials. Future capability research covers process/desktop capture, an optional virtual endpoint, and multiple inputs feeding one common mix sent to multiple destinations. These are not current capabilities.
+Settings use platform-standard local data and current-user encrypted credentials. Local source discovery is independent of Discord configuration/network. Application capture includes child processes and can include other browser tabs/windows; keep the voice call in another app. Original playback continues, and no independent local-mute control is offered because tested session mute also silenced captured samples. Exited/restarted applications require explicit reselection, and application selection resets on a fresh Echocord launch. Desktop loopback, a virtual endpoint, multiple inputs and multiple destinations remain future capabilities.
 
 ## Product principles
 
@@ -32,4 +32,4 @@ Settings and onboarding should support ordinary desktop users, with platform-sta
 
 ## Open decisions
 
-Research supports a bounded Windows process-capture experiment; independent local suppression still needs measurement. One Discord bot can target only one voice channel per server at a time. Full mixing, a virtual driver, other receivers, and public distribution are later work. The current redesign must preserve working audio behavior. The Signal Bridge direction is accepted for implementation. Fit the main surface without scrolling and simplify graph-like decoration; broader visual refinement can follow real use. Retain contextual selection drawers; improve input/output separation, slimmer meters and main-surface diagnostics. Validate a coherent extension to multiple inputs and destinations around one shared mix.
+The implemented Signal Bridge surface uses compact contextual source/room pickers, labelled queued changes, slim measured meters and main-surface diagnostics. Broader visual refinement follows real use. The next major architecture review is multiple sources feeding one shared mix and destination fan-out; one Discord bot can target only one voice channel per server at a time. A virtual driver, other receivers and public distribution remain separate work. Owner app-capture feedback, recovery/long-session checks and native accessibility/resource measurements are still open.

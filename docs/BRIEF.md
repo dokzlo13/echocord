@@ -25,7 +25,7 @@ Rust core, Tauri + React + TypeScript + Mantine, with CSS Modules for limited cu
 
 Multiple capture devices mixed into one shared mix; independent destinations including local playback and multiple Discord destinations. Investigate Discord's connection constraints and bot identities before promising simultaneous channels in one server.
 
-Future source types: playback-device/desktop loopback, application capture, or an Echocord virtual audio device. The virtual device is a driver project and not part of the MVP. Linux is a later platform; macOS is distant. Other receivers such as Mumble, TeamSpeak, or Zoom need individual feasibility research.
+Application capture has been added in the current epoch through an explicitly selected process tree. Future source types remain playback-device/desktop loopback or an Echocord virtual audio device. The virtual device is a separate driver project. Linux is a later platform; macOS is distant. Other receivers such as Mumble, TeamSpeak, or Zoom need individual feasibility research.
 
 No media player, browser embedding, sound pad, playlist manager, custom decoder engine, or complex routing-matrix UI.
 

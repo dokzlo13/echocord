@@ -1,10 +1,12 @@
 # Desktop control UI
 
-The production React/Mantine surface follows [DESIGN.md](../DESIGN.md). Recording input, shared mix and Discord destination have separate spatial regions; source and room selection use compact contextual popovers. Slim input/post-gain meters and a bounded capture-queue readout sit on the main surface. A persistent transport exposes mute and connect/cancel/stop. Application capture is under integration; the accepted baseline remains one recording source and one Discord destination.
+The production React/Mantine surface follows [DESIGN.md](../DESIGN.md). Audio source, shared mix and Discord destination have separate spatial regions; source and room selection use compact contextual popovers. A single selected application or recording input feeds one Discord destination. Slim input/post-gain meters and a bounded capture-queue readout sit on the main surface. A persistent transport exposes mute and connect/cancel/stop.
 
 ## Selection, setup and errors
 
 Picker choices create a local draft. Apply selection while disconnected saves the route; Apply & reconnect explicitly stops an active session, waits for observed cleanup, confirms selection steps and starts the requested route. Confirmed endpoint identity remains authoritative. Cancellation/partial failure can leave already-confirmed selections saved; the remaining draft is reconciled rather than presented as an atomic rollback. No default microphone, room or implicit connect fallback is chosen.
+
+Applications and Recording inputs have separate searchable tabs. Source refresh uses its own native status/command, works while streaming or without a configured/reachable bot, and keeps cached rows visible on error. Application details distinguish process instances; unavailable/current markers survive exit, and restarted applications require explicit reselection. Main labels and error copy reflect the confirmed source kind. Browser overlap and original local playback are stated once in the picker; no independent local mute is shown. Same-name queued applications expose their instance details without parsing IDs.
 
 Grouped room search uses server/category context and actual catalog icons with an initials fallback. Long identities remain available in the pickers. Popovers use content-sized height with bounded width/height, list-only scrolling, search autofocus and Escape/close focus return. Transport stays accessible, including a direct outside Mute/Stop click. Main states, including pending/errors, fit the checked 480x600 and 420x540 viewports without internal/document scrolling. Labelled queued-change rows distinguish confirmed and proposed route fields. Bot setup and complete error/details content retain secondary sheets.
 
@@ -27,6 +29,6 @@ Input peak is pre-gain. Mix peak is actual completed PCM reader handoff after ga
 
 ## Validation and scope
 
-EC-013/018/019 record measured checks and limitations. Browser coverage includes keyboard/focus, setup, drafts/cancel/partial failure, native SDK wiring, compact containment, text/DPR cases and telemetry rendering. Coordinator native smoke checks actual frontend IPC, encrypted discovery, window visibility and tray lifecycle. Native text scaling/accessibility, real FPS/CPU under a live session, listener latency and five-hour stability remain separate acceptance.
+EC-013/018/019/021/022 record measured checks and limitations. Browser coverage includes keyboard/focus, setup, drafts/cancel/partial failure, native SDK wiring, source kinds/refresh/restarts, compact containment and live resizing, text/DPR cases and telemetry rendering. Coordinator native smoke checks actual frontend IPC, independent local discovery, encrypted bot discovery when configured, window visibility and tray lifecycle. Native text scaling/accessibility, real FPS/CPU under a live session, application-to-Discord listening, listener latency and five-hour stability remain separate acceptance.
 
 Development fixture mode is explicit and excluded from production builds. Browser tests use synthetic catalogs and measurements; no live credentials or services. Raw screenshots and test artifacts stay private, with redundant files removed at closeout. Vetted skill provenance remains in .agents/SOURCES.md; prototype research is historical evidence, not current visual authority.

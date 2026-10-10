@@ -2,7 +2,7 @@
 
 ## Authorized multi-room increment
 
-The owner now requests planning and implementation of multiple Discord room targets. EC-030 will review shared gateway/per-room voice ownership before implementation; EC-031 preserves the approved UI while exposing independently controlled rooms. Same-server destinations require separate bot identities and are being clarified with the owner. The current shared mix and Windows playback routes remain independent. No automatic joins/output starts, silent room replacement, secret-bearing frontend data or weakened teardown are permitted. Requirements below describe the delivered baseline until the new increment is integrated.
+The owner now requests planning and implementation of multiple Discord room targets. EC-030 will review shared gateway/per-room voice ownership before implementation; EC-031 preserves the approved UI while exposing independently controlled rooms. The owner confirms different-server destinations using the current bot, with one room per server. Multiple bot identities and simultaneous rooms in one server are not part of this increment. The current shared mix and Windows playback routes remain independent. No automatic joins/output starts, silent room replacement, secret-bearing frontend data or weakened teardown are permitted. Requirements below describe the delivered baseline until the new increment is integrated.
 
 ## Accepted current requirements
 

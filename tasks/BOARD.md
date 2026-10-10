@@ -4,7 +4,7 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 ## Active multi-room epoch
 
-The owner requests planning and implementation of multiple room targets. EC-030 owns native design/contracts/implementation, EC-031 the existing UI extension, EC-032 independent review and EC-033 integration. Same-server/multiple-bot scope is being clarified; shared gateway/per-room lifecycle research proceeds in parallel. The delivered playback build remains the baseline and must stay undisturbed while the new version is staged.
+The owner requests planning and implementation of multiple room targets. EC-030 owns native design/contracts/implementation, EC-031 the existing UI extension, EC-032 independent review and EC-033 integration. The owner confirmed different-server rooms with the existing bot. Design/review covers one shared gateway, independent room workers and one room per server. The delivered playback build remains the baseline and must stay undisturbed while the new version is staged.
 
 ## Delivered destination continuation
 

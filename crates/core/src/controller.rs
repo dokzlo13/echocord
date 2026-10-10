@@ -51,6 +51,8 @@ enum Request {
     Shutdown(oneshot::Sender<Result<(), AppError>>),
 }
 enum Event {
+    PlaybackDevices(u64, Result<Vec<PlaybackDevice>, AppError>),
+    PlaybackScanFinished(u64, Option<Result<Vec<PlaybackDevice>, AppError>>),
     Sources(u64, Result<Vec<RecordingSource>, AppError>),
     SourceScanFinished(u64, Option<Result<Vec<RecordingSource>, AppError>>),
     Catalog(u64, Result<Catalog, AppError>),
@@ -191,9 +193,21 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     let mut prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
-    if prefs.version > 2
+    if prefs.version > 3
         || prefs.inputs.len() > MAX_INPUTS
-        || prefs.destinations.len() > 1
+        || prefs.destinations.len() > MAX_DESTINATIONS
+        || prefs
+            .destinations
+            .iter()
+            .filter(|d| d.kind == DestinationKind::Discord)
+            .count()
+            > 1
+        || prefs
+            .destinations
+            .iter()
+            .filter(|d| d.kind == DestinationKind::Playback)
+            .count()
+            > MAX_PLAYBACK_DESTINATIONS
         || prefs
             .inputs
             .iter()
@@ -278,10 +292,33 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
             SourceKind::Recording
         };
     }
+    let mut destination_ids = std::collections::HashSet::new();
+    let mut playback_ids = std::collections::HashSet::new();
     if prefs.destinations.iter().any(|d| {
-        d.destination_id != "discord-1"
-            || protocol::discord_id(&d.server_id).is_none()
-            || protocol::discord_id(&d.channel_id).is_none()
+        !destination_ids.insert(d.destination_id.clone())
+            || d.destination_id.len() > 64
+            || d.display_name
+                .as_ref()
+                .is_some_and(|name| name.len() > 1024 || name.chars().any(char::is_control))
+            || match d.kind {
+                DestinationKind::Discord => {
+                    d.destination_id != "discord-1"
+                        || d.device_id.is_some()
+                        || protocol::discord_id(&d.server_id).is_none()
+                        || protocol::discord_id(&d.channel_id).is_none()
+                }
+                DestinationKind::Playback => {
+                    !d.destination_id.starts_with("playback-")
+                        || !d.server_id.is_empty()
+                        || !d.channel_id.is_empty()
+                        || d.device_id.as_ref().is_none_or(|id| {
+                            id.is_empty()
+                                || id.len() > 1024
+                                || id.chars().any(char::is_control)
+                                || !playback_ids.insert(id.clone())
+                        })
+                }
+            }
     }) {
         return Err(Failure::Configuration.error());
     }
@@ -296,6 +333,7 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     for destination in &mut prefs.destinations {
         destination.connection = Connection::Disconnected;
+        destination.session_id = 0;
     }
     if !prefs.settings.restore_setup {
         prefs.inputs.clear();
@@ -335,7 +373,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
             && serde_json::from_slice::<serde_json::Value>(&old)
                 .ok()
                 .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
-                .is_some_and(|version| version > 2)
+                .is_some_and(|version| version > 3)
         {
             return Err(error(
                 ErrorCode::Configuration,
@@ -344,7 +382,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
         }
     }
     let bytes = serde_json::to_vec(&Preferences {
-        version: 2,
+        version: 3,
         inputs: snapshot
             .inputs
             .iter()
@@ -361,6 +399,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
             .cloned()
             .map(|mut d| {
                 d.connection = Connection::Disconnected;
+                d.session_id = 0;
                 d
             })
             .collect(),
@@ -509,7 +548,24 @@ fn specific_failure(code: Failure) -> bool {
     )
 }
 
+#[cfg(windows)]
+struct PlaybackRuntime {
+    host: crate::playback::PlaybackHost,
+    device_id: String,
+    session_id: u32,
+    stopping: bool,
+    restart: bool,
+    removing: bool,
+    started: Instant,
+    stop_since: Option<Instant>,
+}
+
 struct Actor {
+    #[cfg(windows)]
+    playback: std::collections::BTreeMap<String, PlaybackRuntime>,
+    playback_epoch: u64,
+    playback_scanning: bool,
+    next_destination: u64,
     #[cfg(windows)]
     audio: Option<crate::mixing::AudioHost>,
     audio_failed: bool,
@@ -543,6 +599,11 @@ impl Actor {
     ) -> Self {
         Self {
             #[cfg(windows)]
+            playback: std::collections::BTreeMap::new(),
+            playback_epoch: 0,
+            playback_scanning: false,
+            next_destination: 1,
+            #[cfg(windows)]
             audio: None,
             audio_failed: false,
             next_strip: 1,
@@ -569,13 +630,52 @@ impl Actor {
         }
     }
     fn publish(&mut self) {
-        if let Some(destination) = self.snapshot.destinations.first_mut() {
+        if let Some(destination) = self
+            .snapshot
+            .destinations
+            .iter_mut()
+            .find(|d| d.kind == DestinationKind::Discord)
+        {
             destination.connection = self.snapshot.connection.clone();
+            destination.session_id = self.snapshot.session_id;
         }
         self.snapshot.telemetry.output_level_dbfs = self.snapshot.capture.output_level_dbfs;
         self.snapshot.telemetry.queued_frames = self.snapshot.capture.queued_frames;
         self.snapshot.telemetry.dropped_frames = self.snapshot.capture.dropped_frames;
         self.snapshot.telemetry.underrun_frames = self.snapshot.capture.underrun_frames;
+        self.snapshot.telemetry.destinations.retain(|meter| {
+            self.snapshot
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == meter.destination_id)
+        });
+        if let Some(destination) = self
+            .snapshot
+            .destinations
+            .iter()
+            .find(|d| d.kind == DestinationKind::Discord)
+        {
+            let measured = DestinationTelemetry {
+                destination_id: destination.destination_id.clone(),
+                session_id: destination.session_id,
+                level_dbfs: self.snapshot.capture.output_level_dbfs,
+                queued_frames: self.snapshot.capture.queued_frames,
+                dropped_frames: self.snapshot.capture.dropped_frames,
+                underrun_frames: self.snapshot.capture.underrun_frames,
+                gateway_ping_ms: self.snapshot.telemetry.gateway_ping_ms,
+            };
+            if let Some(existing) = self
+                .snapshot
+                .telemetry
+                .destinations
+                .iter_mut()
+                .find(|m| m.destination_id == destination.destination_id)
+            {
+                *existing = measured;
+            } else {
+                self.snapshot.telemetry.destinations.push(measured);
+            }
+        }
         self.snapshot.revision = self.snapshot.revision.wrapping_add(1);
         self.snapshots.send_replace(self.snapshot.clone());
     }
@@ -605,6 +705,18 @@ impl Actor {
                 self.snapshot.inputs = prefs.inputs;
                 self.snapshot.destinations = prefs.destinations;
                 self.snapshot.settings = prefs.settings;
+                self.next_destination = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .filter_map(|d| {
+                        d.destination_id
+                            .strip_prefix("playback-")
+                            .and_then(|id| id.parse::<u64>().ok())
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
                 self.next_strip = self
                     .snapshot
                     .inputs
@@ -618,14 +730,24 @@ impl Actor {
                     .unwrap_or(0)
                     + 1;
                 self.snapshot.selection = prefs.selection;
-                if let Some(destination) = self.snapshot.destinations.first() {
+                if let Some(destination) = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                {
                     self.snapshot.selection.server_id = Some(destination.server_id.clone());
                     self.snapshot.selection.channel_id = Some(destination.channel_id.clone());
                 }
                 if let Some(output) = prefs.output {
                     self.snapshot.output = output;
                 }
-                if let Some(destination) = self.snapshot.destinations.first() {
+                if let Some(destination) = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                {
                     self.snapshot.output.volume_linear =
                         Some(crate::mixing::linear(destination.volume_db));
                     self.snapshot.output.muted = destination.muted;
@@ -673,6 +795,7 @@ impl Actor {
                         }
                     }
                     self.poll_audio();
+                    self.poll_playback();
                     if self.move_pending && self.child.is_none() && !self.pending && !self.shutting_down && self.next_launch.is_none_or(|at| Instant::now() >= at) {
                         self.move_pending = false;
                         if let Err(error) = self.connect() { self.fail(error); }
@@ -682,6 +805,7 @@ impl Actor {
             }
             if self.shutting_down
                 && self.audio_stopped()
+                && self.playback_stopped()
                 && self.configuration.is_none()
                 && (self.child.is_none()
                     || matches!(
@@ -689,7 +813,10 @@ impl Actor {
                         Connection::CleanupIncomplete { .. }
                     ))
             {
-                let result = if self.child.is_some() || self.audio_cleanup_incomplete() {
+                let result = if self.child.is_some()
+                    || self.audio_cleanup_incomplete()
+                    || self.playback_cleanup_incomplete()
+                {
                     Err(cleanup_error())
                 } else {
                     Ok(())
@@ -709,6 +836,13 @@ impl Actor {
             audio.stop();
         }
         self.disconnect();
+        #[cfg(windows)]
+        for output in self.playback.values_mut() {
+            output.stopping = true;
+            output.stop_since.get_or_insert_with(Instant::now);
+            output.restart = false;
+            output.host.stop();
+        }
         if self
             .configuration
             .as_ref()
@@ -724,6 +858,7 @@ impl Actor {
     }
     fn refresh(&mut self) {
         self.refresh_sources();
+        self.refresh_playback_devices();
         self.retired = None;
         self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
         let epoch = self.catalog_epoch;
@@ -786,6 +921,10 @@ impl Actor {
     }
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
+            ControlCommand::RefreshPlaybackDevices => {
+                self.refresh_playback_devices();
+                return Ok(());
+            }
             ControlCommand::RefreshSources => {
                 self.refresh_sources();
                 return Ok(());
@@ -850,7 +989,12 @@ impl Actor {
                 }
                 self.snapshot.output.volume_percent = percent;
                 self.snapshot.output.volume_linear = None;
-                if let Some(d) = self.snapshot.destinations.first_mut() {
+                if let Some(d) = self
+                    .snapshot
+                    .destinations
+                    .iter_mut()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                {
                     d.volume_db = if percent == 0 {
                         None
                     } else {
@@ -863,7 +1007,12 @@ impl Actor {
             }
             ControlCommand::SetMuted { muted } => {
                 self.snapshot.output.muted = muted;
-                if let Some(d) = self.snapshot.destinations.first_mut() {
+                if let Some(d) = self
+                    .snapshot
+                    .destinations
+                    .iter_mut()
+                    .find(|d| d.kind == DestinationKind::Discord)
+                {
                     d.muted = muted;
                 }
                 if let Some(child) = &self.child {
@@ -881,7 +1030,7 @@ impl Actor {
             command => return self.mix_command(command),
         }
         self.publish();
-        save_preferences(&self.config, &self.snapshot)?;
+        self.persist()?;
         if self.preferences_error.take().is_some() && self.snapshot.bot.status == BotStatus::Ready {
             self.snapshot.discovery = Discovery::Ready;
             self.publish();
@@ -1030,21 +1179,6 @@ impl Actor {
         }
         Ok(source)
     }
-    fn destination_exists(&self, id: &str) -> Result<(), AppError> {
-        if self
-            .snapshot
-            .destinations
-            .iter()
-            .any(|d| d.destination_id == id)
-        {
-            Ok(())
-        } else {
-            Err(error(
-                ErrorCode::InvalidSelection,
-                "This destination no longer exists.",
-            ))
-        }
-    }
     fn validate_destination(&self, server: &str, channel: &str) -> Result<(), AppError> {
         if self
             .snapshot
@@ -1061,6 +1195,15 @@ impl Actor {
         }
     }
     fn mix_command(&mut self, command: ControlCommand) -> Result<(), AppError> {
+        if matches!(
+            command,
+            ControlCommand::AddPlaybackDestination { .. }
+                | ControlCommand::ChangePlaybackDestination { .. }
+                | ControlCommand::SetAllDestinationsMuted { .. }
+                | ControlCommand::DisconnectAllDestinations
+        ) {
+            return self.playback_command(command);
+        }
         if self.audio_failed
             && matches!(
                 command,
@@ -1223,7 +1366,13 @@ impl Actor {
                 if self.child.is_some() || self.pending {
                     return Err(busy());
                 }
-                if !self.snapshot.destinations.is_empty() {
+                if self.snapshot.destinations.len() >= MAX_DESTINATIONS
+                    || self
+                        .snapshot
+                        .destinations
+                        .iter()
+                        .any(|d| d.kind == DestinationKind::Discord)
+                {
                     return Err(error(
                         ErrorCode::InvalidSelection,
                         "One Discord room is supported.",
@@ -1252,19 +1401,33 @@ impl Actor {
                 };
             }
             ControlCommand::RemoveDestination { destination_id } => {
-                self.destination_exists(&destination_id)?;
-                self.move_pending = false;
-                self.disconnect();
-                self.snapshot.destinations.clear();
-                self.snapshot.selection.server_id = None;
-                self.snapshot.selection.channel_id = None;
+                let index = self.destination_index(&destination_id)?;
+                if self.snapshot.destinations[index].kind == DestinationKind::Playback {
+                    if self.defer_playback_removal(&destination_id) {
+                        self.publish();
+                        return self.persist();
+                    }
+                    self.stop_playback(&destination_id, false);
+                } else {
+                    self.move_pending = false;
+                    self.disconnect();
+                    self.snapshot.selection.server_id = None;
+                    self.snapshot.selection.channel_id = None;
+                }
+                self.snapshot.destinations.remove(index);
             }
             ControlCommand::ChangeDestination {
                 destination_id,
                 server_id,
                 channel_id,
             } => {
-                self.destination_exists(&destination_id)?;
+                let index = self.destination_index(&destination_id)?;
+                if self.snapshot.destinations[index].kind != DestinationKind::Discord {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "Select a playback device for this output.",
+                    ));
+                }
                 self.validate_destination(&server_id, &channel_id)?;
                 let reconnect = self.child.is_some()
                     || self.pending
@@ -1278,50 +1441,50 @@ impl Actor {
                 }
                 self.snapshot.selection.server_id = Some(server_id.clone());
                 self.snapshot.selection.channel_id = Some(channel_id.clone());
-                let destination = &mut self.snapshot.destinations[0];
+                let destination = &mut self.snapshot.destinations[index];
                 destination.server_id = server_id;
                 destination.channel_id = channel_id;
             }
             ControlCommand::ConnectDestination { destination_id } => {
-                self.destination_exists(&destination_id)?;
-                return self.connect();
+                let index = self.destination_index(&destination_id)?;
+                return if self.snapshot.destinations[index].kind == DestinationKind::Playback {
+                    self.start_playback(&destination_id)
+                } else {
+                    self.connect()
+                };
             }
             ControlCommand::DisconnectDestination { destination_id } => {
-                self.destination_exists(&destination_id)?;
-                self.move_pending = false;
-                self.terminal_error = None;
-                self.retired = None;
-                self.disconnect();
+                let index = self.destination_index(&destination_id)?;
+                if self.snapshot.destinations[index].kind == DestinationKind::Playback {
+                    self.stop_playback(&destination_id, false);
+                } else {
+                    self.move_pending = false;
+                    self.terminal_error = None;
+                    self.retired = None;
+                    self.disconnect();
+                }
             }
             ControlCommand::SetDestinationVolume {
                 destination_id,
                 volume_db,
             } => {
-                self.destination_exists(&destination_id)?;
+                let index = self.destination_index(&destination_id)?;
                 if !crate::mixing::valid_gain(volume_db) {
                     return Err(error(
                         ErrorCode::InvalidVolume,
                         "Volume must be Off or between −60 and 0 dB.",
                     ));
                 }
-                self.snapshot.destinations[0].volume_db = volume_db;
-                self.snapshot.output.volume_linear = Some(crate::mixing::linear(volume_db));
-                self.snapshot.output.volume_percent =
-                    (crate::mixing::linear(volume_db) * 100.0).round() as u8;
-                if let Some(child) = &self.child {
-                    child.output(self.snapshot.output.clone());
-                }
+                self.snapshot.destinations[index].volume_db = volume_db;
+                self.update_destination_output(index);
             }
             ControlCommand::SetDestinationMuted {
                 destination_id,
                 muted,
             } => {
-                self.destination_exists(&destination_id)?;
-                self.snapshot.destinations[0].muted = muted;
-                self.snapshot.output.muted = muted;
-                if let Some(child) = &self.child {
-                    child.output(self.snapshot.output.clone());
-                }
+                let index = self.destination_index(&destination_id)?;
+                self.snapshot.destinations[index].muted = muted;
+                self.update_destination_output(index);
             }
             ControlCommand::SetSettings { settings } => {
                 self.snapshot.settings = settings;
@@ -1329,7 +1492,554 @@ impl Actor {
             _ => return Err(error(ErrorCode::Internal, "Unsupported command.")),
         }
         self.publish();
+        self.persist()
+    }
+    fn persist(&self) -> Result<(), AppError> {
+        #[cfg(windows)]
+        if self.playback.values().any(|runtime| runtime.removing) {
+            // Remember Remove immediately while retaining its visible card and
+            // physical reservation until the worker's exit is confirmed.
+            let mut snapshot = self.snapshot.clone();
+            snapshot.destinations.retain(|destination| {
+                self.playback
+                    .get(&destination.destination_id)
+                    .is_none_or(|runtime| !runtime.removing)
+            });
+            return save_preferences(&self.config, &snapshot);
+        }
         save_preferences(&self.config, &self.snapshot)
+    }
+    fn destination_index(&self, id: &str) -> Result<usize, AppError> {
+        self.snapshot
+            .destinations
+            .iter()
+            .position(|d| d.destination_id == id)
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::InvalidSelection,
+                    "This destination no longer exists.",
+                )
+            })
+    }
+    fn refresh_playback_devices(&mut self) {
+        if self.playback_scanning {
+            return;
+        }
+        self.playback_scanning = true;
+        self.playback_epoch = self.playback_epoch.wrapping_add(1);
+        let epoch = self.playback_epoch;
+        let events = self.events.clone();
+        self.snapshot.playback_discovery = Discovery::Loading;
+        self.publish();
+        tokio::spawn(async move {
+            let mut scan = tokio::task::spawn_blocking(crate::playback::enumerate_devices);
+            match tokio::time::timeout(Duration::from_secs(5), &mut scan).await {
+                Ok(result) => {
+                    let result = result.map_err(|_| unavailable()).and_then(|value| value);
+                    let _ = events
+                        .send(Event::PlaybackScanFinished(epoch, Some(result)))
+                        .await;
+                }
+                Err(_) => {
+                    let _ = events
+                        .send(Event::PlaybackDevices(
+                            epoch,
+                            Err(error(
+                                ErrorCode::ConnectionFailed,
+                                "Playback discovery timed out. Retry after this scan finishes.",
+                            )),
+                        ))
+                        .await;
+                    let _ = scan.await;
+                    let _ = events.send(Event::PlaybackScanFinished(epoch, None)).await;
+                }
+            }
+        });
+    }
+    fn playback_device(
+        &self,
+        device_id: &str,
+        replacing: Option<&str>,
+    ) -> Result<PlaybackDevice, AppError> {
+        let device = self
+            .snapshot
+            .playback_devices
+            .iter()
+            .find(|d| d.id == device_id && d.available)
+            .cloned()
+            .ok_or_else(|| {
+                error(
+                    ErrorCode::InvalidSelection,
+                    "Select an available 48 kHz stereo playback output.",
+                )
+            })?;
+        if device.id.len() > 1024
+            || device.id.chars().any(char::is_control)
+            || device.name.len() > 1024
+            || device.name.chars().any(char::is_control)
+        {
+            return Err(error(
+                ErrorCode::InvalidSelection,
+                "This playback output identity exceeds the supported size.",
+            ));
+        }
+        if self.snapshot.destinations.iter().any(|d| {
+            Some(d.destination_id.as_str()) != replacing
+                && d.device_id.as_deref() == Some(device_id)
+        }) {
+            return Err(error(
+                ErrorCode::InvalidSelection,
+                "This playback output is already selected.",
+            ));
+        }
+        #[cfg(windows)]
+        if self
+            .playback
+            .iter()
+            .any(|(id, runtime)| Some(id.as_str()) != replacing && runtime.device_id == device_id)
+        {
+            return Err(error(
+                ErrorCode::Busy,
+                "Wait for the previous playback output to finish stopping.",
+            ));
+        }
+        Ok(device)
+    }
+    fn update_destination_output(&mut self, index: usize) {
+        let destination = &self.snapshot.destinations[index];
+        let output = Output {
+            volume_linear: Some(crate::mixing::linear(destination.volume_db)),
+            volume_percent: (crate::mixing::linear(destination.volume_db) * 100.0).round() as u8,
+            muted: destination.muted,
+        };
+        if destination.kind == DestinationKind::Discord {
+            self.snapshot.output = output;
+            if let Some(child) = &self.child {
+                child.output(self.snapshot.output.clone());
+            }
+        } else {
+            #[cfg(windows)]
+            if let Some(runtime) = self.playback.get(&destination.destination_id) {
+                runtime.host.output(output);
+            }
+        }
+    }
+    fn clear_destination_meter(&mut self, index: usize) {
+        let destination = &self.snapshot.destinations[index];
+        let id = destination.destination_id.clone();
+        self.snapshot
+            .telemetry
+            .destinations
+            .retain(|m| m.destination_id != id);
+        self.snapshot
+            .telemetry
+            .destinations
+            .push(DestinationTelemetry {
+                destination_id: id,
+                session_id: destination.session_id,
+                level_dbfs: None,
+                queued_frames: 0,
+                dropped_frames: 0,
+                underrun_frames: 0,
+                gateway_ping_ms: None,
+            });
+    }
+    fn start_playback(&mut self, destination_id: &str) -> Result<(), AppError> {
+        let index = self.destination_index(destination_id)?;
+        let destination = &self.snapshot.destinations[index];
+        if destination.kind != DestinationKind::Playback {
+            return Err(error(
+                ErrorCode::InvalidSelection,
+                "This destination is not a playback output.",
+            ));
+        }
+        if destination.connection == Connection::Connected {
+            return Ok(());
+        }
+        if destination.connection.locks_route() {
+            return Err(busy());
+        }
+        let device_id = destination.device_id.clone().ok_or_else(unavailable)?;
+        self.playback_device(&device_id, Some(destination_id))?;
+        #[cfg(not(windows))]
+        {
+            Err(error(
+                ErrorCode::ConnectionFailed,
+                "Playback outputs require Windows.",
+            ))
+        }
+        #[cfg(windows)]
+        {
+            if self.playback.contains_key(destination_id) {
+                return Err(busy());
+            }
+            self.sync_audio()?;
+            let destination = &self.snapshot.destinations[index];
+            let session_id = destination
+                .session_id
+                .checked_add(1)
+                .ok_or_else(unavailable)?;
+            let output = Output {
+                volume_linear: Some(crate::mixing::linear(destination.volume_db)),
+                volume_percent: 100,
+                muted: destination.muted,
+            };
+            let bus = self.audio.as_ref().ok_or_else(unavailable)?.bus.clone();
+            let host = crate::playback::PlaybackHost::launch(
+                self.config.executable.clone(),
+                bus,
+                device_id.clone(),
+                output,
+                session_id,
+            )?;
+            self.playback.insert(
+                destination_id.into(),
+                PlaybackRuntime {
+                    host,
+                    device_id,
+                    session_id,
+                    stopping: false,
+                    restart: false,
+                    removing: false,
+                    started: Instant::now(),
+                    stop_since: None,
+                },
+            );
+            self.snapshot.destinations[index].session_id = session_id;
+            self.snapshot.destinations[index].connection = Connection::Connecting {
+                stage: ConnectStage::Capture,
+            };
+            self.clear_destination_meter(index);
+            self.publish();
+            Ok(())
+        }
+    }
+    fn defer_playback_removal(&mut self, destination_id: &str) -> bool {
+        #[cfg(windows)]
+        if let Some(runtime) = self.playback.get_mut(destination_id) {
+            runtime.removing = true;
+            self.stop_playback(destination_id, false);
+            return true;
+        }
+        #[cfg(not(windows))]
+        let _ = destination_id;
+        false
+    }
+    fn stop_playback(&mut self, destination_id: &str, restart: bool) {
+        #[cfg(windows)]
+        let stopping = if let Some(runtime) = self.playback.get_mut(destination_id) {
+            runtime.stopping = true;
+            runtime.stop_since.get_or_insert_with(Instant::now);
+            runtime.restart = restart;
+            runtime.host.stop();
+            true
+        } else {
+            false
+        };
+        #[cfg(not(windows))]
+        let stopping = {
+            let _ = restart;
+            false
+        };
+        if let Ok(index) = self.destination_index(destination_id) {
+            if !matches!(
+                self.snapshot.destinations[index].connection,
+                Connection::CleanupIncomplete { .. }
+            ) {
+                self.snapshot.destinations[index].connection = if stopping {
+                    Connection::Disconnecting
+                } else {
+                    Connection::Disconnected
+                };
+            }
+            self.clear_destination_meter(index);
+        }
+    }
+    fn playback_stopped(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.playback
+                .values()
+                .all(|p| p.host.exit.load(std::sync::atomic::Ordering::Acquire) != 0)
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+    fn playback_cleanup_incomplete(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.playback
+                .values()
+                .any(|p| p.host.exit.load(std::sync::atomic::Ordering::Acquire) == 2)
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+    fn poll_playback(&mut self) {
+        #[cfg(windows)]
+        {
+            let mut finished = Vec::new();
+            let mut changed = false;
+            for (id, runtime) in &mut self.playback {
+                let index = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .position(|d| &d.destination_id == id);
+                if !runtime.stopping
+                    && runtime.started.elapsed() > Duration::from_secs(10)
+                    && index.is_some_and(|index| {
+                        matches!(
+                            self.snapshot.destinations[index].connection,
+                            Connection::Connecting { .. }
+                        )
+                    })
+                {
+                    runtime.stopping = true;
+                    runtime.stop_since = Some(Instant::now());
+                    runtime.host.stop();
+                    if let Some(index) = index {
+                        self.snapshot.destinations[index].connection = Connection::Error {
+                            code: ErrorCode::ConnectionFailed,
+                            message:
+                                "Playback startup timed out. Press Play to retry after cleanup."
+                                    .into(),
+                        };
+                        changed = true;
+                    }
+                }
+                if runtime
+                    .stop_since
+                    .is_some_and(|since| since.elapsed() > Duration::from_secs(4))
+                    && runtime.host.exit.load(std::sync::atomic::Ordering::Acquire) == 0
+                {
+                    // Covers even delayed OS process creation before supervision starts.
+                    let _ = runtime.host.exit.compare_exchange(
+                        0,
+                        2,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    );
+                }
+                if let Some(observed) = runtime.host.snapshot()
+                    && !runtime.stopping
+                    && let Some(index) = index
+                    && self.snapshot.destinations[index].session_id == runtime.session_id
+                {
+                    let failed = matches!(observed.connection, Connection::Error { .. });
+                    self.snapshot.destinations[index].connection = observed.connection;
+                    let value = observed.observation;
+                    self.snapshot
+                        .telemetry
+                        .destinations
+                        .retain(|m| &m.destination_id != id);
+                    self.snapshot
+                        .telemetry
+                        .destinations
+                        .push(DestinationTelemetry {
+                            destination_id: id.clone(),
+                            session_id: runtime.session_id,
+                            level_dbfs: value
+                                .level_dbfs
+                                .filter(|v| v.is_finite())
+                                .map(|v| v.clamp(-96.0, 0.0)),
+                            queued_frames: value.queued_frames,
+                            dropped_frames: value.dropped_frames,
+                            underrun_frames: value.underrun_frames,
+                            gateway_ping_ms: None,
+                        });
+                    if failed {
+                        runtime.stopping = true;
+                        runtime.stop_since.get_or_insert_with(Instant::now);
+                        runtime.restart = false;
+                        runtime.host.stop();
+                    }
+                    changed = true;
+                }
+                let exit = runtime.host.exit.load(std::sync::atomic::Ordering::Acquire);
+                if exit == 2 {
+                    if let Some(index) = index
+                        && !matches!(
+                            self.snapshot.destinations[index].connection,
+                            Connection::CleanupIncomplete { .. }
+                        )
+                    {
+                        self.snapshot.destinations[index].connection = Connection::CleanupIncomplete { message: "Playback output cleanup could not be confirmed. Restart Echocord.".into() };
+                        changed = true;
+                    }
+                } else if exit == 1 {
+                    let restart = runtime.restart
+                        && !runtime.removing
+                        && !self.shutting_down
+                        && index.is_some();
+                    if let Some(index) = index
+                        && runtime.removing
+                    {
+                        self.snapshot.destinations.remove(index);
+                        self.snapshot
+                            .telemetry
+                            .destinations
+                            .retain(|m| &m.destination_id != id);
+                    } else if let Some(index) = index {
+                        if restart
+                            || !matches!(
+                                self.snapshot.destinations[index].connection,
+                                Connection::Error { .. }
+                            )
+                        {
+                            self.snapshot.destinations[index].connection = if runtime.stopping {
+                                Connection::Disconnected
+                            } else {
+                                Connection::Error {
+                                    code: ErrorCode::ConnectionFailed,
+                                    message:
+                                        "The playback output worker stopped. Press Play to retry."
+                                            .into(),
+                                }
+                            };
+                        }
+                        self.snapshot
+                            .telemetry
+                            .destinations
+                            .retain(|m| &m.destination_id != id);
+                        self.snapshot
+                            .telemetry
+                            .destinations
+                            .push(DestinationTelemetry {
+                                destination_id: id.clone(),
+                                session_id: runtime.session_id,
+                                level_dbfs: None,
+                                queued_frames: 0,
+                                dropped_frames: 0,
+                                underrun_frames: 0,
+                                gateway_ping_ms: None,
+                            });
+                    }
+                    finished.push((id.clone(), restart));
+                    changed = true;
+                }
+            }
+            let retired = !finished.is_empty();
+            for (id, restart) in finished {
+                self.playback.remove(&id);
+                if restart
+                    && let Err(error) = self.start_playback(&id)
+                    && let Ok(index) = self.destination_index(&id)
+                {
+                    self.snapshot.destinations[index].connection = Connection::Error {
+                        code: error.code,
+                        message: error.message,
+                    };
+                }
+            }
+            if changed {
+                self.publish();
+                if retired {
+                    let _ = self.persist();
+                }
+            }
+        }
+    }
+    fn playback_command(&mut self, command: ControlCommand) -> Result<(), AppError> {
+        match command {
+            ControlCommand::AddPlaybackDestination { device_id } => {
+                if self.snapshot.destinations.len() >= MAX_DESTINATIONS
+                    || self
+                        .snapshot
+                        .destinations
+                        .iter()
+                        .filter(|d| d.kind == DestinationKind::Playback)
+                        .count()
+                        >= MAX_PLAYBACK_DESTINATIONS
+                {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "Up to three playback outputs and one Discord room are supported.",
+                    ));
+                }
+                let device = self.playback_device(&device_id, None)?;
+                let destination_id = format!("playback-{}", self.next_destination);
+                self.next_destination += 1;
+                self.snapshot.destinations.push(DestinationStrip {
+                    session_id: 0,
+                    kind: DestinationKind::Playback,
+                    device_id: Some(device_id),
+                    display_name: Some(device.name),
+                    destination_id,
+                    server_id: String::new(),
+                    channel_id: String::new(),
+                    connection: Connection::Disconnected,
+                    volume_db: Some(0.0),
+                    muted: false,
+                });
+                self.clear_destination_meter(self.snapshot.destinations.len() - 1);
+            }
+            ControlCommand::ChangePlaybackDestination {
+                destination_id,
+                device_id,
+            } => {
+                let index = self.destination_index(&destination_id)?;
+                if self.snapshot.destinations[index].kind != DestinationKind::Playback {
+                    return Err(error(
+                        ErrorCode::InvalidSelection,
+                        "Select a Discord room for this destination.",
+                    ));
+                }
+                let device = self.playback_device(&device_id, Some(&destination_id))?;
+                if self.snapshot.destinations[index].device_id.as_deref() == Some(&device_id) {
+                    return Ok(());
+                }
+                let live = matches!(
+                    self.snapshot.destinations[index].connection,
+                    Connection::Connected
+                        | Connection::Connecting { .. }
+                        | Connection::Recovering { .. }
+                );
+                if matches!(
+                    self.snapshot.destinations[index].connection,
+                    Connection::Disconnecting | Connection::CleanupIncomplete { .. }
+                ) {
+                    return Err(busy());
+                }
+                if live {
+                    self.stop_playback(&destination_id, true);
+                }
+                self.snapshot.destinations[index].device_id = Some(device_id);
+                self.snapshot.destinations[index].display_name = Some(device.name);
+                if !live {
+                    self.snapshot.destinations[index].connection = Connection::Disconnected;
+                }
+            }
+            ControlCommand::SetAllDestinationsMuted { muted } => {
+                for index in 0..self.snapshot.destinations.len() {
+                    self.snapshot.destinations[index].muted = muted;
+                    self.update_destination_output(index);
+                }
+            }
+            ControlCommand::DisconnectAllDestinations => {
+                self.move_pending = false;
+                self.terminal_error = None;
+                self.retired = None;
+                self.disconnect();
+                let local: Vec<_> = self
+                    .snapshot
+                    .destinations
+                    .iter()
+                    .filter(|d| d.kind == DestinationKind::Playback)
+                    .map(|d| d.destination_id.clone())
+                    .collect();
+                for id in local {
+                    self.stop_playback(&id, false);
+                }
+            }
+            _ => return Err(error(ErrorCode::Internal, "Unsupported playback command.")),
+        }
+        self.publish();
+        self.persist()
     }
     fn connect(&mut self) -> Result<(), AppError> {
         if self.child.is_some() || self.pending || self.snapshot.connection.locks_route() {
@@ -1566,6 +2276,32 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::PlaybackScanFinished(epoch, result) => {
+                if epoch != self.playback_epoch {
+                    return;
+                }
+                self.playback_scanning = false;
+                if let Some(result) = result {
+                    self.event(Event::PlaybackDevices(epoch, result));
+                }
+            }
+            Event::PlaybackDevices(epoch, result) => {
+                if epoch != self.playback_epoch || self.shutting_down {
+                    return;
+                }
+                match result {
+                    Ok(devices) => {
+                        self.snapshot.playback_devices = devices;
+                        self.snapshot.playback_discovery = Discovery::Ready;
+                    }
+                    Err(error) => {
+                        self.snapshot.playback_discovery = Discovery::Error {
+                            message: error.message,
+                        };
+                    }
+                }
+                self.publish();
+            }
             Event::SourceScanFinished(epoch, result) => {
                 if epoch != self.source_epoch {
                     return;
@@ -4228,5 +4964,185 @@ mod tests {
             assert_eq!(a.snapshot.inputs[0].gain_db, Some(-13.4));
             assert!(a.snapshot.inputs[0].muted);
         }
+    }
+    fn add_playback_catalog(a: &mut Actor) {
+        for index in 0..4 {
+            a.snapshot.playback_devices.push(PlaybackDevice {
+                id: format!("wasapi:owned-output-{index}"),
+                name: format!("Output {index}"),
+                available: true,
+                detail: None,
+            });
+        }
+    }
+    #[test]
+    fn playback_controls_are_independent_of_discord_and_credentials() {
+        let mut a = actor();
+        add_playback_catalog(&mut a);
+        a.command(ControlCommand::AddDestination {
+            server_id: "1".into(),
+            channel_id: "2".into(),
+        })
+        .unwrap();
+        a.snapshot.bot.status = BotStatus::Unconfigured;
+        a.snapshot.discovery = Discovery::Error {
+            message: "No network".into(),
+        };
+        a.snapshot.connection = Connection::Connecting {
+            stage: ConnectStage::Gateway,
+        };
+        a.child = Some(child());
+        a.command(ControlCommand::AddPlaybackDestination {
+            device_id: "wasapi:owned-output-0".into(),
+        })
+        .unwrap();
+        let local = a.snapshot.destinations[1].destination_id.clone();
+        assert_eq!(
+            a.snapshot.destinations[1].connection,
+            Connection::Disconnected
+        );
+        assert_eq!(a.snapshot.destinations[1].session_id, 0);
+        a.command(ControlCommand::SetDestinationVolume {
+            destination_id: local.clone(),
+            volume_db: Some(-59.5),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetDestinationMuted {
+            destination_id: local.clone(),
+            muted: true,
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations[0].volume_db, Some(0.0));
+        assert!(!a.snapshot.destinations[0].muted);
+        assert!(!a.snapshot.output.muted);
+        assert!(a.child.as_ref().unwrap().stopped_at().is_none());
+        assert!(
+            a.command(ControlCommand::ChangeDestination {
+                destination_id: local.clone(),
+                server_id: "1".into(),
+                channel_id: "2".into()
+            })
+            .is_err()
+        );
+        assert!(
+            a.command(ControlCommand::ChangePlaybackDestination {
+                destination_id: "discord-1".into(),
+                device_id: "wasapi:owned-output-1".into()
+            })
+            .is_err()
+        );
+        a.command(ControlCommand::SetAllDestinationsMuted { muted: true })
+            .unwrap();
+        assert!(a.snapshot.destinations.iter().all(|d| d.muted));
+        a.command(ControlCommand::DisconnectAllDestinations)
+            .unwrap();
+        assert!(a.child.as_ref().unwrap().stopped_at().is_some());
+        assert_eq!(
+            a.snapshot.destinations[1].connection,
+            Connection::Disconnected
+        );
+    }
+    #[test]
+    fn playback_selection_limits_and_discovery_identity_are_enforced() {
+        let mut a = actor();
+        add_playback_catalog(&mut a);
+        for index in 0..3 {
+            a.command(ControlCommand::AddPlaybackDestination {
+                device_id: format!("wasapi:owned-output-{index}"),
+            })
+            .unwrap();
+        }
+        assert!(
+            a.command(ControlCommand::AddPlaybackDestination {
+                device_id: "wasapi:owned-output-0".into()
+            })
+            .is_err()
+        );
+        assert!(
+            a.command(ControlCommand::AddPlaybackDestination {
+                device_id: "wasapi:owned-output-3".into()
+            })
+            .is_err()
+        );
+        a.command(ControlCommand::AddDestination {
+            server_id: "1".into(),
+            channel_id: "2".into(),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations.len(), MAX_DESTINATIONS);
+        assert!(
+            a.command(ControlCommand::AddDestination {
+                server_id: "1".into(),
+                channel_id: "2".into()
+            })
+            .is_err()
+        );
+        let first = a.snapshot.destinations[0].clone();
+        a.command(ControlCommand::RemoveDestination {
+            destination_id: first.destination_id,
+        })
+        .unwrap();
+        a.command(ControlCommand::AddPlaybackDestination {
+            device_id: "wasapi:owned-output-3".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            a.snapshot.destinations.last().unwrap().destination_id,
+            "playback-4"
+        );
+        assert!(
+            a.snapshot
+                .destinations
+                .iter()
+                .all(|d| d.connection == Connection::Disconnected)
+        );
+    }
+    #[test]
+    fn version_three_playback_restores_idle_with_stable_endpoint_and_settings() {
+        let directory = std::env::temp_dir().join(format!(
+            "echocord-output-preferences-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut config = config();
+        config.settings_file = Some(directory.join("settings.json"));
+        let mut a = actor();
+        add_playback_catalog(&mut a);
+        a.command(ControlCommand::AddPlaybackDestination {
+            device_id: "wasapi:owned-output-0".into(),
+        })
+        .unwrap();
+        a.snapshot.destinations[0].connection = Connection::Connected;
+        a.snapshot.destinations[0].session_id = 12;
+        a.snapshot.destinations[0].volume_db = Some(-59.5);
+        a.snapshot.destinations[0].muted = true;
+        save_preferences(&config, &a.snapshot).unwrap();
+        let restored = load_preferences(&config).unwrap();
+        assert_eq!(restored.version, 3);
+        assert_eq!(restored.destinations[0].kind, DestinationKind::Playback);
+        assert_eq!(
+            restored.destinations[0].connection,
+            Connection::Disconnected
+        );
+        assert_eq!(restored.destinations[0].session_id, 0);
+        assert_eq!(
+            restored.destinations[0].device_id.as_deref(),
+            Some("wasapi:owned-output-0")
+        );
+        assert_eq!(restored.destinations[0].volume_db, Some(-59.5));
+        assert!(restored.destinations[0].muted);
+        let mut value = serde_json::to_value(restored).unwrap();
+        value["version"] = 2.into();
+        value["destinations"] = serde_json::json!([{ "destinationId":"discord-1", "serverId":"1", "channelId":"2", "connection":{"phase":"connected"}, "volumeDb":-12.5, "muted":true }]);
+        std::fs::write(
+            config.settings_file.as_ref().unwrap(),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        let legacy = load_preferences(&config).unwrap();
+        assert_eq!(legacy.destinations[0].kind, DestinationKind::Discord);
+        assert_eq!(legacy.destinations[0].session_id, 0);
+        assert_eq!(legacy.destinations[0].connection, Connection::Disconnected);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -10,7 +10,7 @@ use std::{ffi::OsString, io};
 #[path = "capture_probe/application_suite.rs"]
 mod application_suite;
 
-const USAGE: &str = "Usage: capture-probe --list | --source-id ID | --application-suite | --mixing-suite | --browser-suite FIREFOX_EXE OWNED_PROFILE FIRST_SYNTHETIC_URL SECOND_SYNTHETIC_URL | --help";
+const USAGE: &str = "Usage: capture-probe --list | --source-id ID | --application-suite | --mixing-suite | --playback-list | --playback-suite ENDPOINT_ID | --browser-suite FIREFOX_EXE OWNED_PROFILE FIRST_SYNTHETIC_URL SECOND_SYNTHETIC_URL | --help";
 type ProbeResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(Debug, PartialEq, Eq)]

@@ -37,6 +37,38 @@ impl Identity {
 }
 
 #[cfg(any(windows, test))]
+fn ancestor_ids(current: u32, entries: &[(u32, u32)]) -> std::collections::HashSet<u32> {
+    let mut ancestors = std::collections::HashSet::from([current]);
+    let mut ancestor = current;
+    while let Some((_, parent)) = entries.iter().find(|(pid, _)| *pid == ancestor) {
+        if *parent == 0 || !ancestors.insert(*parent) {
+            break;
+        }
+        ancestor = *parent;
+    }
+    ancestors
+}
+
+#[cfg(any(windows, test))]
+fn excluded_tree(current: u32, entries: &[(u32, u32)]) -> std::collections::HashSet<u32> {
+    let mut excluded = std::collections::HashSet::from([current]);
+    loop {
+        let count = excluded.len();
+        for &(pid, parent) in entries {
+            if excluded.contains(&parent) {
+                excluded.insert(pid);
+            }
+        }
+        if excluded.len() == count {
+            break;
+        }
+    }
+    // Add ancestors after descendants so sibling applications are not excluded.
+    excluded.extend(ancestor_ids(current, entries));
+    excluded
+}
+
+#[cfg(any(windows, test))]
 fn invalid() -> AppError {
     error("The selected application identity is invalid. Refresh and select a running application.")
 }
@@ -155,9 +187,11 @@ mod native {
         }
         fn selected(id: &str) -> Result<Self, AppError> {
             let identity = Identity::parse(id)?;
-            if shell_roots().contains(&identity.pid) || identity.pid == std::process::id() {
+            if shell_roots().contains(&identity.pid)
+                || ancestor_ids(std::process::id(), &process_entries()?).contains(&identity.pid)
+            {
                 return Err(error(
-                    "Windows shell and Echocord processes cannot be selected for application capture.",
+                    "Windows shell, Echocord and its ancestor processes cannot be selected for application capture.",
                 ));
             }
             let target = Self::open(identity.pid)?;
@@ -238,13 +272,8 @@ mod native {
         Ok(contains(a.pid, b.pid) || contains(b.pid, a.pid))
     }
 
-    fn own_tree() -> HashSet<u32> {
-        let mut excluded = HashSet::from([std::process::id()]);
-        // SAFETY: read-only process snapshot; entries are bounded to live OS process count.
-        let Ok(snapshot) = handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })
-        else {
-            return excluded;
-        };
+    fn process_entries() -> Result<Vec<(u32, u32)>, AppError> {
+        let snapshot = handle(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
         let mut entries = Vec::new();
         let mut entry = PROCESSENTRY32W {
             dwSize: size_of::<PROCESSENTRY32W>() as u32,
@@ -255,18 +284,14 @@ mod native {
             entries.push((entry.th32ProcessID, entry.th32ParentProcessID));
             present = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } != 0;
         }
-        loop {
-            let old = excluded.len();
-            for &(pid, parent) in &entries {
-                if excluded.contains(&parent) {
-                    excluded.insert(pid);
-                }
-            }
-            if excluded.len() == old {
-                break;
-            }
-        }
-        excluded
+        Ok(entries)
+    }
+    fn own_tree() -> HashSet<u32> {
+        // Discovery excludes all owned workers; selected roots additionally may
+        // never contain this process. Explicit owned-child probes remain possible.
+        process_entries()
+            .map(|entries| excluded_tree(std::process::id(), &entries))
+            .unwrap_or_else(|_| HashSet::from([std::process::id()]))
     }
 
     fn shell_roots() -> HashSet<u32> {
@@ -730,6 +755,16 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn own_tree_and_ancestors_are_excluded_without_excluding_sibling_apps() {
+        let excluded = excluded_tree(
+            30,
+            &[(10, 1), (20, 10), (30, 20), (31, 30), (32, 31), (40, 10)],
+        );
+        assert!(excluded.is_superset(&std::collections::HashSet::from([1, 10, 20, 30, 31, 32])));
+        assert!(!excluded.contains(&40));
+    }
+
     #[test]
     fn identity_requires_canonical_pid_and_creation_time() {
         let identity = Identity {

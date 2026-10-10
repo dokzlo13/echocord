@@ -95,11 +95,13 @@ fn tray_action(app: &tauri::AppHandle, action: &str) {
         "mute" | "disconnect" => {
             let controller = app.state::<ShellState>().controller.clone();
             let command = if action == "mute" {
-                ControlCommand::SetMuted {
-                    muted: !controller.snapshot().output.muted,
+                let snapshot = controller.snapshot();
+                ControlCommand::SetAllDestinationsMuted {
+                    muted: !(!snapshot.destinations.is_empty()
+                        && snapshot.destinations.iter().all(|d| d.muted)),
                 }
             } else {
-                ControlCommand::Disconnect
+                ControlCommand::DisconnectAllDestinations
             };
             tauri::async_runtime::spawn(async move {
                 let _ = controller.dispatch(command).await;
@@ -154,6 +156,21 @@ fn main() {
                 )
             })
             .and_then(echocord_core::mixing::run_worker);
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
+    #[cfg(windows)]
+    if std::env::args().nth(1).as_deref() == Some("--playback-worker") {
+        let result = std::env::args()
+            .nth(2)
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .ok_or_else(|| {
+                AppError::new(
+                    echocord_core::model::ErrorCode::Internal,
+                    "Invalid playback worker handle.",
+                )
+            })
+            .and_then(echocord_core::playback::run_worker);
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
 
@@ -237,10 +254,16 @@ fn main() {
             window_state::install(app, window_preferences.clone());
             app.state::<ShellState>().controller.activate();
             let open = MenuItem::with_id(app, "open", "Open Echocord", true, None::<&str>)?;
-            let mute =
-                CheckMenuItem::with_id(app, "mute", "Mute output", true, false, None::<&str>)?;
+            let mute = CheckMenuItem::with_id(
+                app,
+                "mute",
+                "Mute all outputs",
+                false,
+                false,
+                None::<&str>,
+            )?;
             let disconnect =
-                MenuItem::with_id(app, "disconnect", "Disconnect", false, None::<&str>)?;
+                MenuItem::with_id(app, "disconnect", "Stop all outputs", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &mute, &disconnect, &quit])?;
             let tray = TrayIconBuilder::with_id("echocord")
@@ -273,25 +296,40 @@ fn main() {
                 let mut last_control: Option<ControlSnapshot> = None;
                 loop {
                     let snapshot = snapshots.borrow_and_update().clone();
-                    let label = match &snapshot.connection {
-                        Connection::Connected if snapshot.output.muted => "connected, muted",
-                        Connection::Connected => "connected",
-                        Connection::Connecting { .. } => "connecting",
-                        Connection::Recovering { .. } => "reconnecting",
-                        Connection::Disconnecting => "disconnecting",
-                        Connection::Error { .. } | Connection::CleanupIncomplete { .. } => {
-                            "needs attention"
-                        }
-                        Connection::Disconnected => "disconnected",
+                    let has_outputs = !snapshot.destinations.is_empty();
+                    let all_muted = has_outputs && snapshot.destinations.iter().all(|d| d.muted);
+                    let active = snapshot
+                        .destinations
+                        .iter()
+                        .any(|d| d.connection.locks_route());
+                    let playing = snapshot
+                        .destinations
+                        .iter()
+                        .any(|d| d.connection == Connection::Connected);
+                    let fault = snapshot.destinations.iter().any(|d| {
+                        matches!(
+                            d.connection,
+                            Connection::Error { .. } | Connection::CleanupIncomplete { .. }
+                        )
+                    });
+                    let label = if playing && fault {
+                        "playing, needs attention"
+                    } else if fault {
+                        "needs attention"
+                    } else if playing && all_muted {
+                        "playing, muted"
+                    } else if playing {
+                        "playing"
+                    } else if active {
+                        "changing outputs"
+                    } else {
+                        "idle"
                     };
-                    let tray_state = (
-                        snapshot.output.muted,
-                        snapshot.connection.locks_route(),
-                        label,
-                    );
+                    let tray_state = (all_muted, active, has_outputs, label);
                     if last_tray != Some(tray_state) {
                         let _ = mute.set_checked(tray_state.0);
                         let _ = disconnect.set_enabled(tray_state.1);
+                        let _ = mute.set_enabled(tray_state.2);
                         let _ = tray.set_tooltip(Some(format!("Echocord — {label}")));
                         last_tray = Some(tray_state);
                     }
@@ -360,17 +398,13 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
     }
     let mut local_sources_ready = false;
     for _ in 0..70 {
-        match app
-            .state::<ShellState>()
-            .controller
-            .snapshot()
-            .source_discovery
-        {
-            Discovery::Ready => {
+        let snapshot = app.state::<ShellState>().controller.snapshot();
+        match (&snapshot.source_discovery, &snapshot.playback_discovery) {
+            (Discovery::Ready, Discovery::Ready) => {
                 local_sources_ready = true;
                 break;
             }
-            Discovery::Error { .. } => return false,
+            (Discovery::Error { .. }, _) | (_, Discovery::Error { .. }) => return false,
             _ => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }

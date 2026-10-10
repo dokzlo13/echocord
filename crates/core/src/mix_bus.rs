@@ -18,7 +18,30 @@ pub struct Bus {
     heartbeat_ms: AtomicU64,
     slots: [Slot; CAPACITY],
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadStats {
+    pub queued_frames: u32,
+    pub dropped_frames: u32,
+    pub underrun_frames: u32,
+}
+
 impl Bus {
+    #[cfg(test)]
+    pub(crate) fn test_bus() -> Box<Self> {
+        let bus = Box::new(Self {
+            magic: AtomicU64::new(0),
+            version: AtomicU64::new(0),
+            capacity: AtomicU64::new(0),
+            cursor: AtomicU64::new(0),
+            heartbeat_ms: AtomicU64::new(0),
+            slots: std::array::from_fn(|_| Slot {
+                sequence: AtomicU64::new(0),
+                stereo: AtomicU64::new(0),
+            }),
+        });
+        bus.initialize();
+        bus
+    }
     pub fn initialize(&self) {
         self.cursor.store(0, SeqCst);
         self.version.store(1, SeqCst);
@@ -51,16 +74,30 @@ impl Bus {
         self.cursor.store(cursor, SeqCst);
     }
     pub fn read(&self, cursor: &mut u64, frames: &mut [[f32; 2]], now_ms: u64) {
+        let _ = self.read_counted(cursor, frames, now_ms);
+    }
+    pub fn read_counted(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        now_ms: u64,
+    ) -> ReadStats {
         frames.fill([0.0; 2]);
         let latest = self.cursor();
+        let mut stats = ReadStats::default();
         if !self.valid() || now_ms.saturating_sub(self.heartbeat_ms.load(SeqCst)) > 40 {
+            stats.dropped_frames = latest.saturating_sub(*cursor).min(u32::MAX as u64) as u32;
+            stats.underrun_frames = frames.len().min(u32::MAX as usize) as u32;
             *cursor = latest;
-            return;
+            return stats;
         }
-        *cursor = (*cursor).max(latest.saturating_sub(CAPACITY as u64));
+        let oldest = latest.saturating_sub(CAPACITY as u64);
+        stats.dropped_frames = oldest.saturating_sub(*cursor).min(u32::MAX as u64) as u32;
+        *cursor = (*cursor).max(oldest);
         for frame in frames {
             if *cursor >= latest {
-                break;
+                stats.underrun_frames = stats.underrun_frames.saturating_add(1);
+                continue;
             }
             let slot = &self.slots[*cursor as usize % CAPACITY];
             let expected = cursor.wrapping_mul(2).wrapping_add(2);
@@ -73,9 +110,13 @@ impl Bus {
                 if left.is_finite() && right.is_finite() {
                     *frame = [left, right];
                 }
+            } else {
+                stats.dropped_frames = stats.dropped_frames.saturating_add(1);
             }
             *cursor += 1;
         }
+        stats.queued_frames = latest.saturating_sub(*cursor).min(CAPACITY as u64) as u32;
+        stats
     }
 }
 

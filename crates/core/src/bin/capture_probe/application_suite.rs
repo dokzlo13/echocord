@@ -28,6 +28,22 @@ pub fn dispatch() -> Option<ProbeResult<()>> {
     match args.first().map(String::as_str) {
         Some("--application-suite") if args.len() == 1 => Some(suite()),
         Some("--mixing-suite") if args.len() == 1 => Some(mixing_suite()),
+        Some("--playback-suite") if args.len() == 2 => Some(playback_suite(&args[1])),
+        Some("--playback-list") if args.len() == 1 => Some(
+            echocord_core::playback::inspect_devices().and_then(|inventory| {
+                println!("{}", serde_json::to_string_pretty(&inventory)?);
+                Ok(())
+            }),
+        ),
+        Some("--playback-worker") if args.len() == 2 => {
+            let result = args[1]
+                .parse::<usize>()
+                .map_err(|_| "invalid playback handle")
+                .and_then(|raw| {
+                    echocord_core::playback::run_worker(raw).map_err(|_| "playback worker failed")
+                });
+            std::process::exit(if result.is_ok() { 0 } else { 1 });
+        }
         Some("--audio-worker") if args.len() == 2 => {
             let result = args[1]
                 .parse::<usize>()
@@ -757,6 +773,223 @@ fn mixing_suite() -> ProbeResult<()> {
     )?;
     println!(
         "native-shared-mix: passed; two sources, no credentials, idle drain, stereo isolation, fractional gains, source/destination mute, source fault, silence/resume, stop/start/replace, observed cleanup"
+    );
+    Ok(())
+}
+
+fn playback_suite(device_id: &str) -> ProbeResult<()> {
+    use echocord_core::{
+        mix_bus::{self, BusHandle, Mapping},
+        model::{Connection, Output},
+        playback::{self, PlaybackHost},
+    };
+    use std::os::windows::io::IntoRawHandle;
+    let safe = |id: &str| -> ProbeResult<()> {
+        let inventory = playback::inspect_devices()?;
+        let selected = inventory
+            .as_array()
+            .and_then(|all| {
+                all.iter()
+                    .find(|entry| entry["device"]["id"].as_str() == Some(id))
+            })
+            .ok_or("selected output is absent")?;
+        require(
+            selected["device"]["available"].as_bool() == Some(true)
+                && selected["defaultRoles"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+                && selected["activeSessionPids"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty),
+            "selected output is in use or is a default; physical test skipped",
+        )
+    };
+    safe(device_id)?;
+    let bus = Arc::new(BusHandle::create()?);
+    let producer_mapping = Mapping::inherited(bus.inheritable()?.into_raw_handle() as usize)?;
+    producer_mapping.bus().initialize();
+    let reader_mapping = Mapping::inherited(bus.inheritable()?.into_raw_handle() as usize)?;
+    let producer_stop = Arc::new(AtomicBool::new(false));
+    let stop = producer_stop.clone();
+    struct ProducerOwner {
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for ProducerOwner {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+    let thread = std::thread::spawn(move || {
+        let mut sample = 0u64;
+        let mut next = Instant::now();
+        while !stop.load(Ordering::Acquire) {
+            let mut frames = [[0.0; 2]; 240];
+            for frame in &mut frames {
+                let phase = std::f64::consts::TAU * sample as f64 / 48000.0;
+                *frame = [
+                    (phase * 997.0).sin() as f32 * 0.008,
+                    (phase * 1357.0).sin() as f32 * 0.008,
+                ];
+                sample += 1;
+            }
+            producer_mapping.bus().write(&frames, mix_bus::now_ms());
+            next += Duration::from_millis(5);
+            let now = Instant::now();
+            if now < next {
+                std::thread::sleep(next - now);
+            } else if now.duration_since(next) > Duration::from_millis(5) {
+                next = now;
+            }
+        }
+    });
+    let _producer = ProducerOwner {
+        stop: producer_stop,
+        thread: Some(thread),
+    };
+    let output = |gain, muted| Output {
+        volume_linear: Some(gain),
+        volume_percent: 100,
+        muted,
+    };
+    let host = PlaybackHost::launch(
+        std::env::current_exe()?,
+        bus.clone(),
+        device_id.into(),
+        output(0.25, false),
+        1,
+    )?;
+    let wait = |host: &PlaybackHost,
+                predicate: &dyn Fn(&playback::PlaybackSnapshot) -> bool|
+     -> ProbeResult<playback::PlaybackSnapshot> {
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until {
+            if let Some(snapshot) = host.snapshot()
+                && predicate(&snapshot)
+            {
+                return Ok(snapshot);
+            }
+            if host.exit.load(Ordering::Acquire) != 0 {
+                return Err("playback worker exited before its expected observation".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("playback observation timed out".into())
+    };
+    let started = wait(&host, &|s| {
+        s.connection == Connection::Connected
+            && s.observation.callback_frames > 0
+            && s.observation.level_dbfs.is_some_and(|level| level > -70.0)
+    })?;
+    let identity = application::identity_for_pid(host.process_id.load(Ordering::Acquire))?;
+    let mut observer = audio::start_capture(&identity)?;
+    let _ = measure(&mut observer, 350)?;
+    let live = measure(&mut observer, 800)?;
+    require(
+        live.root_left > 0.0005 && live.root_right > 0.0005,
+        "owned playback was not observed as isolated stereo PCM",
+    )?;
+    let initial_cursor = reader_mapping.bus().cursor();
+    let clock_start = Instant::now();
+    let _ = measure(&mut observer, 1200)?;
+    let rate = (reader_mapping.bus().cursor() - initial_cursor) as f64
+        / clock_start.elapsed().as_secs_f64();
+    require(
+        (47000.0..49000.0).contains(&rate),
+        "native playback test producer clock drifted",
+    )?;
+    host.output(output(0.00425, false));
+    wait(&host, &|s| {
+        s.observation.level_dbfs.is_some_and(|v| v < -80.0)
+    })?;
+    let _ = measure(&mut observer, 200)?;
+    let quiet = measure(&mut observer, 600)?;
+    require(
+        quiet.root_left > 0.000002 && quiet.root_left < live.root_left * 0.04,
+        "precise playback gain was not observed",
+    )?;
+    host.output(output(0.5, true));
+    wait(&host, &|s| s.observation.level_dbfs == Some(-96.0))?;
+    let _ = measure(&mut observer, 200)?;
+    require(
+        measure(&mut observer, 400)?.peak < 0.0000001,
+        "playback mute failed",
+    )?;
+    host.output(output(0.5, false));
+    wait(&host, &|s| {
+        s.observation.level_dbfs.is_some_and(|v| v > -55.0)
+    })?;
+    let _ = measure(&mut observer, 200)?;
+    require(
+        measure(&mut observer, 600)?.root_left > live.root_left * 1.5,
+        "playback unmute did not resume",
+    )?;
+    // A separately owned output failing to open cannot stop the healthy worker.
+    let missing = PlaybackHost::launch(
+        std::env::current_exe()?,
+        bus.clone(),
+        "wasapi:missing-owned-fixture".into(),
+        output(1.0, false),
+        1,
+    )?;
+    let until = Instant::now() + Duration::from_secs(5);
+    while missing.exit.load(Ordering::Acquire) == 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    require(
+        missing.exit.load(Ordering::Acquire) == 1,
+        "failed output worker exit was not observed",
+    )?;
+    require(
+        host.exit.load(Ordering::Acquire) == 0
+            && measure(&mut observer, 600)?.root_left > live.root_left * 1.5,
+        "one output failure affected another",
+    )?;
+    require(observer.control.stop(), "owned observer cleanup failed")?;
+    host.stop();
+    let until = Instant::now() + Duration::from_secs(5);
+    while host.exit.load(Ordering::Acquire) == 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    require(
+        host.exit.load(Ordering::Acquire) == 1,
+        "playback worker exit was not confirmed",
+    )?;
+    let before = reader_mapping.bus().cursor();
+    std::thread::sleep(Duration::from_millis(150));
+    require(
+        reader_mapping.bus().cursor() > before + 4000,
+        "stopping playback stopped the shared producer",
+    )?;
+    safe(device_id)?;
+    let restarted = PlaybackHost::launch(
+        std::env::current_exe()?,
+        bus,
+        device_id.into(),
+        output(0.25, false),
+        2,
+    )?;
+    wait(&restarted, &|s| {
+        s.connection == Connection::Connected && s.observation.level_dbfs.is_some()
+    })?;
+    restarted.stop();
+    let until = Instant::now() + Duration::from_secs(5);
+    while restarted.exit.load(Ordering::Acquire) == 0 && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    require(
+        restarted.exit.load(Ordering::Acquire) == 1,
+        "restarted output cleanup failed",
+    )?;
+    println!(
+        "native-playback: passed; explicit unused endpoint, owned-worker loopback stereo, precise gain/mute/resume, failed-output isolation, independent producer, stop/restart and observed exit"
+    );
+    println!(
+        "native-playback producer frames/sec: {rate:.1}; maximum observed callback frames: {}",
+        started.observation.callback_frames
     );
     Ok(())
 }

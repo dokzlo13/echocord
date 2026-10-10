@@ -7,25 +7,31 @@ type Telemetry = ReturnType<ControlAdapter["getTelemetrySnapshot"]>;
 /** Event-driven, one pending timer, no idle animation loop or React state. */
 function useTelemetryDom(
   adapter: ControlAdapter,
-  paint: (observation: Telemetry) => void,
+  paint: (observation: Telemetry, reset: boolean) => void,
   interval = 50,
+  pause?: () => void,
 ) {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let lastPaint = -Infinity;
     let disposed = false;
+    let reset = true;
     const flush = () => {
       timer = undefined;
       if (disposed || document.hidden) return;
       const latest = adapter.getTelemetrySnapshot();
       if (!latest.visible) return;
       lastPaint = performance.now();
-      paint(latest);
+      paint(latest, reset);
+      reset = false;
     };
     const schedule = () => {
       if (document.hidden || !adapter.getTelemetrySnapshot().visible) {
         clearTimeout(timer);
         timer = undefined;
+        reset = true;
+        lastPaint = -Infinity;
+        pause?.();
         return;
       }
       if (timer !== undefined) return;
@@ -46,21 +52,31 @@ function useTelemetryDom(
       unsubscribe();
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [adapter, paint, interval]);
+  }, [adapter, paint, interval, pause]);
 }
 
 export const SignalMeter = memo(function SignalMeter({
   adapter,
   stage,
+  outputSilent = false,
 }: {
   adapter: ControlAdapter;
   stage: "input" | "mix";
+  outputSilent?: boolean;
 }) {
   const bar = useRef<HTMLSpanElement>(null);
   const meter = useRef<HTMLMeterElement>(null);
   const readout = useRef<HTMLSpanElement>(null);
+  const previous = useRef({
+    sessionId: -1,
+    sourceId: null as string | null,
+    fraction: 0,
+  });
+  const pause = useCallback(() => {
+    if (bar.current) bar.current.style.transitionDuration = "0ms";
+  }, []);
   const paint = useCallback(
-    ({ capture }: Telemetry) => {
+    ({ capture, sessionId, sourceId }: Telemetry, reset: boolean) => {
       const observed =
         capture?.phase === "running"
           ? stage === "input"
@@ -79,7 +95,21 @@ export const SignalMeter = memo(function SignalMeter({
           : level <= -96
             ? "Silent"
             : `${level.toFixed(1)} dBFS`;
-      if (bar.current) bar.current.style.transform = `scaleY(${fraction})`;
+      if (bar.current) {
+        const immediate =
+          reset ||
+          level === null ||
+          previous.current.sessionId !== sessionId ||
+          previous.current.sourceId !== sourceId ||
+          (stage === "mix" && outputSilent);
+        bar.current.style.transitionDuration = immediate
+          ? "0ms"
+          : fraction >= previous.current.fraction
+            ? "80ms"
+            : "180ms";
+        bar.current.style.transform = `scaleY(${fraction})`;
+      }
+      previous.current = { sessionId, sourceId, fraction };
       if (readout.current) readout.current.textContent = label;
       if (meter.current) {
         meter.current.setAttribute("aria-valuetext", label);
@@ -87,9 +117,9 @@ export const SignalMeter = memo(function SignalMeter({
           level === null ? -60 : Math.max(-60, Math.min(0, level));
       }
     },
-    [stage],
+    [stage, outputSilent],
   );
-  useTelemetryDom(adapter, paint);
+  useTelemetryDom(adapter, paint, 50, pause);
   return (
     <div className={styles.signalMeter}>
       <div className={styles.calibration} aria-hidden="true">
@@ -111,7 +141,7 @@ export const SignalMeter = memo(function SignalMeter({
         aria-valuetext="No level"
       />
       <div className={styles.meterTrack} aria-hidden="true">
-        <span ref={bar} />
+        <span ref={bar} data-testid={`${stage}-bar`} />
       </div>
       <span
         ref={readout}

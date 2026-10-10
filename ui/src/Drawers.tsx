@@ -1,5 +1,18 @@
-import { Button, Drawer, PasswordInput, TextInput } from "@mantine/core";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  ActionIcon,
+  Button,
+  Drawer,
+  PasswordInput,
+  Popover,
+  TextInput,
+} from "@mantine/core";
+import {
+  type ReactElement,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import styles from "./App.module.css";
 import type { ControlAdapter, ViewState } from "./adapter";
 import type { ControlSnapshot, Selection, Server } from "./generated";
@@ -9,17 +22,85 @@ import { CaptureCounters } from "./Telemetry";
 
 export type DrawerName = "source" | "target" | "bot" | "details";
 
+export function PickerPopover({
+  name,
+  title,
+  opened,
+  close,
+  trigger,
+  children,
+}: {
+  name: "source" | "target";
+  title: string;
+  opened: boolean;
+  close: () => void;
+  trigger: ReactElement;
+  children: ReactNode;
+}) {
+  const content = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (opened)
+      content.current?.querySelector<HTMLInputElement>("input")?.focus();
+  }, [opened]);
+  useEffect(() => {
+    if (!opened) return;
+    const dismissWithEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    window.addEventListener("keydown", dismissWithEscape);
+    return () => window.removeEventListener("keydown", dismissWithEscape);
+  }, [opened, close]);
+  const padding = { top: 8, right: 12, bottom: 78, left: 12 };
+  return (
+    <Popover
+      opened={opened}
+      onDismiss={close}
+      closeOnEscape={false}
+      position={name === "source" ? "bottom-start" : "top-end"}
+      width="min(344px, 80vw)"
+      offset={8}
+      floatingStrategy="fixed"
+      middlewares={{ flip: { padding }, shift: { padding, crossAxis: true } }}
+      trapFocus={false}
+      returnFocus={false}
+      transitionProps={{ duration: 0 }}
+    >
+      <Popover.Target>{trigger}</Popover.Target>
+      <Popover.Dropdown
+        ref={content}
+        className={styles.pickerContent}
+        aria-label={title}
+        aria-labelledby={`${name}-picker-title`}
+        aria-modal={false}
+      >
+        <div className={styles.pickerHeader}>
+          <h2 id={`${name}-picker-title`}>{title}</h2>
+          <ActionIcon
+            variant="subtle"
+            aria-label={`Close ${title.toLowerCase()}`}
+            onClick={close}
+          >
+            <Icon name="close" />
+          </ActionIcon>
+        </div>
+        <div className={styles.pickerBody}>{children}</div>
+      </Popover.Dropdown>
+    </Popover>
+  );
+}
+
 function DrawerViewport({ children }: { children: ReactNode }) {
   return <div className={styles.drawerViewport}>{children}</div>;
 }
 
 export function Sheet({
-  name,
   title,
   close,
   children,
 }: {
-  name: DrawerName;
   title: string;
   close: () => void;
   children: ReactNode;
@@ -35,7 +116,7 @@ export function Sheet({
     <Drawer.Root
       opened
       onClose={close}
-      position={name === "source" ? "left" : "right"}
+      position="right"
       size="calc(100% - 24px)"
       scrollAreaComponent={DrawerViewport}
       trapFocus={false}
@@ -116,12 +197,10 @@ export function SourcePicker({
   );
   return (
     <>
-      <p className={styles.drawerHint}>
-        Select a recording input. Apply the queued selection on the main
-        surface.
-      </p>
+      <p className={styles.drawerHint}>Pick an input, then apply.</p>
       <TextInput
-        label="Search recording inputs"
+        aria-label="Search recording inputs"
+        placeholder="Search recording inputs"
         leftSection={<Icon name="search" />}
         value={search}
         onChange={(event) => setSearch(event.currentTarget.value)}
@@ -168,10 +247,6 @@ export function SourcePicker({
         >
           Refresh inputs
         </Button>
-        <p>
-          Send your audio app to VB-Cable's playback endpoint, then select its
-          recording endpoint here.
-        </p>
       </div>
     </>
   );
@@ -208,17 +283,16 @@ export function RoomPicker({
     .filter((server) => server.channels.length > 0 || !query);
   return (
     <>
-      <p className={styles.drawerHint}>
-        Choose a voice room. Changing rooms takes effect only when you apply.
-      </p>
+      <p className={styles.drawerHint}>Pick a room, then apply.</p>
       <TextInput
-        label="Search servers and rooms"
+        aria-label="Search servers and rooms"
+        placeholder="Search servers and rooms"
         leftSection={<Icon name="search" />}
         value={search}
         onChange={(event) => setSearch(event.currentTarget.value)}
         data-autofocus
       />
-      <div className={styles.drawerList}>
+      <div className={styles.drawerList} data-searching={Boolean(query)}>
         {snapshot.bot.status !== "ready" && (
           <div className={styles.empty}>
             <p>
@@ -264,6 +338,7 @@ export function RoomPicker({
                             className={styles.roomChoice}
                             disabled={busy}
                             aria-pressed={next}
+                            aria-description={`${server.name}, ${category ?? "Voice rooms"}`}
                             onClick={() => choose(server.id, room.id)}
                           >
                             <Icon name="speaker" />

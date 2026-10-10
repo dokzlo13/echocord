@@ -6,6 +6,7 @@ import {
   AudioDetails,
   BotSetup,
   type DrawerName,
+  PickerPopover,
   RoomPicker,
   ServerIcon,
   Sheet,
@@ -62,6 +63,42 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const nextRoom = nextServer?.channels.find(
     (item) => item.id === queued.channelId,
   );
+  const routeChanges: { field: string; confirmed: string; queued: string }[] =
+    [];
+  if (queued.sourceId !== selection.sourceId)
+    routeChanges.push({
+      field: "Input",
+      confirmed:
+        source?.name ??
+        (selection.sourceId ? "Unavailable input" : "Not selected"),
+      queued:
+        nextSource?.name ??
+        (queued.sourceId ? "Unavailable input" : "Not selected"),
+    });
+  if (
+    queued.serverId !== selection.serverId ||
+    queued.channelId !== selection.channelId
+  )
+    routeChanges.push(
+      {
+        field: "Server",
+        confirmed:
+          server?.name ??
+          (selection.serverId ? "Unavailable server" : "Not selected"),
+        queued:
+          nextServer?.name ??
+          (queued.serverId ? "Unavailable server" : "Not selected"),
+      },
+      {
+        field: "Room",
+        confirmed:
+          room?.name ??
+          (selection.channelId ? "Unavailable room" : "Not selected"),
+        queued:
+          nextRoom?.name ??
+          (queued.channelId ? "Unavailable room" : "Not selected"),
+      },
+    );
   const operation = view.routeOperation;
   const phase = snapshot?.connection.phase;
   const active =
@@ -92,8 +129,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
     setDrawer(name);
   };
   const close = () => {
+    const previous = document.activeElement;
     setDrawer(null);
-    requestAnimationFrame(() => opener.current?.focus());
+    requestAnimationFrame(() => {
+      // An outside transport click keeps its focus and executes on the first click.
+      if (
+        document.activeElement === document.body ||
+        document.activeElement === previous
+      )
+        opener.current?.focus();
+    });
   };
   useEffect(() => {
     void adapter.start();
@@ -194,6 +239,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
     <main
       className={styles.app}
       data-crowded={Boolean(notice && (dirty || operation))}
+      data-queued={Boolean(dirty || operation)}
     >
       <header className={styles.header} inert={drawer !== null}>
         <h1>
@@ -245,15 +291,38 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               <span className={styles.secondary} title={source?.detail ?? ""}>
                 {source?.detail ?? "Windows recording endpoint"}
               </span>
-              <Button
-                variant="subtle"
-                size="compact-sm"
-                disabled={locked}
-                onClick={() => open("source")}
+              <PickerPopover
+                name="source"
+                title="Recording inputs"
+                opened={drawer === "source"}
+                close={close}
+                trigger={
+                  <Button
+                    variant="subtle"
+                    size="compact-sm"
+                    disabled={locked}
+                    onClick={() => open("source")}
+                  >
+                    {source ? "Change input" : "Choose input"}
+                    <Icon name="chevron" />
+                  </Button>
+                }
               >
-                {source ? "Change input" : "Choose input"}
-                <Icon name="chevron" />
-              </Button>
+                {snapshot && (
+                  <SourcePicker
+                    snapshot={snapshot}
+                    draft={queued}
+                    busy={locked || catalogBusy}
+                    refresh={() =>
+                      void adapter.dispatch({ type: "refresh-catalog" })
+                    }
+                    choose={(sourceId) => {
+                      setDraft({ ...queued, sourceId });
+                      close();
+                    }}
+                  />
+                )}
+              </PickerPopover>
             </div>
             <SignalMeter adapter={adapter} stage="input" />
             <CaptureQueue adapter={adapter} />
@@ -291,14 +360,18 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               marks={[
                 { value: 0, label: "0" },
                 { value: 50, label: "50" },
-                { value: 100, label: "100%" },
+                { value: 100, label: "100" },
               ]}
               classNames={{ root: styles.fader, thumb: styles.faderThumb }}
             />
           </div>
           <div className={styles.mixMeter}>
             <span>Mix peak</span>
-            <SignalMeter adapter={adapter} stage="mix" />
+            <SignalMeter
+              adapter={adapter}
+              stage="mix"
+              outputSilent={muted || snapshot?.output.volumePercent === 0}
+            />
           </div>
           <span className={styles.mixBoundary}>
             After gain & mute · before Discord
@@ -330,22 +403,46 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                 {server?.name ?? "No server selected"}
               </span>
             </div>
-            <Button
-              ref={roomButton}
-              variant="subtle"
-              size="compact-sm"
-              disabled={locked}
-              onClick={() =>
-                open(snapshot?.bot.status === "ready" ? "target" : "bot")
+            <PickerPopover
+              name="target"
+              title="Discord rooms"
+              opened={drawer === "target"}
+              close={close}
+              trigger={
+                <Button
+                  ref={roomButton}
+                  variant="subtle"
+                  size="compact-sm"
+                  disabled={locked}
+                  onClick={() =>
+                    open(snapshot?.bot.status === "ready" ? "target" : "bot")
+                  }
+                >
+                  {snapshot?.bot.status === "ready"
+                    ? room
+                      ? "Change room"
+                      : "Choose room"
+                    : "Set up bot"}
+                  <Icon name="chevron" />
+                </Button>
               }
             >
-              {snapshot?.bot.status === "ready"
-                ? room
-                  ? "Change room"
-                  : "Choose room"
-                : "Set up bot"}
-              <Icon name="chevron" />
-            </Button>
+              {snapshot && (
+                <RoomPicker
+                  snapshot={snapshot}
+                  draft={queued}
+                  busy={locked || catalogBusy}
+                  refresh={() =>
+                    void adapter.dispatch({ type: "refresh-catalog" })
+                  }
+                  setup={() => setDrawer("bot")}
+                  choose={(serverId, channelId) => {
+                    setDraft({ ...queued, serverId, channelId });
+                    close();
+                  }}
+                />
+              )}
+            </PickerPopover>
           </div>
         </section>
       </div>
@@ -378,47 +475,60 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           aria-label="Queued route"
           inert={drawer !== null}
         >
-          <div className={styles.queuedIdentity}>
+          <div className={styles.queuedHeader}>
             <strong>{operation ? "Applying route…" : "Queued changes"}</strong>
-            <span
-              title={`${nextSource?.name ?? "Choose input"} → ${nextServer?.name ?? "Choose server"} / ${nextRoom?.name ?? "Choose room"}`}
-            >
-              {queued.sourceId !== selection.sourceId
-                ? `${nextSource?.name ?? "Choose input"} · `
-                : ""}
-              {queued.serverId !== selection.serverId ||
-              queued.channelId !== selection.channelId
-                ? `${nextServer?.name ?? "Choose server"} / ${nextRoom?.name ?? "Choose room"}`
-                : "Input selection"}
-            </span>
+            <div className={styles.pendingActions}>
+              <Button
+                size="compact-sm"
+                disabled={!routeValid || locked}
+                onClick={() => {
+                  if (!draft || !snapshot) return;
+                  void adapter
+                    .applyRoute(draft, locksRoute(snapshot))
+                    .then((applied) => {
+                      if (applied) setDraft(null);
+                    });
+                }}
+              >
+                {active ? "Apply & reconnect" : "Apply selection"}
+              </Button>
+              <Button
+                variant="subtle"
+                size="compact-sm"
+                disabled={Boolean(operation)}
+                onClick={() => {
+                  setDraft(null);
+                  adapter.dismissError();
+                }}
+              >
+                Discard
+              </Button>
+            </div>
           </div>
-          <div className={styles.pendingActions}>
-            <Button
-              size="compact-sm"
-              disabled={!routeValid || locked}
-              onClick={() => {
-                if (!draft || !snapshot) return;
-                void adapter
-                  .applyRoute(draft, locksRoute(snapshot))
-                  .then((applied) => {
-                    if (applied) setDraft(null);
-                  });
-              }}
-            >
-              {active ? "Apply & reconnect" : "Apply selection"}
-            </Button>
-            <Button
-              variant="subtle"
-              size="compact-sm"
-              disabled={Boolean(operation)}
-              onClick={() => {
-                setDraft(null);
-                adapter.dismissError();
-              }}
-            >
-              Discard
-            </Button>
-          </div>
+          <dl className={styles.queuedChanges}>
+            {routeChanges.map(({ field, confirmed, queued: proposed }) => (
+              <div key={field}>
+                <dt>{field}</dt>
+                <dd>
+                  <span
+                    className={`${styles.queuedValue} ${styles.confirmedValue}`}
+                    title={`Confirmed ${field.toLowerCase()}: ${confirmed}`}
+                  >
+                    <span className={styles.semanticMeter}>Confirmed: </span>
+                    {confirmed}
+                  </span>
+                  <Icon name="arrow" className={styles.queuedArrow} />
+                  <span
+                    className={styles.queuedValue}
+                    title={`Queued ${field.toLowerCase()}: ${proposed}`}
+                  >
+                    <span className={styles.semanticMeter}>Queued: </span>
+                    {proposed}
+                  </span>
+                </dd>
+              </div>
+            ))}
+          </dl>
         </section>
       )}
       <section className={styles.transport} aria-label="Session controls">
@@ -462,44 +572,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           {transportLabel}
         </Button>
       </section>
-      {drawer && (
+      {(drawer === "bot" || drawer === "details") && (
         <Sheet
-          name={drawer}
           title={
             {
-              source: "Recording inputs",
-              target: "Discord rooms",
               bot: "Bot settings",
               details: "Audio details",
             }[drawer]
           }
           close={close}
         >
-          {drawer === "source" && snapshot && (
-            <SourcePicker
-              snapshot={snapshot}
-              draft={queued}
-              busy={locked || catalogBusy}
-              refresh={() => void adapter.dispatch({ type: "refresh-catalog" })}
-              choose={(sourceId) => {
-                setDraft({ ...queued, sourceId });
-                close();
-              }}
-            />
-          )}
-          {drawer === "target" && snapshot && (
-            <RoomPicker
-              snapshot={snapshot}
-              draft={queued}
-              busy={locked || catalogBusy}
-              refresh={() => void adapter.dispatch({ type: "refresh-catalog" })}
-              setup={() => setDrawer("bot")}
-              choose={(serverId, channelId) => {
-                setDraft({ ...queued, serverId, channelId });
-                close();
-              }}
-            />
-          )}
           {drawer === "bot" && (
             <BotSetup adapter={adapter} view={view} close={close} />
           )}

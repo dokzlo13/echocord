@@ -1,5 +1,6 @@
 export function Icon({
   name,
+  className,
 }: {
   name:
     | "settings"
@@ -9,7 +10,9 @@ export function Icon({
     | "bridge"
     | "search"
     | "chevron"
+    | "arrow"
     | "close";
+  className?: string | undefined;
 }) {
   const paths = {
     settings:
@@ -21,9 +24,11 @@ export function Icon({
     search: "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0M15 15l6 6",
     close: "M6 6l12 12M18 6L6 18",
     chevron: "M9 5l7 7-7 7",
+    arrow: "M4 12h16M14 6l6 6-6 6",
   };
   return (
     <svg
+      className={className}
       width="18"
       height="18"
       viewBox="0 0 24 24"

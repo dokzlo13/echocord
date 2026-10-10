@@ -250,6 +250,9 @@ test("drawers preserve transport, keyboard focus, empty search and Escape return
   await expect(
     page.getByRole("button", { name: "Mute output" }),
   ).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Mute output" })).toBeFocused();
+  await opener.click();
   await page.keyboard.press("Escape");
   await page.clock.runFor(50);
   await expect(opener).toBeFocused();
@@ -261,6 +264,372 @@ test("drawers preserve transport, keyboard focus, empty search and Escape return
   await page.clock.runFor(500);
   await expect(page.getByTestId("connection-status")).toHaveText(
     "Disconnected",
+  );
+});
+
+for (const width of [480, 420]) {
+  test(`compact pickers preserve hierarchy, list-only scroll, focus and transport at ${width}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: width === 480 ? 600 : 540 });
+    await page.goto("/tests/harness.html");
+    await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+    await page.evaluate(() => {
+      const snapshot = window.uiHarness.snapshot();
+      window.uiHarness.emit({
+        servers: snapshot.servers.map((server, index) => ({
+          ...server,
+          channels: [
+            {
+              id: `duplicate-${index}`,
+              name: "Session room",
+              categoryName: "Game night",
+              position: -1,
+            },
+            ...server.channels,
+            ...Array.from({ length: 12 }, (_, room) => ({
+              id: `extra-${index}-${room}`,
+              name: `Extra room ${room}`,
+              categoryName: "Other rooms",
+              position: room + 2,
+            })),
+          ],
+        })),
+      });
+    });
+    const opener = page.getByRole("button", {
+      name: "Change room",
+      exact: true,
+    });
+    await opener.click();
+    const picker = page.getByRole("dialog", { name: "Discord rooms" });
+    await expect(opener).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByLabel("Search servers and rooms")).toBeFocused();
+    await expect(picker).toHaveAttribute("aria-modal", "false");
+    const metrics = await picker.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const transport = document
+        .querySelector('[aria-label="Session controls"]')
+        ?.getBoundingClientRect();
+      const scrollable = [...element.querySelectorAll("*")].filter(
+        (node) =>
+          ["auto", "scroll"].includes(getComputedStyle(node).overflowY) &&
+          node.scrollHeight > node.clientHeight + 1,
+      );
+      return {
+        width: box.width,
+        height: box.height,
+        top: box.top,
+        bottom: box.bottom,
+        transportTop: transport?.top ?? 0,
+        scrollable: scrollable.map((node) => node.className),
+      };
+    });
+    expect(metrics.width).toBeLessThanOrEqual(344);
+    expect(metrics.height).toBeLessThanOrEqual(368);
+    expect(metrics.top).toBeGreaterThanOrEqual(8);
+    expect(metrics.bottom).toBeLessThan(metrics.transportTop);
+    expect(metrics.scrollable).toHaveLength(1);
+    expect(metrics.scrollable[0]).toContain("drawerList");
+    await expect(
+      page.getByRole("button", { name: "Refresh rooms" }),
+    ).toBeInViewport({ ratio: 1 });
+    await page.getByLabel("Search servers and rooms").fill("Session room");
+    for (const server of ["The Sunday Table", "One-shot Club"]) {
+      const group = picker.getByRole("region", { name: server, exact: true });
+      await expect(
+        group.getByRole("heading", { name: "Game night" }),
+      ).toBeVisible();
+      await expect(
+        group.getByRole("button", { name: /Session room/ }).first(),
+      ).toHaveAttribute("aria-description", `${server}, Game night`);
+    }
+    const room = picker
+      .getByRole("region", { name: "One-shot Club", exact: true })
+      .getByRole("button", { name: "Session room", exact: true });
+    await room.focus();
+    await room.press("Enter");
+    await expect(
+      page.getByRole("region", { name: "Queued route" }),
+    ).toContainText("One-shot Club");
+    await expect(page.getByTestId("destination")).toContainText(
+      "The Sunday Table",
+    );
+    await expect(opener).toBeFocused();
+    await opener.click();
+    await expect(
+      picker
+        .getByRole("region", { name: "One-shot Club", exact: true })
+        .getByRole("button", { name: "Session room Queued", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
+    // The last choice in this server is followed by disabled refresh, then live transport.
+    await picker
+      .getByRole("button", { name: "Extra room 11", exact: true })
+      .last()
+      .focus();
+    await page.keyboard.press("Tab");
+    // Chromium's portal-to-document wrap can briefly focus the document itself.
+    for (
+      let step = 0;
+      step < 2 &&
+      !(await page
+        .getByRole("button", { name: "Mute output" })
+        .evaluate((element) => element === document.activeElement));
+      step++
+    )
+      await page.keyboard.press("Tab");
+    await expect(
+      page.getByRole("button", { name: "Mute output" }),
+    ).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(picker).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await page
+      .getByRole("button", { name: "Change input", exact: true })
+      .click();
+    const sourcePicker = page.getByRole("dialog", { name: "Recording inputs" });
+    await expect(page.getByLabel("Search recording inputs")).toBeFocused();
+    await expect(
+      sourcePicker.getByRole("button", { name: /CABLE Output/ }),
+    ).toBeVisible();
+    const fullSourceHeight = await sourcePicker.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    expect(fullSourceHeight).toBeLessThan(340);
+    await page.getByLabel("Search recording inputs").fill("CABLE-B");
+    const filteredSourceHeight = await sourcePicker.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    expect(filteredSourceHeight).toBeLessThan(fullSourceHeight - 40);
+    await sourcePicker
+      .getByRole("button", { name: "Close recording inputs" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Change input", exact: true }),
+    ).toBeFocused();
+  });
+}
+
+test("queued fields show confirmed and proposed values, distinguish duplicate rooms and reconcile partial apply", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 420, height: 540 });
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await stageSource(page);
+  const queue = page.getByRole("region", { name: "Queued route" });
+  await expect(queue.locator("dt")).toHaveText(["Input"]);
+  await expect(queue.locator("dd")).toHaveText(
+    "Confirmed: CABLE Output (VB-Audio Virtual Cable)Queued: CABLE-B Output",
+  );
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
+  await page.evaluate(() => {
+    const snapshot = window.uiHarness.snapshot();
+    window.uiHarness.emit({
+      servers: snapshot.servers.map((server, index) =>
+        index === 1
+          ? {
+              ...server,
+              channels: [
+                {
+                  id: "other-session",
+                  name: "Session room",
+                  categoryName: "Game night",
+                  position: 0,
+                },
+              ],
+            }
+          : server,
+      ),
+      connection: {
+        phase: "error",
+        code: "permission-denied",
+        message: "Synthetic room permission failure",
+      },
+    });
+  });
+  await stageSource(page);
+  await page.getByRole("button", { name: "Change room", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("region", { name: "One-shot Club", exact: true })
+    .getByRole("button", { name: "Session room", exact: true })
+    .click();
+  await expect(queue.locator("dt")).toHaveText(["Input", "Server", "Room"]);
+  await expect(queue.locator("dd").nth(1)).toHaveText(
+    "Confirmed: The Sunday TableQueued: One-shot Club",
+  );
+  await expect(queue.locator("dd").nth(2)).toHaveText(
+    "Confirmed: Session roomQueued: Session room",
+  );
+  await fit(page);
+  const gaps = await page.evaluate(() => {
+    const endTick = [...document.querySelectorAll(".mantine-Slider-markLabel")]
+      .find((element) => element.textContent === "100")
+      ?.getBoundingClientRect();
+    const readout = document
+      .querySelector('[data-testid="mix-level"]')
+      ?.getBoundingClientRect();
+    const fields = [
+      ...document.querySelectorAll('[aria-label="Queued route"] dl > div'),
+    ].map((row) => {
+      const label = row.querySelector("dt")?.getBoundingClientRect();
+      const values = row.querySelector("dd")?.getBoundingClientRect();
+      return (values?.left ?? 0) - (label?.right ?? 0);
+    });
+    return { meter: (readout?.left ?? 0) - (endTick?.right ?? 0), fields };
+  });
+  expect(gaps.meter).toBeGreaterThanOrEqual(4);
+  expect(gaps.fields.every((gap) => gap >= 5)).toBe(true);
+  await page.evaluate(() => {
+    window.uiHarness.rejectDestination = true;
+  });
+  await page
+    .getByRole("button", { name: "Apply selection", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Route change incomplete",
+  );
+  await expect(queue.locator("dt")).toHaveText(["Server", "Room"]);
+  await expect(page.getByTestId("route-surface")).toContainText(
+    "CABLE-B Output",
+  );
+  await fit(page);
+});
+
+test("meter targets keep exact readings and bounded attack/release with immediate null, route, mute and visibility resets", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("connection-status")).toHaveText("Connected");
+  await page.clock.runFor(100);
+  const inputBar = page.getByTestId("input-bar");
+  const mixBar = page.getByTestId("mix-bar");
+  const duration = (stage: "input" | "mix") =>
+    page
+      .getByTestId(`${stage}-bar`)
+      .evaluate((element) => (element as HTMLElement).style.transitionDuration);
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: -3,
+        outputLevelDbfs: -6,
+      },
+    }),
+  );
+  await page.clock.runFor(50);
+  await expect(page.getByTestId("input-level")).toHaveText("-3.0 dBFS");
+  await expect(
+    page.getByRole("meter", { name: "Input peak before gain" }),
+  ).toHaveJSProperty("value", -3);
+  expect(await duration("input")).toBe("80ms");
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: -96,
+        outputLevelDbfs: -96,
+      },
+    }),
+  );
+  await page.clock.runFor(50);
+  await expect(page.getByTestId("input-level")).toHaveText("Silent");
+  expect(await duration("input")).toBe("180ms");
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: null,
+        outputLevelDbfs: null,
+      },
+    }),
+  );
+  await page.clock.runFor(50);
+  expect(await duration("input")).toBe("0ms");
+  await expect(inputBar).toHaveCSS("transform", "matrix(1, 0, 0, 0, 0, 0)");
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      sessionId: 2,
+      capture: {
+        ...window.uiHarness.snapshot().capture,
+        levelDbfs: -18,
+        outputLevelDbfs: -24,
+      },
+    }),
+  );
+  await page.clock.runFor(50);
+  expect(await duration("input")).toBe("0ms");
+  await page.getByRole("button", { name: "Mute output" }).click();
+  await page.clock.runFor(50);
+  await expect(page.getByTestId("input-level")).toHaveText("-18.0 dBFS");
+  await expect(page.getByTestId("mix-level")).toHaveText("Silent");
+  expect(await duration("mix")).toBe("0ms");
+  await expect(mixBar).toHaveCSS("transform", "matrix(1, 0, 0, 0, 0, 0)");
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      capture: { ...window.uiHarness.snapshot().capture, levelDbfs: -6 },
+    }),
+  );
+  await page.clock.runFor(50);
+  expect(await duration("input")).toBe("80ms");
+  await page.evaluate(() => window.uiHarness.visible(false));
+  expect(await duration("input")).toBe("0ms");
+  await page.evaluate(() =>
+    window.uiHarness.emit({
+      capture: { ...window.uiHarness.snapshot().capture, levelDbfs: -45 },
+    }),
+  );
+  await page.clock.runFor(250);
+  await expect(page.getByTestId("input-level")).toHaveText("-6.0 dBFS");
+  await page.evaluate(() => window.uiHarness.visible(true));
+  await expect(page.getByTestId("input-level")).toHaveText("-45.0 dBFS");
+  expect(await duration("input")).toBe("0ms");
+  // Native/browser reduced motion suppresses visual interpolation without changing text.
+  expect(
+    await inputBar.evaluate((element) =>
+      Number.parseFloat(getComputedStyle(element).transitionDuration),
+    ),
+  ).toBeLessThanOrEqual(0.00001);
+  await page.getByRole("button", { name: "Stop", exact: true }).click();
+  await expect(page.getByTestId("input-level")).toHaveText("No level");
+  expect(await duration("input")).toBe("0ms");
+});
+
+test("CSS release moves only the visual bar between exact observations", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/tests/harness.html");
+  await expect(page.getByTestId("input-level")).toHaveText("-21.0 dBFS");
+  const result = await page.evaluate(async () => {
+    const bar = document.querySelector('[data-testid="input-bar"]');
+    if (!bar) throw new Error("Missing input bar");
+    const start = new DOMMatrix(getComputedStyle(bar).transform).m22;
+    window.uiHarness.emit({
+      capture: { ...window.uiHarness.snapshot().capture, levelDbfs: -60 },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 55));
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    return {
+      start,
+      moving: new DOMMatrix(getComputedStyle(bar).transform).m22,
+      text: document.querySelector('[data-testid="input-level"]')?.textContent,
+      semantic: document.querySelector<HTMLMeterElement>(
+        'meter[aria-label="Input peak before gain"]',
+      )?.value,
+    };
+  });
+  expect(result.moving).toBeGreaterThan(0);
+  expect(result.moving).toBeLessThan(result.start);
+  expect(result.text).toBe("-60.0 dBFS");
+  expect(result.semantic).toBe(-60);
+  await expect(page.getByTestId("input-bar")).toHaveCSS(
+    "transform",
+    "matrix(1, 0, 0, 0, 0, 0)",
   );
 });
 

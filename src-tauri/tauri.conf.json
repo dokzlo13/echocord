@@ -12,11 +12,14 @@
       {
         "label": "main",
         "title": "Echocord",
-        "width": 480,
-        "height": 600,
+        "width": 440,
+        "height": 640,
         "minWidth": 420,
-        "minHeight": 540,
-        "backgroundColor": "#242e36",
+        "minHeight": 420,
+        "decorations": false,
+        "maximizable": false,
+        "shadow": true,
+        "backgroundColor": "#1d2226",
         "theme": "Dark",
         "center": true
       }

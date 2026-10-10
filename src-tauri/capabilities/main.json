@@ -1,6 +1,12 @@
 {
   "identifier": "main-events",
-  "description": "Subscribe to sanitized controller snapshots and presentation visibility in the main window.",
+  "description": "Subscribe to sanitized telemetry and operate the main window's approved custom title bar.",
   "windows": ["main"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-start-dragging"
+  ]
 }

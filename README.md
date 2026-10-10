@@ -1,8 +1,10 @@
 # Echocord
 
-A small Windows audio-to-Discord utility. The first release replaces Kenku.fm in an existing VB-Cable setup.
+A small Windows audio-to-Discord utility. Capture a selected application's audio directly, or keep using an existing recording device such as VB-Cable, and send it to one Discord bot/channel.
 
-`Browser → VB-Cable playback → VB-Cable recording → Echocord → Discord`
+`Selected application or recording input → Echocord → Discord`
+
+Application capture uses the selected process and its children, which can include other browser tabs/windows. Original local playback continues; independent local mute and an owned virtual audio driver are not included. Recording-device capture remains available for isolated cable routing.
 
 Development, source, Git history, and agent worktrees live in WSL. Windows runs the built application and real audio tests.
 
@@ -18,4 +20,4 @@ Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md), and the [task board
 
 Use `make help` for build, check, and UI-preview commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Status: local Windows build with the accepted compact UI, encrypted in-app setup and isolated metering. The initial audio/Discord route passed user testing; longer-session acceptance remains open. It starts disconnected; capture and voice joining require an explicit Connect action. See [first test](docs/FIRST-TEST.md).
+Status: a manually testable Windows build with native application capture, compact source/room pickers, clear queued edits, encrypted in-app setup and measured meters. Native tests cover application/browser isolation and lifecycle; the earlier recording-to-Discord route passed owner testing. New app-to-Discord listening and longer-session acceptance remain open. The app starts disconnected; capture and voice joining require explicit Connect. See [manual test flow](docs/FIRST-TEST.md).

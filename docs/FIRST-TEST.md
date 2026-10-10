@@ -35,7 +35,7 @@ The On air badge and native output meter do not prove listener receipt. Gateway 
 
 ## Restore, window and tray
 
-Restore setup defaults on. On relaunch, recording inputs reopen, application cards wait for one explicit Capture against their saved process identity, and the room returns idle. If that app instance ended, refresh and pick the current instance. No app-name or reused-PID match occurs automatically. The older single-source release did not persist application selection, so an upgrade can restore room/output preferences without an app card; add that application once to save a mixing-era card. Disabling restore starts with empty cards. Gain/mute, meter style and tray preferences persist.
+Restore setup defaults on. On relaunch, recording inputs reopen, application cards wait for one explicit Capture against their saved process identity, and the room returns idle. If that app instance ended, refresh and pick the current instance. No app-name or reused-PID match occurs automatically. The older single-source release cleared application selection on startup and stored no application cards, so an upgrade can restore room/output preferences without an app card; add that application once to save a mixing-era card. Disabling restore starts with empty cards. Gain/mute, meter style and tray preferences persist.
 
 The window defaults to 440×640, supports a 420×420 minimum and remembers size. Full-window pickers and separate card lists scroll; the document does not. Test native drag/minimize/resize and keyboard focus at the intended display scaling.
 

@@ -14,6 +14,8 @@ EC-030–033 are integrated and independently reviewed. Four total destinations 
 2. **EC-035:** bounded proof and reviewed design for a Discord room as one aggregate participant-audio source. EC-034 established a feasible receive seam and identified encryption, packet timing, resource and feedback constraints. Per-participant mute follows later; no room-source control ships yet.
 3. **EC-006:** coordinated live delivery, recovery/resource/latency measurements and five-hour acceptance. Earlier source/playback native observations and owner listening feedback do not close these new-room gates.
 
+Also queued for the next session: **EC-040**, consistent card/jump numbering for both sections, with the owner's proposed hide-when-single/reveal-when-multiple presentation. It does not expand the current closing pass or displace EC-035's priority.
+
 Original application playback remains an OS route; independent local mute, desktop capture and a new virtual driver are outside the release. The approved UI and original owner/prototype artifacts are preserved. Current behavior and exact validation boundaries are in STATE and the task records.
 
 | ID | Task | State | Depends on | Owner / attempt | Branch | Evidence |
@@ -57,5 +59,6 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-037 | Idle/capture audio interference investigation | active | owner feedback, EC-033 | native worker / a1 | agent/EC-037-a1 | [task](EC-037.md) |
 | EC-038 | Independent session-close review | active | EC-036/037 checkpoints | reviewer / r1 | read-only | [task](EC-038.md) |
 | EC-039 | Minor fixes and session close | active | EC-036/037/038 | coordinator / a1 | main | [task](EC-039.md) |
+| EC-040 | Consistent progressive card/jump numbering | ready | owner next-session feedback | unassigned | — | [task](EC-040.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

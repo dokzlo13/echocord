@@ -1,11 +1,21 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceKind {
+    #[default]
+    Recording,
+    Application,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RecordingSource {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: SourceKind,
     pub available: bool,
     pub detail: Option<String>,
 }
@@ -53,13 +63,16 @@ pub struct BotProfile {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
 #[serde(tag = "phase", rename_all = "kebab-case")]
 pub enum Discovery {
+    #[default]
     Idle,
     Loading,
     Ready,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
@@ -178,6 +191,8 @@ pub struct ControlSnapshot {
     pub selection: Selection,
     pub bot: BotProfile,
     pub discovery: Discovery,
+    #[serde(default)]
+    pub source_discovery: Discovery,
     pub connection: Connection,
     pub capture: Capture,
     pub output: Output,
@@ -197,6 +212,7 @@ impl Default for ControlSnapshot {
                 message: None,
             },
             discovery: Discovery::Idle,
+            source_discovery: Discovery::Idle,
             connection: Connection::Disconnected,
             capture: Capture {
                 phase: CapturePhase::Stopped,
@@ -222,6 +238,7 @@ impl Default for ControlSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum ControlCommand {
+    RefreshSources,
     RefreshCatalog,
     RecheckConfiguration,
     SelectSource {
@@ -244,6 +261,7 @@ pub enum ControlCommand {
 pub fn typescript_contract() -> String {
     let config = ts_rs::Config::default();
     let declarations = [
+        SourceKind::decl(&config),
         RecordingSource::decl(&config),
         VoiceChannel::decl(&config),
         Server::decl(&config),
@@ -273,6 +291,19 @@ pub fn typescript_contract() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_source_descriptors_default_to_recording() {
+        let source: RecordingSource = serde_json::from_str(
+            r#"{"id":"recording","name":"Recording","available":true,"detail":null}"#,
+        )
+        .unwrap();
+        assert_eq!(source.kind, SourceKind::Recording);
+        assert_eq!(
+            serde_json::to_value(ControlCommand::RefreshSources).unwrap()["type"],
+            "refresh-sources"
+        );
+    }
 
     #[test]
     fn command_wire_format_preserves_large_discord_ids_as_strings() {

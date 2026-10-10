@@ -730,6 +730,7 @@ mod windows {
             sources.push(RecordingSource {
                 id,
                 name,
+                kind: crate::model::SourceKind::Recording,
                 available,
                 detail,
             });

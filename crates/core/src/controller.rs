@@ -50,6 +50,7 @@ enum Request {
     Shutdown(oneshot::Sender<Result<(), AppError>>),
 }
 enum Event {
+    Sources(u64, Result<Vec<RecordingSource>, AppError>),
     Catalog(u64, Result<Catalog, AppError>),
     Unconfigured(u64),
     Configured(u64, Result<(), AppError>),
@@ -215,7 +216,6 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
 }
 
 struct Catalog {
-    sources: Vec<RecordingSource>,
     servers: Vec<Server>,
     name: String,
 }
@@ -299,6 +299,7 @@ struct Actor {
     snapshots: watch::Sender<ControlSnapshot>,
     events: mpsc::Sender<Event>,
     catalog_epoch: u64,
+    source_epoch: u64,
     child: Option<ChildControl>,
     pending: bool,
     preflight: Option<tokio::task::JoinHandle<()>>,
@@ -324,6 +325,7 @@ impl Actor {
             snapshots,
             events,
             catalog_epoch: 0,
+            source_epoch: 0,
             child: None,
             pending: false,
             preflight: None,
@@ -424,6 +426,7 @@ impl Actor {
         // can succeed; the shell separately owns its three-second Quit fallback.
     }
     fn refresh(&mut self) {
+        self.refresh_sources();
         self.retired = None;
         self.catalog_epoch = self.catalog_epoch.wrapping_add(1);
         let epoch = self.catalog_epoch;
@@ -457,6 +460,32 @@ impl Actor {
             let _ = events.send(event).await;
         });
     }
+    fn refresh_sources(&mut self) {
+        if matches!(self.snapshot.source_discovery, Discovery::Loading) {
+            return;
+        }
+        self.source_epoch = self.source_epoch.wrapping_add(1);
+        let epoch = self.source_epoch;
+        self.snapshot.source_discovery = Discovery::Loading;
+        self.publish();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::task::spawn_blocking(crate::audio::enumerate_sources),
+            )
+            .await
+            .map_err(|_| {
+                error(
+                    ErrorCode::CaptureFailed,
+                    "Audio source discovery timed out.",
+                )
+            })
+            .and_then(|result| result.map_err(|_| unavailable()))
+            .and_then(|result| result);
+            let _ = events.send(Event::Sources(epoch, result)).await;
+        });
+    }
     fn poll_deadline(&mut self) {
         if self.deadline.is_some_and(|d| Instant::now() >= d)
             && !matches!(
@@ -469,6 +498,10 @@ impl Actor {
     }
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
+            ControlCommand::RefreshSources => {
+                self.refresh_sources();
+                return Ok(());
+            }
             ControlCommand::RefreshCatalog | ControlCommand::RecheckConfiguration => {
                 if self.snapshot.connection.locks_route() || self.configuration.is_some() {
                     return Err(busy());
@@ -796,6 +829,40 @@ impl Actor {
     }
     fn event(&mut self, event: Event) {
         match event {
+            Event::Sources(epoch, result) => {
+                if epoch != self.source_epoch || self.shutting_down {
+                    return;
+                }
+                match result {
+                    Ok(mut sources) => {
+                        // Keep the confirmed descriptor when its live root exits.
+                        // Refresh never changes the selected/active route.
+                        if let Some(selected) = self.snapshot.selection.source_id.as_ref()
+                            && !sources.iter().any(|source| &source.id == selected)
+                            && let Some(mut previous) = self
+                                .snapshot
+                                .sources
+                                .iter()
+                                .find(|source| &source.id == selected)
+                                .cloned()
+                        {
+                            previous.available = false;
+                            previous.detail = Some(
+                                "No longer available. Refresh and select a running source.".into(),
+                            );
+                            sources.push(previous);
+                        }
+                        self.snapshot.sources = sources;
+                        self.snapshot.source_discovery = Discovery::Ready;
+                    }
+                    Err(error) => {
+                        self.snapshot.source_discovery = Discovery::Error {
+                            message: error.message,
+                        };
+                    }
+                }
+                self.publish();
+            }
             Event::Unconfigured(epoch) => {
                 if epoch != self.catalog_epoch || self.shutting_down {
                     return;
@@ -856,7 +923,6 @@ impl Actor {
                 }
                 match result {
                     Ok(catalog) => {
-                        self.snapshot.sources = catalog.sources;
                         self.snapshot.servers = catalog.servers;
                         self.snapshot.bot = BotProfile {
                             status: BotStatus::Ready,
@@ -1528,11 +1594,9 @@ async fn start_limit(
 async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
     use serenity::{http::GuildPagination, model::channel::ChannelType};
     let config = config.clone();
-    let (sources, http) = tokio::task::spawn_blocking(move || {
-        Ok::<_, AppError>((crate::audio::enumerate_sources()?, http(&config)?))
-    })
-    .await
-    .map_err(|_| unavailable())??;
+    let http = tokio::task::spawn_blocking(move || http(&config))
+        .await
+        .map_err(|_| unavailable())??;
     let user = http.get_current_user().await.map_err(rest_error)?;
     if !user.bot {
         return Err(Failure::Authentication.error());
@@ -1574,7 +1638,6 @@ async fn discover(config: &ControllerConfig) -> Result<Catalog, AppError> {
         after = guilds.last().map(|g| g.id);
         if complete {
             return Ok(Catalog {
-                sources,
                 servers,
                 name: user.name.clone(),
             });
@@ -1618,6 +1681,7 @@ mod tests {
         actor.snapshot.sources.push(RecordingSource {
             id: "recording".into(),
             name: "Recording".into(),
+            kind: SourceKind::Recording,
             available: true,
             detail: None,
         });
@@ -1641,6 +1705,29 @@ mod tests {
         actor.snapshot.discovery = Discovery::Ready;
         actor.snapshot.session_id = 4;
         actor
+    }
+
+    #[test]
+    fn source_discovery_is_independent_and_preserves_selected_descriptor() {
+        let mut a = actor();
+        a.source_epoch = 7;
+        let selected = a.snapshot.selection.clone();
+        let bot = a.snapshot.bot.clone();
+        a.event(Event::Sources(6, Ok(Vec::new())));
+        assert!(a.snapshot.sources[0].available);
+        a.event(Event::Sources(7, Ok(Vec::new())));
+        assert_eq!(a.snapshot.sources.len(), 1);
+        assert!(!a.snapshot.sources[0].available);
+        assert_eq!(a.snapshot.selection, selected);
+        assert_eq!(a.snapshot.bot, bot);
+        assert_eq!(a.snapshot.source_discovery, Discovery::Ready);
+        let sources = a.snapshot.sources.clone();
+        a.event(Event::Sources(7, Err(Failure::Capture.error())));
+        assert_eq!(a.snapshot.sources, sources);
+        assert!(matches!(
+            a.snapshot.source_discovery,
+            Discovery::Error { .. }
+        ));
     }
     fn running_actor(mut actor: Actor) -> (Controller, mpsc::Sender<Event>) {
         let (events, event_rx) = mpsc::channel(32);
@@ -1894,7 +1981,6 @@ mod tests {
         let previous = a.snapshot.bot.clone();
         let stale_epoch = a.catalog_epoch;
         let stale_catalog = Catalog {
-            sources: a.snapshot.sources.clone(),
             servers: a.snapshot.servers.clone(),
             name: "Stale bot".into(),
         };
@@ -2625,7 +2711,6 @@ mod tests {
         a.event(Event::Exited(4, false));
         a.refresh();
         let catalog = Catalog {
-            sources: a.snapshot.sources.clone(),
             servers: a.snapshot.servers.clone(),
             name: "Rechecked Bot".into(),
         };
@@ -2798,7 +2883,6 @@ mod tests {
         let mut a = actor();
         a.preferences_error = Some(Failure::Configuration.error());
         let catalog = Catalog {
-            sources: a.snapshot.sources.clone(),
             servers: a.snapshot.servers.clone(),
             name: "Bot".into(),
         };

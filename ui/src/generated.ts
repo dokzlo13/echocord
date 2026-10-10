@@ -1,5 +1,6 @@
 // Generated from Rust model types. Do not edit by hand.
-export type RecordingSource = { id: string, name: string, available: boolean, detail: string | null, };
+export type SourceKind = "recording" | "application";
+export type RecordingSource = { id: string, name: string, kind: SourceKind, available: boolean, detail: string | null, };
 export type VoiceChannel = { id: string, name: string, categoryName: string | null, position: number, };
 export type Server = { id: string, name: string, iconUrl: string | null, channels: Array<VoiceChannel>, };
 export type Selection = { sourceId: string | null, serverId: string | null, channelId: string | null, };
@@ -13,5 +14,5 @@ export type Connection = { "phase": "disconnected" } | { "phase": "connecting", 
 export type CapturePhase = "stopped" | "opening" | "running" | "missing" | "error";
 export type Capture = { phase: CapturePhase, levelDbfs: number | null, outputLevelDbfs: number | null, message: string | null, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
 export type Output = { volumePercent: number, muted: boolean, };
-export type ControlSnapshot = { revision: number, sessionId: number, sources: Array<RecordingSource>, servers: Array<Server>, selection: Selection, bot: BotProfile, discovery: Discovery, connection: Connection, capture: Capture, output: Output, };
-export type ControlCommand = { "type": "refresh-catalog" } | { "type": "recheck-configuration" } | { "type": "select-source", sourceId: string, } | { "type": "select-destination", serverId: string, channelId: string | null, } | { "type": "connect" } | { "type": "disconnect" } | { "type": "set-volume", percent: number, } | { "type": "set-muted", muted: boolean, };
+export type ControlSnapshot = { revision: number, sessionId: number, sources: Array<RecordingSource>, servers: Array<Server>, selection: Selection, bot: BotProfile, discovery: Discovery, sourceDiscovery: Discovery, connection: Connection, capture: Capture, output: Output, };
+export type ControlCommand = { "type": "refresh-sources" } | { "type": "refresh-catalog" } | { "type": "recheck-configuration" } | { "type": "select-source", sourceId: string, } | { "type": "select-destination", serverId: string, channelId: string | null, } | { "type": "connect" } | { "type": "disconnect" } | { "type": "set-volume", percent: number, } | { "type": "set-muted", muted: boolean, };

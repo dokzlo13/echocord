@@ -4,6 +4,8 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 ## Delivered multiple-room epoch
 
+Active bounded closeout: EC-036 fixes joining progress presentation, EC-037 investigates possible Firefox/idle-capture interference, EC-038 reviews, and EC-039 integrates/closes. Owner confirms that multiple servers work. Discord-as-source implementation is explicitly deferred to the next session/agent and remains the main next priority.
+
 EC-030–033 are integrated and independently reviewed. Four total destinations can include multiple Discord rooms in distinct servers under the existing bot and at most three playback devices. Controls, reservations, cleanup and histories are independent; all outputs restore idle. Final integrated checks passed 120 portable library, nine probe, 132 Windows library and 111 UI checks plus staged build/native shell/worker gates. The native empty-source/four-room overlap is corrected and verified at 125% scaling. Live cross-server listening remains unmeasured.
 
 ## Next pickup order
@@ -51,5 +53,9 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-033 | Multiple-room integration | done | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md); staged release activated and app open |
 | EC-034 | Discord room source feasibility research | done | owner next-priority request | research worker / r1; coordinator verification | read-only | [task](EC-034.md); no receive implementation/live proof |
 | EC-035 | Discord room source proof and lifecycle design | ready | EC-033 delivery, EC-034 | unassigned | — | [task](EC-035.md) |
+| EC-036 | Joining progress presentation | active | owner feedback, EC-033 | UI worker / a1 | agent/EC-036-a1 | [task](EC-036.md) |
+| EC-037 | Idle/capture audio interference investigation | active | owner feedback, EC-033 | native worker / a1 | agent/EC-037-a1 | [task](EC-037.md) |
+| EC-038 | Independent session-close review | active | EC-036/037 checkpoints | reviewer / r1 | read-only | [task](EC-038.md) |
+| EC-039 | Minor fixes and session close | active | EC-036/037/038 | coordinator / a1 | main | [task](EC-039.md) |
 
 Blocked here means an explicit task dependency, not a stalled runtime goal.

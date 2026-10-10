@@ -150,6 +150,7 @@ fn main() {
         .filter(|mode| mode == "--gateway-worker" || mode == "--voice-worker")
     {
         let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()
             .expect("worker runtime");
@@ -163,6 +164,7 @@ fn main() {
         // The parent observes actual process exit; library task cancellation alone is insufficient.
         std::process::exit(if result.is_ok() { 0 } else { 1 });
     }
+    #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("--audio-worker") {
         let result = std::env::args()
             .nth(2)

@@ -5,7 +5,7 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import shlex
@@ -202,7 +202,6 @@ def core_check():
     version()
     if WINDOWS:
         build_environment()
-    run(sys.executable, "scripts/test_prepare_opus.py")
     run(
         sys.executable,
         "-m",
@@ -211,7 +210,7 @@ def core_check():
         "-s",
         "scripts",
         "-p",
-        "test_package_third_party.py",
+        "test_*.py",
     )
     run("cargo", "fmt", "--all", "--check")
     run(
@@ -331,6 +330,114 @@ def app_test():
     )
 
 
+def release_notes(changelog, release_version):
+    """Select the tagged version's user-facing changes, never Unreleased text."""
+    headings = list(re.finditer(r"(?m)^##[ \t]+([^\n]+)$", changelog))
+    matches = [
+        index
+        for index, heading in enumerate(headings)
+        if heading[1].split()[0].strip("[]") in (release_version, f"v{release_version}")
+    ]
+    if len(matches) != 1:
+        raise SystemExit(
+            f"CHANGELOG.md must contain exactly one version section for {release_version}"
+        )
+    index = matches[0]
+    end = headings[index + 1].start() if index + 1 < len(headings) else len(changelog)
+    changes = changelog[headings[index].end() : end].strip()
+    if not changes:
+        raise SystemExit(
+            f"CHANGELOG.md has an empty version section for {release_version}"
+        )
+    filename = f"echocord-{release_version}-windows-x64.zip"
+    sources = f"echocord-{release_version}-third-party-sources.zip"
+    return f"""# Echocord {release_version}
+
+{changes}
+
+## Download and setup
+
+Download **{filename}**, extract the complete ZIP, and run `echocord.exe` on Windows 11 x64. This early hobby release is unsigned and provided without guarantees.
+
+Install [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) and the [Visual C++ v14 x64 runtime](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist) if needed. See the [bot setup and usage guide](https://github.com/dokzlo13/echocord#readme) before connecting.
+
+Use `SHA256SUMS` to verify the release downloads. The application ZIP includes its MIT license and complete third-party notices. **{sources}** contains the corresponding covered third-party sources; retain those notices when redistributing.
+"""
+
+
+def validated_notices(release_version, source_archive):
+    """Reject incomplete or stale licensing output before assembling a release."""
+    generated = ROOT / "licenses/generated"
+    index = generated / "INDEX.md"
+    inventory_path = generated / "inventory.json"
+    if generated.is_symlink() or not generated.resolve().is_relative_to(ROOT.resolve()):
+        raise SystemExit("Generated notices must be inside this checkout")
+    for path in (index, inventory_path):
+        if not path.is_file() or path.is_symlink():
+            raise SystemExit(
+                "Missing generated license index or inventory; run scripts/package-third-party.py"
+            )
+    try:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        pinned_rust = tomllib.loads(
+            (ROOT / "rust-toolchain.toml").read_text(encoding="utf-8")
+        )["toolchain"]["channel"]
+        if (
+            inventory["schema"] != 1
+            or inventory["echocord_version"] != release_version
+            or inventory["target"] != TARGET
+            or inventory["rust_version"] != pinned_rust
+        ):
+            raise ValueError("version, toolchain or target differs")
+        for key, name in (
+            ("cargo_lock_sha256", "Cargo.lock"),
+            ("npm_lock_sha256", "ui/package-lock.json"),
+        ):
+            if inventory[key] != hashlib.sha256((ROOT / name).read_bytes()).hexdigest():
+                raise ValueError("lockfile changed since notice generation")
+        source = inventory["source_archive"]
+        if (
+            source["name"] != source_archive.name
+            or not source_archive.is_file()
+            or source_archive.is_symlink()
+            or source["sha256"]
+            != hashlib.sha256(source_archive.read_bytes()).hexdigest()
+        ):
+            raise ValueError("corresponding-source archive is missing or changed")
+        files = {index, inventory_path}
+        if not inventory["packages"]:
+            raise ValueError("dependency inventory is empty")
+        for package in inventory["packages"]:
+            if not package["notices"]:
+                raise ValueError("dependency has no indexed notices")
+            entries = package["notices"] + (
+                [package["attribution"]] if "attribution" in package else []
+            )
+            for entry in entries:
+                relative = PurePosixPath(entry["path"])
+                if (
+                    relative.is_absolute()
+                    or ".." in relative.parts
+                    or "\\" in entry["path"]
+                    or ":" in entry["path"]
+                ):
+                    raise ValueError("unsafe notice path")
+                path = generated / relative
+                if (
+                    not path.is_file()
+                    or path.is_symlink()
+                    or not path.resolve().is_relative_to(generated.resolve())
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != entry["sha256"]
+                ):
+                    raise ValueError("indexed notice is missing or changed")
+                files.add(path)
+        return sorted(files)
+    except (KeyError, TypeError, ValueError) as error:
+        raise SystemExit(
+            f"Release notices are invalid: {error}; run scripts/package-third-party.py"
+        ) from None
+
+
 def package(tag=None):
     release_version = version(tag)
     executable = TARGET_DIR / TARGET / "release/echocord.exe"
@@ -346,6 +453,9 @@ def package(tag=None):
             raise SystemExit(
                 f"Missing release input: {path.name}; build and prepare notices before packaging"
             )
+    notes = release_notes(
+        (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), release_version
+    )
     # Refuse accidental packaging of an old, unsanitized local executable.
     binary = executable.read_bytes()
     private_roots = {
@@ -360,28 +470,27 @@ def package(tag=None):
                     raise SystemExit(
                         "A local build path remains in the executable; rebuild with scripts/dev.py build before packaging"
                     )
-    licenses = ROOT / "licenses"
-    if not licenses.is_dir() or not any(licenses.rglob("*")):
-        raise SystemExit("Missing bundled third-party licenses/ directory")
     output = ROOT / "artifacts/release"
-    output.mkdir(parents=True, exist_ok=True)
     source_archive = output / f"echocord-{release_version}-third-party-sources.zip"
-    if not source_archive.is_file():
-        raise SystemExit(
-            "Missing corresponding-source ZIP; run scripts/package-third-party.py before packaging"
-        )
+    notice_files = validated_notices(release_version, source_archive)
     name = f"echocord-{release_version}-windows-x64"
     archive = output / f"{name}.zip"
+    notes_path = output / "RELEASE-NOTES.md"
+    notes_path.write_text(notes, encoding="utf-8", newline="\n")
     usage = """Echocord — stream local audio to Discord as a bot
 
 Extract the complete ZIP, then run echocord.exe. Windows 11 x64 is supported.
-Install Microsoft Edge WebView2 Evergreen Runtime and the Microsoft Visual C++
-v14 Redistributable (x64) if they are not installed:
+Install Microsoft Edge WebView2 Evergreen Runtime and the Visual C++ v14 x64
+runtime if they are not installed:
 https://developer.microsoft.com/microsoft-edge/webview2/
 https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
 
 This early hobby release is unsigned. No guarantees are given.
-Setup and usage: https://github.com/dokzlo13/echocord#readme
+Open the complete setup and usage guide online:
+https://github.com/dokzlo13/echocord#readme
+The bundled README is a source copy; its relative links/images use the online
+repository. Use the online guide for bot setup and permissions.
+
 App settings and the protected bot token are stored in your Windows user profile,
 not alongside the executable. Closing the window keeps it running in the tray
 by default; use the tray menu's Quit to exit.
@@ -393,29 +502,23 @@ See LICENSE, THIRD_PARTY_NOTICES.md and licenses/ for redistribution notices.
     ) as bundle:
         for path in required:
             bundle.write(path, f"{name}/{path.name}")
-        for path in sorted(licenses.rglob("*")):
-            if path.is_symlink():
-                raise SystemExit("Release license input must not be a symlink")
-            if path.is_file():
-                bundle.write(
-                    path, f"{name}/licenses/{path.relative_to(licenses).as_posix()}"
-                )
+        for path in notice_files:
+            bundle.write(path, f"{name}/{path.relative_to(ROOT).as_posix()}")
         bundle.writestr(f"{name}/START-HERE.txt", usage)
+        bundle.write(notes_path, f"{name}/RELEASE-NOTES.md")
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-    archive.with_suffix(".zip.sha256").write_text(
-        f"{checksum}  {archive.name}\n", encoding="utf-8"
+    checksum_path = archive.with_suffix(".zip.sha256")
+    checksum_path.write_text(
+        f"{checksum}  {archive.name}\n", encoding="utf-8", newline="\n"
     )
-    assets = [
-        path
-        for path in sorted(output.iterdir())
-        if path.is_file() and path.name != "SHA256SUMS"
-    ]
+    assets = sorted((archive, checksum_path, source_archive, notes_path))
     (output / "SHA256SUMS").write_text(
         "".join(
             f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
             for path in assets
         ),
         encoding="utf-8",
+        newline="\n",
     )
     print(f"Packaged {archive.name} and SHA-256 checksums in artifacts/release/")
 

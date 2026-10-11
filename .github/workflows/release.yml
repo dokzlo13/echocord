@@ -49,4 +49,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" artifacts/release/* --verify-tag --title "Echocord $RELEASE_TAG" --generate-notes
+        run: gh release create "$RELEASE_TAG" artifacts/release/* --verify-tag --title "Echocord $RELEASE_TAG" --notes-file artifacts/release/RELEASE-NOTES.md

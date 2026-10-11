@@ -11,6 +11,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 import venv
 import zipfile
@@ -146,6 +147,44 @@ def build_environment():
     os.environ.setdefault("XWIN_CACHE_DIR", str(ROOT / ".cache/xwin"))
 
 
+def msvc_path_environment(env, roots):
+    # MSVC reads _CL_ after its command line, including compiler invocations
+    # launched by CMake/MSBuild. This avoids CMake flattening quoted CFLAGS.
+    mapped = env.copy()
+    flags = [f"/pathmap:{path}={replacement}" for path, replacement in roots]
+    mapped["_CL_"] = " ".join(
+        filter(None, (env.get("_CL_", ""), subprocess.list2cmdline(flags)))
+    )
+    return mapped
+
+
+def verify_msvc_path_mapping(env):
+    """Prove the installed compiler remaps __FILE__ before a long release build."""
+    directory = ROOT / ".tools"
+    directory.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="path-map-", dir=directory) as temporary:
+        source = Path(temporary) / "probe.c"
+        source.write_text(
+            "const char *echocord_probe_source = __FILE__;\n", encoding="utf-8"
+        )
+        try:
+            expanded = run("cl", "/nologo", "/EP", "/FC", source, capture=True, env=env)
+        except subprocess.CalledProcessError:
+            raise SystemExit(
+                "MSVC source-path mapping probe failed; install current Visual Studio C++ Build Tools"
+            ) from None
+    match = re.search(r'echocord_probe_source\s*=\s*("(?:\\.|[^"\\])*")', expanded)
+    try:
+        mapped = json.loads(match[1]).replace("\\", "/") if match else ""
+    except ValueError:
+        mapped = ""
+    if not mapped.startswith("/echocord/"):
+        raise SystemExit(
+            "MSVC did not remap __FILE__; install current Visual Studio C++ Build Tools before making a release"
+        )
+    print("MSVC source-path mapping: verified")
+
+
 def windows_flags():
     # Encoded flags keep paths containing spaces intact. The explicit Cargo target
     # keeps Windows linker options out of host build scripts and proc macros.
@@ -164,7 +203,10 @@ def windows_flags():
         f"--remap-path-prefix={path}={replacement}" for path, replacement in roots
     ]
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
-    if not WINDOWS:
+    if WINDOWS:
+        env = msvc_path_environment(env, roots)
+        verify_msvc_path_mapping(env)
+    else:
         # Opus assertion filenames come from C, not Rust. cc/cmake parse these
         # quoted flags; clang-cl supports the same file-prefix mapping as clang.
         prefix_flags = " ".join(
@@ -188,6 +230,8 @@ def setup(browser=False):
     if browser:
         browser_install()
     build_environment()
+    if WINDOWS:
+        windows_flags()
     print(
         "Build tools ready. Use check or build; see docs/DEVELOPMENT.md for platform limits."
     )
@@ -458,17 +502,18 @@ def package(tag=None):
     )
     # Refuse accidental packaging of an old, unsanitized local executable.
     binary = executable.read_bytes()
-    private_roots = {
-        ROOT,
-        Path.home(),
-        Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo")),
-    }
-    for root in private_roots:
+    private_roots = (
+        ("workspace", ROOT),
+        ("user profile", Path.home()),
+        ("Cargo home", Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))),
+    )
+    for origin, root in private_roots:
         for text in (str(root), str(root).replace("\\", "/")):
             for encoding in ("utf-8", "utf-16-le"):
-                if text.encode(encoding) in binary:
+                occurrences = binary.count(text.encode(encoding))
+                if occurrences:
                     raise SystemExit(
-                        "A local build path remains in the executable; rebuild with scripts/dev.py build before packaging"
+                        f"A local build path remains in the executable ({origin}, {encoding}, {occurrences} occurrences); clean native dependency output and rebuild with scripts/dev.py build before packaging"
                     )
     output = ROOT / "artifacts/release"
     source_archive = output / f"echocord-{release_version}-third-party-sources.zip"

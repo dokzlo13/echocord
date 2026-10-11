@@ -7,6 +7,6 @@ if [[ ! -f "$runtime" ]]; then
   echo 'Install the pinned UI dependencies with make ui-install first.' >&2
   exit 1
 fi
-mkdir -p "$repo_root/.trash/browser-review"
-cd "$repo_root/.trash/browser-review"
+mkdir -p "$repo_root/artifacts/browser-review"
+cd "$repo_root/artifacts/browser-review"
 exec node "$runtime" cli "$@"

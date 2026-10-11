@@ -60,9 +60,45 @@ class CacheDriftTests(unittest.TestCase):
         external = self.root / "external.c"
         external.write_text("fixture unpatched source\n")
         (self.source / "encoder.c").unlink()
-        (self.source / "encoder.c").symlink_to(external)
+        try:
+            (self.source / "encoder.c").symlink_to(external)
+        except OSError:
+            self.skipTest("Creating symlinks is unavailable for this account")
         with self.assertRaises(SystemExit):
             self.verify()
+
+
+class PatchTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "source"
+        self.source.mkdir()
+        (self.source / "file.txt").write_bytes(b"first\nold\nlast\n")
+        self.patch = self.root / "change.patch"
+        self.patch.write_text(
+            "--- a/file.txt\n+++ b/file.txt\n@@ -1,3 +1,3 @@\n first\n-old\n+new\n last\n"
+        )
+
+    def test_exact_context_applies_without_external_tools(self):
+        prepare.apply_patch(self.source, self.patch)
+        self.assertEqual((self.source / "file.txt").read_bytes(), b"first\nnew\nlast\n")
+
+    def test_context_mismatch_is_rejected(self):
+        (self.source / "file.txt").write_text("first\nchanged\nlast\n")
+        with self.assertRaises(ValueError):
+            prepare.apply_patch(self.source, self.patch)
+
+    def test_offset_drift_is_rejected(self):
+        (self.source / "file.txt").write_text("extra\nfirst\nold\nlast\n")
+        with self.assertRaises(ValueError):
+            prepare.apply_patch(self.source, self.patch)
+
+    def test_path_traversal_is_rejected(self):
+        self.patch.write_text(self.patch.read_text().replace("file.txt", "../file.txt"))
+        with self.assertRaises(ValueError):
+            prepare.apply_patch(self.source, self.patch)
 
 
 if __name__ == "__main__":

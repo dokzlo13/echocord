@@ -2,13 +2,17 @@
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
-app_target_dir="$(realpath -m -- "${ECHOCORD_APP_TARGET_DIR:-$repo_root/target}")"
+if ! command -v wslpath >/dev/null; then
+  echo 'This launcher requires WSL Windows interop. On Windows, run target/x86_64-pc-windows-msvc/release/echocord.exe.' >&2
+  exit 1
+fi
+app_target_dir="$(realpath -m -- "${ECHOCORD_APP_TARGET_DIR:-${CARGO_TARGET_DIR:-$repo_root/target}}")"
 executable="$app_target_dir/x86_64-pc-windows-msvc/release/echocord.exe"
 if [[ ! -f "$executable" ]]; then
   echo 'Build the application with make app-build first.' >&2
   exit 1
 fi
-mkdir -p "$repo_root/.trash/app"
+mkdir -p "$repo_root/artifacts/app"
 arguments=()
 if [[ -n "${ECHOCORD_DATA_DIR:-}" ]]; then
   mkdir -p "$ECHOCORD_DATA_DIR"
@@ -20,7 +24,7 @@ fi
 smoke_report=""
 if [[ "${1:-}" == --smoke ]]; then
   shift
-  smoke_report="$repo_root/.trash/app/smoke-report-$(date +%s%N).txt"
+  smoke_report="$repo_root/artifacts/app/smoke-report-$(date +%s%N).txt"
   arguments+=(--smoke-report "$(wslpath -w "$smoke_report")")
 fi
 if (( $# != 0 )); then

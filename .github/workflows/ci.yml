@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  portable:
+    name: Portable core and UI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Prepare portable dependencies
+        run: |
+          rustup show active-toolchain
+          python scripts/prepare-opus.py
+          npm --prefix ui ci --no-audit --no-fund
+          npm --prefix ui exec -- playwright install --with-deps chromium
+      - name: Check core and UI
+        run: python scripts/dev.py check --portable
+
+  windows:
+    name: Windows x64 build and native core
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Set up native tools
+        run: python scripts/dev.py setup
+      - name: Check native Rust
+        run: python scripts/dev.py core-check
+      - name: Check application Rust
+        run: python scripts/dev.py build --check
+      - name: Build Windows application
+        run: python scripts/dev.py build
+      - name: Test application unit behavior
+        run: python scripts/dev.py app-test
+      - name: Prepare third-party notices and corresponding sources
+        run: python scripts/package-third-party.py
+      - name: Package checked Windows release
+        run: python scripts/dev.py package
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: release-assets
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 7

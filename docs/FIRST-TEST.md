@@ -21,7 +21,7 @@ Application capture includes the selected process and its children, potentially 
 
 For the existing cable route, send the music application's playback to VB-Cable in Windows, then choose the corresponding recording endpoint under Inputs. Recording capture requires supported 48 kHz mono/stereo. An unsupported/missing input produces an error and never selects a microphone or desktop fallback.
 
-Add more sources as needed, up to eight. Capture/Stop controls each capture lifetime. Source Mute removes it from the shared mix while its meter continues under hatching. Gain uses −60…0 dB or Off, with no boost. Source identity changes take effect on that card, and duplicate/identifiable overlapping captures are rejected. Source exit/restart requires refresh and selection of the new instance.
+Add more sources as needed, up to eight. Card/jump numbers appear independently in each section when it has multiple cards. New sources reuse available colours; removing a source preserves its peers. Older grey assignments recover available colours when setup is restored, without requiring cards to be deleted. Capture/Stop controls each capture lifetime. Source Mute removes it from the shared mix while its meter continues under hatching. Gain uses −60…0 dB or Off, with no boost. Source identity changes take effect on that card, and duplicate/identifiable overlapping captures are rejected. Source exit/restart requires refresh and selection of the new instance.
 
 ## Discord destinations and live controls
 

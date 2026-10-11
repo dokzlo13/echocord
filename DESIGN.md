@@ -18,7 +18,7 @@ Dark, opaque slate with label-paper controls; red denotes an active Discord dest
 | Gain lane / track / thumb / clip | #9aa4aa / #3a434a / #ebe5d5 / #ffd166 |
 | Card / control radius | 10px / 6px |
 
-Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px label-paper ring with 2px offset. Source colours remain assigned to native source identities; removing a source never reassigns surviving colours. Display numbers are list ordinals, independent of colour slots.
+Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px label-paper ring with 2px offset. Source colours remain assigned to native source identities; removing a source never reassigns surviving colours. Display numbers are list ordinals, independent of colour slots. New sources use the lowest unused coloured slot (0–4), with neutral slot5 only when those colours are occupied; colours never derive from lifetime source IDs. Live add/remove/replace preserves surviving colours. On restore, valid coloured assignments are reserved first, then saved neutral/out-of-range slots recover available colours in saved order; remaining overflow stays neutral.
 
 ## Shell, slots and cards
 

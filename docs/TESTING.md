@@ -1,6 +1,6 @@
 # Testing and validation
 
-The normal gate is `python scripts/dev.py check` (`python3` on Linux/WSL). It runs formatting, strict Clippy, portable core/probe tests, generated-contract drift checks, frontend lint/type/build/browser tests, and Windows compilation checks. `check --portable` skips Windows compilation. Native Windows CI also builds and runs the applicable native Rust tests.
+The normal gate is `python scripts/dev.py check` (`python3` on Linux/WSL). It runs formatting, strict Clippy, portable core/probe tests, generated-contract drift checks, frontend lint/type/build/browser tests, and Windows compilation checks. `check --portable` skips the Windows application compilation gate; on native Windows, core checks still compile Windows code and require MSVC. Native Windows CI also builds and runs the applicable native Rust tests.
 
 ## Automated checks
 

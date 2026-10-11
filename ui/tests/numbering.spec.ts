@@ -1,4 +1,11 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
+
+async function holdHistoryClock(page: Page) {
+  // Freeze before telemetry loads, with room for clock installation to finish.
+  // Sparse fixture emissions must not create a real history gap during edits.
+  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T01:00:00Z"));
+}
 
 async function numbers(section: Locator, expected: string[]) {
   await expect(section.locator(".identity-row > .ch")).toHaveText(expected);
@@ -83,14 +90,11 @@ test("empty, single and added cards reveal numbering independently per section",
 test("source ordinals compact after middle and first removal while colour, identity and history survive", async ({
   page,
 }) => {
+  await holdHistoryClock(page);
   await page.goto("/tests/harness.html?fixture=many");
   const sources = page.getByRole("region", { name: "Sources", exact: true });
   const survivor = page.locator('[id="card-strip:3"]');
   await expect(survivor).toHaveAttribute("data-colour", "2");
-  // Hold elapsed time so a fixture's sparse command emissions cannot create a
-  // legitimate telemetry-gap reset while testing removal of another card.
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
   const node = await survivor.elementHandle();
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;
@@ -148,6 +152,7 @@ test("source ordinals compact after middle and first removal while colour, ident
 test("source card and jump colours reuse a freed slot through churn while peers stay unchanged", async ({
   page,
 }) => {
+  await holdHistoryClock(page);
   await page.goto("/tests/harness.html?fixture=many");
   const sources = page.getByRole("region", { name: "Sources", exact: true });
   await sources
@@ -155,8 +160,6 @@ test("source card and jump colours reuse a freed slot through churn while peers 
     .click();
   const peer = page.locator('[id="card-strip:2"]');
   const node = await peer.elementHandle();
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;
     h.adapter.telemetry.ingest(h.transport.current.telemetry);
@@ -213,12 +216,11 @@ test("source card and jump colours reuse a freed slot through churn while peers 
 test("destination ordinals compact without remounting or resetting a surviving room", async ({
   page,
 }) => {
+  await holdHistoryClock(page);
   await page.goto("/tests/harness.html?fixture=rooms");
   const destinations = page.getByRole("region", { name: "Destinations" });
   const survivor = page.locator('[id="card-dest:3"]');
   await expect(survivor).toHaveAttribute("data-state", "live");
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
   const node = await survivor.elementHandle();
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;

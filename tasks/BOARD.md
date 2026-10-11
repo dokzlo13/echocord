@@ -2,6 +2,10 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
+## Current public-release epoch
+
+EC-044 coordinates public readiness and first release. EC-045 owns portable builds/CI, EC-046 audits history/licenses, and EC-047 prepares reviewed onboarding/diagnostics polish. Current private project context is being replaced with self-contained public contributor instructions before any push.
+
 ## Delivered source-colour correction
 
 EC-042 is integrated as `43a5362`; the test-clock follow-up is `9b8f3af`. EC-043 approved both exact worker commits. New sources reuse available colours, and restored neutral assignments recover free colours while retaining valid assignments and normal restoration behavior. Destination status colours remain intentional.
@@ -76,5 +80,10 @@ Original application playback remains an OS route; independent local mute, deskt
 
 | EC-042 | Reuse source colours and repair grey restore metadata | done | owner report; EC-043 design checkpoint | implementation worker / a1; coordinator integration | main | [task](EC-042.md), 43a5362 + 9b8f3af; aggregate/native checks |
 | EC-043 | Source-colour correction review | done | EC-042 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-043.md); both exact-commit GOs |
+
+| EC-044 | Public repository and first release | active | owner publication instruction | coordinator | main | [task](EC-044.md) |
+| EC-045 | Portable bootstrap and release automation | active | EC-044 | build worker / a1 | agent/EC-045-a1 | [task](EC-045.md) |
+| EC-046 | History/license/publication audit | active | EC-044 | audit worker / r1 | read-only | [task](EC-046.md) |
+| EC-047 | Public bot onboarding and diagnostics | active | EC-044; design review before code | UI worker / a1 | agent/EC-047-a1 | [task](EC-047.md) |
 
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

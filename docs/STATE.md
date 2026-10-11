@@ -1,5 +1,7 @@
 # Current state
 
+Current epoch: EC-044 prepares public dokzlo13/echocord and release0.1.0, with portable contributor bootstrap, history/privacy/license review, README/logo, CI/release automation and bounded bot onboarding polish. Public instructions will replace local-only context before publication. See EC-045–047 scopes. Discord-as-input stays on hold.
+
 EC-042 source-colour correction is delivered with EC-043 design and exact-commit review. New sources reuse the lowest free coloured slot instead of exhausting the palette through lifetime IDs. On restore, saved neutral/out-of-range assignments recover unused colours after every valid existing colour has been reserved; excess sources retain the approved neutral fallback. Already-coloured and live surviving sources keep their assignments, IDs and histories. The owner-reported grey-while-capturing cause is corrected; owner feedback on this new build is pending.
 
 The small UI numbering epoch is delivered. Source and destination sections independently hide card numbers and jump navigation for a single card, then show matching contiguous ordinals for multiple cards. Removal compacts numbers while preserving native identities, source colours and histories. Destination markers retain server/device imagery; the single-source summary keeps state without a redundant count. EC-040 implementation and EC-041 independent design/code review are complete. Discord-as-input is on hold until the owner reopens it. The prior joining-display fix remains owner-confirmed; this numbering update awaits owner feedback.

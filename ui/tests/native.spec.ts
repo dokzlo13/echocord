@@ -7,6 +7,8 @@ import type {
   MixTelemetry,
 } from "../src/generated";
 
+const releaseUrl = `http://127.0.0.1:${process.env.ECHOCORD_PREVIEW_PORT ?? 4185}`;
+
 interface Host {
   calls: { name: string; args: Record<string, unknown> }[];
   emit: (s: ControlSnapshot) => void;
@@ -18,7 +20,7 @@ interface Host {
 test("release outside Tauri shows a real unavailable error and excludes all fixture data", async ({
   page,
 }) => {
-  await page.goto("http://127.0.0.1:4185/?fixture=connected");
+  await page.goto(`${releaseUrl}/?fixture=connected`);
   await expect(page.getByRole("alert")).toContainText(
     "Open the Echocord desktop app",
   );
@@ -111,7 +113,7 @@ test("release binds exact Tauri names and telemetry event without faking accepte
       },
     };
   }, fixtureSnapshot());
-  await page.goto("http://127.0.0.1:4185/");
+  await page.goto(releaseUrl);
   await expect(page.locator(".dest-card")).toHaveAttribute(
     "data-state",
     "idle",

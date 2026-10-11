@@ -64,6 +64,65 @@ async fn configure_bot(token: String, state: State<'_, ShellState>) -> Result<()
     state.controller.configure_token(token).await
 }
 
+fn setup_link_url(link: &str) -> Option<&'static str> {
+    match link {
+        "portal" => Some("https://discord.com/developers/applications"),
+        "guide" => Some("https://github.com/dokzlo13/echocord#discord-bot-setup"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+async fn open_setup_link(link: String) -> Result<(), String> {
+    // The webview can select a help page, never supply an arbitrary URL or command.
+    let url = setup_link_url(&link).ok_or("Unknown setup link.")?;
+    tauri::async_runtime::spawn_blocking(move || open_setup_url(url))
+        .await
+        .map_err(|_| "Could not open your browser.".to_string())?
+}
+
+#[cfg(windows)]
+fn open_setup_url(url: &str) -> Result<(), String> {
+    use windows::{
+        Win32::{
+            System::Com::{
+                COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
+            },
+            UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        },
+        core::{PCWSTR, w},
+    };
+    let url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: This blocking thread balances successful COM initialization. The
+    // fixed HTTPS URL is NUL-terminated and lives through ShellExecuteW; no
+    // parameters, working directory or executable path come from the webview.
+    let result = unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE)
+            .ok()
+            .map_err(|_| "Could not open your browser.".to_string())?;
+        let result = ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR(url.as_ptr()),
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+        CoUninitialize();
+        result.0 as isize
+    };
+    if result > 32 {
+        Ok(())
+    } else {
+        Err("Could not open your browser.".into())
+    }
+}
+
+#[cfg(not(windows))]
+fn open_setup_url(_url: &str) -> Result<(), String> {
+    Err("Opening setup links is only supported in the Windows app.".into())
+}
+
 fn show_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -225,7 +284,8 @@ fn main() {
             get_snapshot,
             get_visibility,
             dispatch,
-            configure_bot
+            configure_bot,
+            open_setup_link
         ])
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -555,4 +615,31 @@ async fn wait_visibility(app: &tauri::AppHandle, expected: bool) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     false
+}
+
+#[cfg(test)]
+mod setup_link_tests {
+    use super::setup_link_url;
+
+    #[test]
+    fn setup_links_accept_only_known_keys() {
+        assert_eq!(
+            setup_link_url("portal"),
+            Some("https://discord.com/developers/applications")
+        );
+        assert_eq!(
+            setup_link_url("guide"),
+            Some("https://github.com/dokzlo13/echocord#discord-bot-setup")
+        );
+        for invalid in [
+            "",
+            "https://discord.com/developers/applications",
+            "https://example.invalid",
+            "file:///C:/Windows/notepad.exe",
+            "portal --argument",
+            "guide\0",
+        ] {
+            assert_eq!(setup_link_url(invalid), None);
+        }
+    }
 }

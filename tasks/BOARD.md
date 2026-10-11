@@ -2,9 +2,11 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
-## Current source-colour correction
+## Delivered source-colour correction
 
-EC-042 fixes the confirmed lifetime-counter colour exhaustion and repairs affected saved neutral assignments on restore; EC-043 reviews design and implementation. Destination state colours remain intentional. Preserve any running owner app; build/test activation must respect its lifetime.
+EC-042 is integrated as `43a5362`; the test-clock follow-up is `9b8f3af`. EC-043 approved both exact worker commits. New sources reuse available colours, and restored neutral assignments recover free colours while retaining valid assignments and normal restoration behavior. Destination status colours remain intentional.
+
+Final `make check` passed 122 portable library, nine probe and 129 UI checks plus formatting/bindings/lint/type/build/Windows Clippy. The focused Windows preference test, release build and saved-grey native smoke passed. The actual native restored window showed blue/green markers with stopped sources, followed by observed Close/exit. The updated executable is ready through the existing launcher, test apps are closed, owner settings/credentials unchanged, and accepted worker artifacts retired. Owner review and broader native/audio acceptance remain open.
 
 ## Delivered small UI epoch
 
@@ -20,7 +22,7 @@ EC-030–033 are integrated and independently reviewed. Four total destinations 
 
 ## Next pickup order
 
-1. **EC-042 / EC-043:** repair source-colour allocation and affected restored metadata; review, validate and deliver the correction.
+1. **UI follow-up:** owner review of the delivered source-colour correction and numbering, then selection of any further small improvements.
 2. **EC-006 / EC-037:** suitable coordinated listening and controlled delivery/recovery/resource/latency/five-hour acceptance remain open. No audio experiment belongs to this UI epoch.
 3. **EC-035 — owner hold until further notice:** Discord-room input research is retained in EC-034; do not dispatch proof, receive implementation or lifecycle design without the owner reopening this work.
 
@@ -72,7 +74,7 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-040 | Consistent progressive card/jump numbering | done | owner-selected scope; EC-041 design checkpoint | UI worker / a1; coordinator integration | main | [task](EC-040.md), 40155c8; 128 checks and native smokes |
 | EC-041 | Numbering design and implementation review | done | EC-040 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-041.md); exact-commit GO |
 
-| EC-042 | Reuse source colours and repair grey restore metadata | active | owner report; EC-043 design checkpoint before code | implementation worker / a1; coordinator integration | agent/EC-042-a1 | [task](EC-042.md) |
-| EC-043 | Source-colour correction review | active | EC-042 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-043.md) |
+| EC-042 | Reuse source colours and repair grey restore metadata | done | owner report; EC-043 design checkpoint | implementation worker / a1; coordinator integration | main | [task](EC-042.md), 43a5362 + 9b8f3af; aggregate/native checks |
+| EC-043 | Source-colour correction review | done | EC-042 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-043.md); both exact-commit GOs |
 
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

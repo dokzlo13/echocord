@@ -86,4 +86,6 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-046 | History/license/publication audit | active | EC-044 | audit worker / r1 | read-only | [task](EC-046.md) |
 | EC-047 | Public bot onboarding and diagnostics | active | EC-044; design review before code | UI worker / a1 | agent/EC-047-a1 | [task](EC-047.md) |
 
+| EC-048 | Third-party release notices and sources | active | EC-046 audit | licensing worker / a1 | agent/EC-048-a1 | [task](EC-048.md) |
+
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

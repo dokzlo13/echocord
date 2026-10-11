@@ -1,0 +1,401 @@
+{
+  "schema": 1,
+  "rust": {
+    "alloc-stdlib@0.3.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "convert_case@0.4.0": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+          "name": "MIT.txt"
+        }
+      ]
+    },
+    "dasp_sample@0.11.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/RustAudio/dasp/97c3bb9b2363c0b46ac1633858bf1054fd02a980/LICENSE-APACHE",
+          "sha256": "756c8d2ab2dc24f256e1455b5f03937f4933d83d7bc9f2d55009fc962377d512",
+          "name": "LICENSE-APACHE"
+        }
+      ]
+    },
+    "davey@0.1.4": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Snazzah/davey/a1e2e741bea06bc3b7167a5c3792844b8975993c/LICENSE",
+          "sha256": "90760006b6e6c76a67476de39bee25e42e584679eac5d608765355d5d54e8afa",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "enum-map-derive@0.17.0": {
+      "reason": "REUSE license text is in the upstream workspace; source SPDX copyright lines are retained separately.",
+      "files": [
+        {
+          "url": "https://codeberg.org/xfix/enum-map/raw/commit/2026968c30ad14d268f3d70c618a704e22a3b980/LICENSES/MIT.txt",
+          "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+          "name": "MIT.txt"
+        }
+      ]
+    },
+    "enum-map@2.7.3": {
+      "reason": "REUSE license text is in the upstream workspace; source SPDX copyright lines are retained separately.",
+      "files": [
+        {
+          "url": "https://codeberg.org/xfix/enum-map/raw/commit/c788a9c4bd0431308d889942719f7a38761d9884/LICENSES/MIT.txt",
+          "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+          "name": "MIT.txt"
+        }
+      ]
+    },
+    "from_map@0.1.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Luro02/shorthand/c024f6840d1acd913fb04cf13aea97bc024dfc39/LICENSE-APACHE",
+          "sha256": "6b6b05df6d03b090185fa113dafaf4aceda484373214b49e2c4c31427b67ffd4",
+          "name": "LICENSE-APACHE"
+        }
+      ]
+    },
+    "hashmap_derive@0.1.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Luro02/shorthand/50f44721a4eebeefef085e68135b9545a590bf79/LICENSE-APACHE",
+          "sha256": "6b6b05df6d03b090185fa113dafaf4aceda484373214b49e2c4c31427b67ffd4",
+          "name": "LICENSE-APACHE"
+        }
+      ]
+    },
+    "hax-lib-macros@0.3.6": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/cryspen/hax/87ba96831ecfeb7dbb54efcf97036fbc5f25bc71/LICENSE",
+          "sha256": "9a50bad5a51e0ad726ea3a7f4b7b758e1b4d1784e6abefe1367f5bf01e972725",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "hax-lib@0.3.6": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/cryspen/hax/87ba96831ecfeb7dbb54efcf97036fbc5f25bc71/LICENSE",
+          "sha256": "9a50bad5a51e0ad726ea3a7f4b7b758e1b4d1784e6abefe1367f5bf01e972725",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "hpke-rs-crypto@0.6.1": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MPL-2.0.txt",
+          "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+          "name": "MPL-2.0.txt"
+        }
+      ]
+    },
+    "hpke-rs-rust-crypto@0.6.1": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MPL-2.0.txt",
+          "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+          "name": "MPL-2.0.txt"
+        }
+      ]
+    },
+    "hpke-rs@0.6.1": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MPL-2.0.txt",
+          "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+          "name": "MPL-2.0.txt"
+        }
+      ]
+    },
+    "libcrux-intrinsics@0.0.6": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/celabshq/libcrux/5732f8d113972da8ce19d3f9dd7763a0409b1c25/LICENSE",
+          "sha256": "c517c468fc7f8d83319dd8b3743923f6891e0dfbaf7c57a874758c8f39b98564",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "libcrux-platform@0.0.3": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/celabshq/libcrux/316fcd6c19c2e33bd0429e1319b6557d91038512/LICENSE",
+          "sha256": "c517c468fc7f8d83319dd8b3743923f6891e0dfbaf7c57a874758c8f39b98564",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "libcrux-secrets@0.0.5": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/celabshq/libcrux/a0b2887b1b22b5d502f97787f0c3f99a598b1a89/LICENSE",
+          "sha256": "c517c468fc7f8d83319dd8b3743923f6891e0dfbaf7c57a874758c8f39b98564",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "libcrux-sha3@0.0.8": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/celabshq/libcrux/f0c2b0a9506bdb28e3ecfeed07c64532da542b21/LICENSE",
+          "sha256": "c517c468fc7f8d83319dd8b3743923f6891e0dfbaf7c57a874758c8f39b98564",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "libcrux-traits@0.0.6": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/celabshq/libcrux/5732f8d113972da8ce19d3f9dd7763a0409b1c25/LICENSE",
+          "sha256": "c517c468fc7f8d83319dd8b3743923f6891e0dfbaf7c57a874758c8f39b98564",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "openmls@0.8.2": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openmls/openmls/6beae76b9f083e5872924bba78d05857b8ab472c/LICENSE",
+          "sha256": "43e5e3c4b5cca67f9ea912f7e1929702a848aa765d3b3e14f25d3838a5a5565d",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "openmls_basic_credential@0.5.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openmls/openmls/6b85f0edc560b4fe0f5b9266092947a774614f3f/LICENSE",
+          "sha256": "43e5e3c4b5cca67f9ea912f7e1929702a848aa765d3b3e14f25d3838a5a5565d",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "openmls_memory_storage@0.5.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openmls/openmls/6b85f0edc560b4fe0f5b9266092947a774614f3f/LICENSE",
+          "sha256": "43e5e3c4b5cca67f9ea912f7e1929702a848aa765d3b3e14f25d3838a5a5565d",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "openmls_rust_crypto@0.5.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openmls/openmls/47dbedecad0c1fd8eb5368d582250ebfcc1e1ce6/LICENSE",
+          "sha256": "43e5e3c4b5cca67f9ea912f7e1929702a848aa765d3b3e14f25d3838a5a5565d",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "openmls_traits@0.5.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/openmls/openmls/6b85f0edc560b4fe0f5b9266092947a774614f3f/LICENSE",
+          "sha256": "43e5e3c4b5cca67f9ea912f7e1929702a848aa765d3b3e14f25d3838a5a5565d",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "realfft@3.5.0": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+          "name": "MIT.txt"
+        }
+      ]
+    },
+    "selectors@0.38.0": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MPL-2.0.txt",
+          "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+          "name": "MPL-2.0.txt"
+        }
+      ]
+    },
+    "serenity-voice-model@0.3.0": {
+      "reason": "Published package declares this standard license without a standalone license file. Original authors and source copyright/SPDX lines are retained; no copyright notice is invented.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/ISC.txt",
+          "sha256": "521c6f0ed8e64736684f89843d16a4df6b4b7449acbcfc6ca6630a3037ca8c53",
+          "name": "ISC.txt"
+        }
+      ]
+    },
+    "songbird@0.6.0": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/serenity-rs/songbird/3f77b5fa6de3f7354fdd7ef0dfa861518d304cdd/LICENSE.md",
+          "sha256": "df3eb9c29e4d94076101b9af68bc41434285f3646d77901e3a12e5adf1115daf",
+          "name": "LICENSE.md"
+        }
+      ]
+    },
+    "stream_lib@0.5.2": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Erk-/rsget/342e78a27dd2fca5da99d07ad083406cdbc2bd52/LICENSE",
+          "sha256": "b0c1ea550c5ee1a604e9e405e47457b14a030400794acec33e91d2cb0e973fc9",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "streamcatcher@1.0.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/FelixMcFelix/streamcatcher/bfc9825a5b9f39e20a9aa824ba2e4e302e485f90/LICENSE-APACHE",
+          "sha256": "0a52b287da67537d11637a515417b82eed5031c1218989bed183aa6909c01e2f",
+          "name": "LICENSE-APACHE"
+        }
+      ]
+    },
+    "symphonia-codec-pcm@0.5.5": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/pdeljanov/Symphonia/6d533f26150953a882a6a111ebd13f0abf7129d5/LICENSE",
+          "sha256": "c76f740d1521b9bed9ca7a04ad526c310493c62621b1341d623b431736533b30",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "symphonia-core@0.5.5": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/pdeljanov/Symphonia/6d533f26150953a882a6a111ebd13f0abf7129d5/LICENSE",
+          "sha256": "c76f740d1521b9bed9ca7a04ad526c310493c62621b1341d623b431736533b30",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "symphonia-metadata@0.5.5": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/pdeljanov/Symphonia/6d533f26150953a882a6a111ebd13f0abf7129d5/LICENSE",
+          "sha256": "c76f740d1521b9bed9ca7a04ad526c310493c62621b1341d623b431736533b30",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "symphonia@0.5.5": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/pdeljanov/Symphonia/6d533f26150953a882a6a111ebd13f0abf7129d5/LICENSE",
+          "sha256": "c76f740d1521b9bed9ca7a04ad526c310493c62621b1341d623b431736533b30",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "ts-rs-macros@12.0.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Aleph-Alpha/ts-rs/7182ad8289596097235406b715fa04506443b4ad/LICENSE",
+          "sha256": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "ts-rs@12.0.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/Aleph-Alpha/ts-rs/7182ad8289596097235406b715fa04506443b4ad/LICENSE",
+          "sha256": "db7f7f8e7236a2d0b41b855b2501b7b913caebbcda6ce498637a304ad1706ce1",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "webview2-com-macros@0.8.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "webview2-com-sys@0.39.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "name": "LICENSE"
+        }
+      ]
+    },
+    "webview2-com@0.39.1": {
+      "reason": "License omitted from published crate; retained from its exact source revision.",
+      "files": [
+        {
+          "url": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "name": "LICENSE"
+        }
+      ]
+    }
+  },
+  "standard_mpl": {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MPL-2.0.txt",
+    "sha256": "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172",
+    "name": "MPL-2.0.txt"
+  },
+  "webview2_sdk": {
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+    "sha256": "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db",
+    "version": "1.0.3800.47",
+    "wrapper": "webview2-com-sys@0.39.1",
+    "wrapper_revision": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+    "files": {
+      "LICENSE.txt": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
+      "NOTICE.txt": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90"
+    }
+  }
+}

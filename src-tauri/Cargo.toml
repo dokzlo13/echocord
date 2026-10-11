@@ -10,6 +10,9 @@ tauri = { version = "=2.12.2", default-features = false, features = ["wry", "com
 tauri-plugin-single-instance = "=2.5.2"
 tokio = { version = "1", features = ["rt-multi-thread", "time"] }
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [build-dependencies]
 tauri-build = { version = "=2.7.1", default-features = false }
 

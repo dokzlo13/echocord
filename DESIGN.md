@@ -18,11 +18,13 @@ Dark, opaque slate with label-paper controls; red denotes an active Discord dest
 | Gain lane / track / thumb / clip | #9aa4aa / #3a434a / #ebe5d5 / #ffd166 |
 | Card / control radius | 10px / 6px |
 
-Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px label-paper ring with 2px offset. Source colours always carry channel numbers; removed sources do not reassign surviving colours.
+Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px label-paper ring with 2px offset. Source colours remain assigned to native source identities; removing a source never reassigns surviving colours. Display numbers are list ordinals, independent of colour slots.
 
 ## Shell, slots and cards
 
 Default 440×640, minimum 420×420, resizable and size remembered. A 36px custom title bar holds brand, bot identity/status, settings, minimize and close-to-tray; no maximize. The two slots are Sources above Destination, becoming side-by-side at 700px. Each header has a summary, numbered jump chips when useful and Add. Up to eight sources feed four total destinations: Discord rooms in different servers and at most three Windows playback devices. Destination Add explains capacity and per-server reservations.
+
+Source and destination numbering is independent: zero or one card has no number or jump navigation; two or more cards reveal matching one-based card markers and jump buttons. Removing cards compacts visible ordinals and returning to one hides them again. Numbers never replace native IDs, React/telemetry keys, source colour slots or server/device imagery. Destination card markers use readable neutral ink; state remains in existing badges. A single source retains its On/Muted/Off header summary without a numeric count; a single destination retains its state on the card. Accessible card/jump names include section and identity, plus the ordinal when shown; room jump names retain server context.
 
 Both lists scroll independently. Their heights follow content, preserve access to whole-card controls, and give spare height to useful destination telemetry. Short windows compress spacing and diagnostics. In wide layouts, one or two source cards expand into observed level histories and fill their list, matching the accepted prototype. Compact History diagnostics retain measured sparklines. Completed source/room changes briefly show the observed previous identity; pending work must not claim completion. Use fallback layout when advanced container/scroll-state features are unavailable. Do not scroll the whole document.
 

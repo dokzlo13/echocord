@@ -267,6 +267,10 @@ input {
   font-weight: 700;
   line-height: 1;
 }
+.dest-number {
+  background: var(--panel-hi);
+  color: var(--ink);
+}
 [data-colour="0"] {
   --series: var(--c0);
 }

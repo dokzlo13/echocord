@@ -71,7 +71,10 @@ for (const [width, height] of [
       await page.setViewportSize({ width, height });
       const target = await joining(page, style);
       await page
-        .getByRole("button", { name: "Show Сессия", exact: true })
+        .getByRole("button", {
+          name: "Show destination 2: Сессия on Вечерняя группа",
+          exact: true,
+        })
         .click();
       const compact = target.locator(".d-stage-line");
       for (const [native, index, label] of stages) {

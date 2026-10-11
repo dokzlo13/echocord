@@ -489,10 +489,12 @@ for (const [w, h] of [
     });
     expect(fit).toEqual({ sw: w, sh: h, first: true, dst: true });
     await expect(
-      page.getByRole("button", { name: "Show Preview recording input" }),
+      page.getByRole("button", {
+        name: "Show source 3: Preview recording input",
+      }),
     ).toBeVisible();
     await page
-      .getByRole("button", { name: "Show Preview recording input" })
+      .getByRole("button", { name: "Show source 3: Preview recording input" })
       .click();
     await expect(
       page.getByRole("button", { name: "Change Preview recording input" }),

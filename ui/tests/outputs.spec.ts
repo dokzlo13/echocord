@@ -178,7 +178,10 @@ test("local faults and unconfirmed Stop preserve other outputs and expose Retry 
     "live",
   );
   await page
-    .getByRole("button", { name: "Show Preview headphones", exact: true })
+    .getByRole("button", {
+      name: "Show destination 2: Preview headphones, playback output",
+      exact: true,
+    })
     .click();
   await first.getByRole("button", { name: "Retry stop", exact: true }).click();
   expect(
@@ -274,7 +277,10 @@ for (const [w, h] of [
       doc: [w, h],
     });
     await page
-      .getByRole("button", { name: "Show Preview cable input", exact: true })
+      .getByRole("button", {
+        name: "Show destination 4: Preview cable input, playback output",
+        exact: true,
+      })
       .click();
     await expect(
       page.getByRole("button", {

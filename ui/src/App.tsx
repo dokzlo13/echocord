@@ -248,11 +248,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const on = capturing.filter((s) => !s.muted).length;
   const muted = capturing.filter((s) => s.muted).length;
   const stopped = sources.length - capturing.length;
-  const sourceSummary = sources.length
-    ? [on && `${on} on`, muted && `${muted} muted`, stopped && `${stopped} off`]
-        .filter(Boolean)
-        .join(" · ")
-    : undefined;
+  const sourceSummary = [
+    [on, "on"],
+    [muted, "muted"],
+    [stopped, "off"],
+  ]
+    .filter(([count]) => count)
+    .map(([count, state]) =>
+      sources.length === 1 ? state : `${count} ${state}`,
+    )
+    .join(" · ");
   const bot = snapshot?.bot.status ?? "unconfigured";
   const botName = snapshot?.bot.name ?? "Discord bot";
   const mode = snapshot?.settings.meterStyle ?? "simple";
@@ -425,6 +430,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           >
             <SlotHead
               title="Sources"
+              itemLabel="Source"
               summary={sourceSummary}
               chips={sources.map((c) => ({
                 uid: c.uid,
@@ -457,7 +463,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   <SourceCard
                     key={c.uid}
                     card={c}
-                    index={i}
+                    ordinal={sources.length > 1 ? i + 1 : undefined}
                     mode={mode}
                     expand={wide && sources.length <= 2}
                     h={{
@@ -497,10 +503,14 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           >
             <SlotHead
               title={dests.length > 1 ? "Destinations" : "Destination"}
+              itemLabel="Destination"
               summary={destinationSummary}
               chips={dests.map((d) => ({
                 uid: d.uid,
-                label: d.channel.name,
+                label:
+                  d.kind === "playback"
+                    ? `${d.channel.name}, playback output`
+                    : `${d.channel.name} on ${d.server.name}`,
                 state:
                   d.state === "live"
                     ? d.kind === "discord"
@@ -534,10 +544,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   } as React.CSSProperties
                 }
               >
-                {dests.map((d) => (
+                {dests.map((d, i) => (
                   <DestCard
                     key={d.uid}
                     card={d}
+                    ordinal={dests.length > 1 ? i + 1 : undefined}
                     mode={mode}
                     expand={dests.length === 1}
                     compact={dests.length > 1}

@@ -118,7 +118,10 @@ for (const [width, height] of [
           document: [width, height],
         });
         await page
-          .getByRole("button", { name: "Show Late room", exact: true })
+          .getByRole("button", {
+            name: "Show destination 4: Late room on Late session",
+            exact: true,
+          })
           .click();
         const last = page.locator(".dest-card").last();
         await expect(last.locator(".identity")).toBeFocused();

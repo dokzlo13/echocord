@@ -915,13 +915,13 @@ export interface SourceHandlers {
 
 export function SourceCard({
   card,
-  index,
+  ordinal,
   mode,
   expand,
   h,
 }: {
   card: Source;
-  index: number;
+  ordinal: number | undefined;
   mode: MeterMode;
   expand?: boolean | undefined;
   h: SourceHandlers;
@@ -1015,12 +1015,14 @@ export function SourceCard({
       data-muted={card.muted || undefined}
       data-colour={card.colour}
       data-expand={expand || undefined}
-      aria-label={`Source ${index + 1}: ${s.name}${tag ? `, ${tag.toLowerCase()}` : ""}`}
+      aria-label={`Source${ordinal ? ` ${ordinal}` : ""}: ${s.name}${tag ? `, ${tag.toLowerCase()}` : ""}`}
     >
       <div className="card-row identity-row">
-        <span className="ch tabular" aria-hidden>
-          {index + 1}
-        </span>
+        {ordinal && (
+          <span className="ch tabular" aria-hidden>
+            {ordinal}
+          </span>
+        )}
         {identity}
         {tag && <span className="tag state-tag">{tag}</span>}
         <Remove label={`Remove ${s.name}`} onClick={h.remove} />
@@ -1117,6 +1119,7 @@ function Preflight({
 
 export function DestCard({
   card,
+  ordinal,
   mode,
   expand,
   compact,
@@ -1126,6 +1129,7 @@ export function DestCard({
   h,
 }: {
   card: Dest;
+  ordinal: number | undefined;
   mode: MeterMode;
   expand: boolean;
   compact?: boolean | undefined;
@@ -1420,9 +1424,14 @@ export function DestCard({
       data-muted={card.muted || undefined}
       data-expand={expand || undefined}
       data-compact={compact || undefined}
-      aria-label={`${channel.name}${local ? ", playback output" : ` on ${server.name}`}, ${statusLabel}`}
+      aria-label={`Destination${ordinal ? ` ${ordinal}` : ""}: ${channel.name}${local ? ", playback output" : ` on ${server.name}`}, ${statusLabel}`}
     >
       <div className="card-row identity-row">
+        {ordinal && (
+          <span className="ch dest-number tabular" aria-hidden>
+            {ordinal}
+          </span>
+        )}
         {identity}
         {badge}
         {remove}
@@ -1479,6 +1488,7 @@ function jump(uid: string) {
 
 export function SlotHead({
   title,
+  itemLabel,
   summary,
   chips,
   addLabel,
@@ -1487,6 +1497,7 @@ export function SlotHead({
   addHint,
 }: {
   title: string;
+  itemLabel: "Source" | "Destination";
   summary?: string | undefined;
   chips: Chip[];
   addLabel: string;
@@ -1507,8 +1518,8 @@ export function SlotHead({
               className="ch chip tabular"
               data-colour={c.colour}
               data-state={c.state}
-              aria-label={`Show ${c.label}`}
-              title={c.label}
+              aria-label={`Show ${itemLabel.toLowerCase()} ${i + 1}: ${c.label}`}
+              title={`${itemLabel} ${i + 1}: ${c.label}`}
               onClick={() => jump(c.uid)}
             >
               {i + 1}

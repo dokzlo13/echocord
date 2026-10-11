@@ -5,7 +5,13 @@ async function start(page: Page, fixture = "rooms") {
   await expect(page.locator(".dest-card")).toHaveCount(4);
 }
 async function show(page: Page, name: string) {
-  await page.getByRole("button", { name: `Show ${name}`, exact: true }).click();
+  await page
+    .getByRole("button", {
+      name: new RegExp(
+        `^Show destination \\d+: ${name}(?: on |, playback output)`,
+      ),
+    })
+    .click();
   return page
     .locator(".dest-card")
     .filter({ has: page.locator(".id-name", { hasText: name }) });

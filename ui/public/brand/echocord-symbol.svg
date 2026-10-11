@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="5 18 54 28">
+  <title>Echocord</title>
+  <defs>
+    <mask id="first"><rect width="64" height="64" fill="white"/><circle cx="19" cy="32" r="18" fill="black"/></mask>
+    <mask id="second"><rect width="64" height="64" fill="white"/><circle cx="32" cy="32" r="18" fill="black"/></mask>
+  </defs>
+  <circle cx="19" cy="32" r="14" fill="#ff4b3e"/>
+  <circle cx="32" cy="32" r="14" fill="#ebe5d5" mask="url(#first)"/>
+  <circle cx="45" cy="32" r="14" fill="#939ca2" mask="url(#second)"/>
+</svg>

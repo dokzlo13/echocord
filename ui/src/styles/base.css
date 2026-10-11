@@ -1348,6 +1348,58 @@ input {
   padding-left: 20px;
   color: var(--ink-2);
 }
+.setup-intro {
+  margin: 0;
+  color: var(--ink-2);
+}
+.token-form {
+  display: grid;
+  flex: none;
+  gap: 8px;
+}
+.setup-guide {
+  flex: none;
+  border-block: 1px solid var(--line);
+}
+.setup-guide summary {
+  padding: 12px 2px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.setup-guide summary:hover {
+  color: var(--action-hi);
+}
+.setup-guide .steps {
+  margin: 0 0 12px;
+}
+.setup-guide .conn-note {
+  margin-bottom: 12px;
+}
+.setup-guide strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.setup-help {
+  font-size: 13px;
+}
+.help-link {
+  color: var(--action);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.help-link:hover {
+  color: var(--action-hi);
+}
+.help-link svg {
+  display: inline-block;
+  margin-left: 4px;
+  vertical-align: -2px;
+}
+.help-link-error {
+  display: block;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
 .field {
   display: grid;
   gap: 6px;
@@ -1590,36 +1642,34 @@ input {
 .set-sub[data-warn] {
   color: var(--fault);
 }
-.perm-flags {
+.server-facts {
   display: flex;
-  flex: none;
+  flex-wrap: wrap;
   gap: 6px;
+  margin: 3px 0;
 }
-.perm {
+.server-fact {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px 2px 6px;
+  padding: 2px 8px;
   border-radius: 10px;
-  background: var(--fault-bg);
-  color: var(--fault);
-  font-size: 12px;
-  font-weight: 600;
-}
-.perm[data-ok] {
   background: var(--inset);
   color: var(--ink-2);
+  font-size: 12px;
 }
-.perm[data-ok] svg {
-  color: var(--ok);
+.server-fact[data-reservation="connected"] {
+  color: var(--live-ink);
 }
-.perm[data-partial] {
-  background: var(--inset);
+.server-fact[data-reservation="joining"],
+.server-fact[data-reservation="leaving"] {
   color: var(--standby);
 }
-.invite {
-  justify-self: start;
-  margin-top: 2px;
+.server-fact[data-reservation="blocked"] {
+  color: var(--fault);
+}
+.perm-row .set-name,
+.perm-row .set-sub {
+  overflow-wrap: anywhere;
 }
 /* Quieter telemetry: no boxes, hairline separators; sparklines only when no graph is showing. */
 .stats {

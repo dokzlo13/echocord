@@ -91,13 +91,13 @@ export function fixtureSnapshot(
         {
           id: "room:1",
           name: "Session room",
-          categoryName: "Game night",
+          categoryName: "Voice rooms",
           position: 0,
         },
         {
           id: "room:2",
           name: "Lounge",
-          categoryName: "Game night",
+          categoryName: "Voice rooms",
           position: 1,
         },
       ],

@@ -22,6 +22,7 @@ import type {
   PlaybackDevice,
   ServerReservation,
 } from "./generated";
+import { HelpLink } from "./helpLinks";
 import { ServerTile, SourceGlyph } from "./icons";
 import type {
   BotState,
@@ -62,7 +63,7 @@ function Sheet({
       if (e.key !== "Tab") return;
       const items = Array.from(
         root.querySelectorAll<HTMLElement>(
-          'button:not(:disabled),input:not(:disabled),a[href],[tabindex="0"]',
+          'button:not(:disabled),input:not(:disabled),a[href],summary,[tabindex="0"]',
         ),
       ).filter(
         (el) =>
@@ -958,10 +959,10 @@ export function BotSetup({
           </button>
         ) : (
           <button
-            type="button"
+            type="submit"
+            form="bot-token-form"
             className="btn btn-primary"
             disabled={phase === "checking" || token.trim() === ""}
-            onClick={test}
           >
             {phase === "checking" ? (
               <LoaderCircle size={15} className="spin" />
@@ -976,45 +977,89 @@ export function BotSetup({
           <BotAvatar />
           <span>
             <strong>{botName}</strong> is ready. The token is stored encrypted
-            for your Windows account.
+            for your Windows account. Choose a Discord destination, then press
+            Connect when you want to stream.
           </span>
         </div>
       ) : (
         <>
-          <ol className="steps">
-            <li>Create an application in the Discord Developer Portal.</li>
-            <li>Under Bot, reset the token and copy it.</li>
-            <li>Invite the bot to your server with Connect and Speak.</li>
-          </ol>
-          <label className="field">
-            <span className="field-label">Bot token</span>
-            <span className="field-input">
-              <input
-                type={show ? "text" : "password"}
-                value={token}
-                autoComplete="off"
-                spellCheck={false}
-                onChange={(e) => {
-                  setToken(e.currentTarget.value);
-                  setSaved(false);
-                }}
-                placeholder="Paste the token"
-              />
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label={show ? "Hide token" : "Show token"}
-                onClick={() => setShow(!show)}
-              >
-                {show ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </span>
-            {phase === "bad" && (
-              <span className="field-error" role="alert">
-                {error ?? "Check the token and try again."}
+          <p className="setup-intro">
+            Use your own Discord bot to send the mix to a voice room.
+          </p>
+          <form
+            id="bot-token-form"
+            className="token-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!busy && token.trim()) void test();
+            }}
+          >
+            <label className="field">
+              <span className="field-label">Bot token</span>
+              <span className="field-input">
+                <input
+                  type={show ? "text" : "password"}
+                  value={token}
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-describedby="token-care"
+                  onChange={(e) => {
+                    setToken(e.currentTarget.value);
+                    setSaved(false);
+                  }}
+                  placeholder="Paste the token"
+                />
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label={show ? "Hide token" : "Show token"}
+                  onClick={() => setShow(!show)}
+                >
+                  {show ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
               </span>
-            )}
-          </label>
+              {phase === "bad" && (
+                <span className="field-error" role="alert">
+                  {error ?? "Check the token and try again."}
+                </span>
+              )}
+            </label>
+            <p className="conn-note" id="token-care">
+              Stored encrypted for your Windows account. Treat this token like a
+              password and never share it.
+            </p>
+          </form>
+          <details className="setup-guide">
+            <summary>Create and invite a bot</summary>
+            <ol className="steps">
+              <li>
+                Open the{" "}
+                <HelpLink to="portal">Discord Developer Portal</HelpLink>.
+                Create an application and give your bot a name.
+              </li>
+              <li>
+                On its <strong>Bot</strong> page, use{" "}
+                <strong>Reset Token</strong> and paste the token above. Reset it
+                again if it is ever shared.
+              </li>
+              <li>
+                Under <strong>OAuth2 → URL Generator</strong>, choose the{" "}
+                <strong>bot</strong> scope. Select{" "}
+                <strong>View Channels</strong>, <strong>Connect</strong> and{" "}
+                <strong>Speak</strong>. Open the generated URL to add the bot to
+                a server where you have <strong>Manage Server</strong>{" "}
+                permission.
+              </li>
+            </ol>
+            <p className="conn-note">
+              Administrator and privileged gateway intents are not needed.
+              Channel permissions can override server permissions; allow View
+              Channel, Connect and Speak in the voice room you choose.
+            </p>
+          </details>
+          <div className="setup-help">
+            <HelpLink to="guide">Full setup guide</HelpLink>
+          </div>
         </>
       )}
     </Sheet>
@@ -1028,7 +1073,7 @@ export function BotAvatar({
   size?: number | undefined;
   avatarUrl?: string | undefined;
 }) {
-  // The native profile currently has no avatar; use a neutral bot glyph.
+  // Use a neutral bot glyph when the profile has no avatar.
   return (
     <span
       className="bot-avatar"
@@ -1160,7 +1205,7 @@ export function Settings({
           <ChevronRight size={18} aria-hidden />
         </button>
       </section>
-      <p className="about tabular">Echocord 0.1.0</p>
+      <p className="about tabular">Echocord {import.meta.env.APP_VERSION}</p>
     </Sheet>
   );
 }
@@ -1279,11 +1324,33 @@ export function BotInfo({
                 />
                 <span className="set-text">
                   <span className="set-name">{s.name}</span>
-                  <span className="set-sub">
-                    {reservation
-                      ? `${reservationLabel} ${reservedRoom}${reservation.phase === "connected" ? " now" : ""}`
-                      : `${s.channels.length} voice rooms`}
+                  <span className="server-facts">
+                    <span className="server-fact">
+                      {s.channels.length} voice
+                      {s.channels.length === 1 ? " room" : " rooms"} found
+                    </span>
+                    {reservation && (
+                      <span
+                        className="server-fact"
+                        data-reservation={reservation.phase}
+                      >
+                        {
+                          {
+                            selected: "Room selected",
+                            joining: "Joining",
+                            connected: "In voice room",
+                            leaving: "Leaving",
+                            blocked: "Cleanup incomplete",
+                          }[reservation.phase]
+                        }
+                      </span>
+                    )}
                   </span>
+                  {reservation && (
+                    <span className="set-sub">
+                      {`${reservationLabel} ${reservedRoom}${reservation.phase === "connected" ? " now" : ""}`}
+                    </span>
+                  )}
                 </span>
               </li>
             );
@@ -1295,8 +1362,12 @@ export function BotInfo({
           </p>
         )}
         <p className="conn-note">
-          Room permissions are checked when you connect.
+          Room permissions are checked when you connect. The bot needs View
+          Channel, Connect and Speak in that room. One voice room per server.
         </p>
+        <div className="setup-help">
+          <HelpLink to="guide">Invite a bot or fix room permissions</HelpLink>
+        </div>
       </section>
       <p className="conn-note">
         The token is stored encrypted for your Windows account and is never
@@ -1361,27 +1432,13 @@ export function ConnectionSheet({
       <dl className="facts-list tabular">
         <dt>Underruns</dt>
         <dd ref={underruns}>Unavailable</dd>
-        {!local && (
-          <>
-            <dt>Reconnects this session</dt>
-            <dd>Unavailable</dd>
-            <dt>Voice server</dt>
-            <dd>Unavailable</dd>
-          </>
-        )}
         <dt>Audio</dt>
         <dd>{local ? "Native mix · 48 kHz stereo" : "Opus · 48 kHz stereo"}</dd>
-        {!local && (
-          <>
-            <dt>Bot</dt>
-            <dd>Discord bot</dd>
-          </>
-        )}
       </dl>
       <p className="conn-note">
         {local
           ? "The meter observes samples handed to this selected device after output volume and mute; it does not prove physical audibility. Buffer is audio queued inside Echocord, not device or listener delay."
-          : "Gateway is Discord's control connection; it is unavailable until measured. Buffer is audio waiting inside Echocord. Neither is listener delay. The meter observes native output before Discord transport; it does not confirm what players hear."}
+          : "Gateway is Discord's control connection; it is unavailable until measured. Buffer is audio waiting inside Echocord. Neither is listener delay. The meter observes native output before Discord transport; it does not confirm what listeners hear."}
       </p>
     </Sheet>
   );

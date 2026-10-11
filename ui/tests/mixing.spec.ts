@@ -418,7 +418,7 @@ test("bot details do not invent profile fields or permissions and lock replaceme
     page.getByRole("button", { name: "Replace token", exact: true }),
   ).toBeDisabled();
   await expect(
-    page.getByText("Room permissions are checked when you connect."),
+    page.getByText(/Room permissions are checked when you connect\./),
   ).toBeVisible();
   await expect(page.getByText(/ID 118/)).toHaveCount(0);
   await expect(page.locator(".perm-flags")).toHaveCount(0);
@@ -432,9 +432,11 @@ test("connection details expose unavailable metrics and true measurement boundar
   await expect(
     page.getByRole("dialog", { name: /Connection details/ }),
   ).toBeVisible();
-  await expect(page.getByText("Unavailable", { exact: true })).toHaveCount(2);
   await expect(
-    page.getByText(/does not confirm what players hear/),
+    page.getByText(/Voice server|Reconnects this session/),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText(/does not confirm what listeners hear/),
   ).toBeVisible();
   await expect(page.getByText(/AES-256|5 in room|38 ms/)).toHaveCount(0);
 });

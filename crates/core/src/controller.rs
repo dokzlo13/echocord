@@ -158,6 +158,11 @@ fn separate_settings(config: &ControllerConfig) -> bool {
         _ => true,
     }
 }
+fn next_source_colour(inputs: &[InputStrip]) -> u8 {
+    (0..5)
+        .find(|slot| !inputs.iter().any(|input| input.colour_slot == *slot))
+        .unwrap_or(5)
+}
 fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> {
     if !separate_settings(config) {
         return Err(Failure::Configuration.error());
@@ -342,6 +347,13 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
                 .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
     }) {
         return Err(Failure::Configuration.error());
+    }
+    // Reserve every existing colour, including later saved entries, before
+    // repairing neutral/invalid slots. Live survivors are never recoloured.
+    for index in 0..prefs.inputs.len() {
+        if prefs.inputs[index].colour_slot >= 5 {
+            prefs.inputs[index].colour_slot = next_source_colour(&prefs.inputs);
+        }
     }
     Ok(prefs)
 }
@@ -1194,7 +1206,7 @@ impl Actor {
                 let source = self.source_for_add(&source_id, None)?;
                 let strip_id = format!("input-{}", self.next_strip);
                 self.next_strip += 1;
-                let colour_slot = (self.next_strip.saturating_sub(2)).min(5) as u8;
+                let colour_slot = next_source_colour(&self.snapshot.inputs);
                 self.snapshot.inputs.push(InputStrip {
                     strip_id,
                     source_id,
@@ -3298,6 +3310,184 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 1, 2, 3, 4, 5, 5, 5]
         );
+        a.command(ControlCommand::RemoveSource {
+            strip_id: "input-1".into(),
+        })
+        .unwrap();
+        let survivors = a.snapshot.inputs.clone();
+        a.command(ControlCommand::AddSource {
+            source_id: "source-8".into(),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.inputs[..7], survivors);
+        assert_eq!(a.snapshot.inputs[7].colour_slot, 0);
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn source_colour_reuses_freed_slots_after_churn_without_changing_live_peers() {
+        let mut a = actor();
+        a.next_strip = 500;
+        for id in ["peer", "replacement"] {
+            a.snapshot.sources.push(RecordingSource {
+                id: id.into(),
+                name: id.into(),
+                kind: SourceKind::Recording,
+                available: true,
+                detail: None,
+            });
+        }
+        for id in ["recording", "peer"] {
+            a.command(ControlCommand::AddSource {
+                source_id: id.into(),
+            })
+            .unwrap();
+        }
+        assert_eq!(a.snapshot.inputs[0].colour_slot, 0);
+        let peer = &mut a.snapshot.inputs[1];
+        peer.phase = InputPhase::Capturing;
+        peer.gain_db = Some(-13.5);
+        peer.muted = true;
+        let peer = peer.clone();
+        assert_eq!(peer.colour_slot, 1);
+        a.snapshot.telemetry.inputs.push(InputTelemetry {
+            strip_id: peer.strip_id.clone(),
+            level_dbfs: Some(-21.0),
+            pre_clip: false,
+            dropped_frames: 2,
+            underrun_frames: 3,
+            queued_frames: 4,
+        });
+        let telemetry = a.snapshot.telemetry.inputs.clone();
+        let mut previous_id = "input-500".to_string();
+        for next_id in 502..510 {
+            a.command(ControlCommand::RemoveSource {
+                strip_id: previous_id,
+            })
+            .unwrap();
+            a.command(ControlCommand::AddSource {
+                source_id: "recording".into(),
+            })
+            .unwrap();
+            let added = &a.snapshot.inputs[1];
+            assert_eq!(added.strip_id, format!("input-{next_id}"));
+            assert_eq!(added.colour_slot, 0);
+            previous_id = added.strip_id.clone();
+            assert_eq!(a.snapshot.inputs[0], peer);
+            assert_eq!(a.snapshot.telemetry.inputs, telemetry);
+        }
+        a.command(ControlCommand::ReplaceSource {
+            strip_id: previous_id.clone(),
+            source_id: "replacement".into(),
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.inputs[1].strip_id, previous_id);
+        assert_eq!(a.snapshot.inputs[1].source_id, "replacement");
+        assert_eq!(a.snapshot.inputs[1].colour_slot, 0);
+        assert_eq!(a.snapshot.inputs[0], peer);
+        assert_eq!(a.snapshot.telemetry.inputs, telemetry);
+    }
+    #[test]
+    fn source_colour_preferences_repair_saved_slots_and_preserve_restore_semantics() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-colour-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut config = config();
+        config.settings_file = Some(path.clone());
+        for (saved, expected) in [
+            (vec![5; 8], vec![0, 1, 2, 3, 4, 5, 5, 5]),
+            (vec![5, 3, 255, 0, 3, 5, 4, 5], vec![1, 3, 2, 0, 3, 5, 4, 5]),
+            (vec![5, 4, 3, 2, 1, 0, 255], vec![5, 4, 3, 2, 1, 0, 5]),
+        ] {
+            let mut snapshot = actor().snapshot;
+            snapshot.settings.keep_in_tray = false;
+            snapshot.settings.meter_style = MeterStyle::History;
+            snapshot.inputs = saved
+                .iter()
+                .enumerate()
+                .map(|(index, colour_slot)| InputStrip {
+                    strip_id: format!("input-{}", 500 + index),
+                    source_id: if index == 1 {
+                        "app:42:0000000000000001".into()
+                    } else {
+                        format!("recording-{index}")
+                    },
+                    kind: SourceKind::Recording,
+                    display_name: format!("Saved source {index}"),
+                    detail: Some("Saved detail".into()),
+                    phase: InputPhase::Capturing,
+                    fault: Some(Failure::Capture.error()),
+                    gain_db: Some(-13.5),
+                    muted: index % 2 == 0,
+                    colour_slot: *colour_slot,
+                    restored: false,
+                })
+                .collect();
+            snapshot.destinations.push(DestinationStrip {
+                destination_id: "discord-8".into(),
+                kind: DestinationKind::Discord,
+                device_id: None,
+                display_name: None,
+                server_id: "1".into(),
+                channel_id: "2".into(),
+                session_id: 42,
+                connection: Connection::Disconnected,
+                volume_db: Some(-22.5),
+                muted: true,
+            });
+            save_preferences(&config, &snapshot).unwrap();
+            let saved_bytes = std::fs::read(&path).unwrap();
+            let restored = load_preferences(&config).unwrap();
+            let mut expected_inputs = snapshot.inputs.clone();
+            for (index, (input, colour_slot)) in
+                expected_inputs.iter_mut().zip(expected).enumerate()
+            {
+                input.colour_slot = colour_slot;
+                input.kind = if index == 1 {
+                    SourceKind::Application
+                } else {
+                    SourceKind::Recording
+                };
+                input.phase = if index == 1 {
+                    InputPhase::Stopped
+                } else {
+                    InputPhase::Opening
+                };
+                input.fault = None;
+                input.restored = true;
+            }
+            let mut expected_destinations = snapshot.destinations.clone();
+            expected_destinations[0].session_id = 0;
+            assert_eq!(restored.inputs, expected_inputs);
+            assert_eq!(restored.destinations, expected_destinations);
+            assert_eq!(restored.selection, snapshot.selection);
+            assert_eq!(restored.output, Some(snapshot.output.clone()));
+            assert_eq!(restored.settings, snapshot.settings);
+            assert_eq!(load_preferences(&config).unwrap().inputs, expected_inputs);
+            assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
+            snapshot.inputs = restored.inputs;
+            snapshot.destinations = restored.destinations;
+            save_preferences(&config, &snapshot).unwrap();
+            assert_eq!(load_preferences(&config).unwrap().inputs, expected_inputs);
+            snapshot.settings.restore_setup = false;
+            save_preferences(&config, &snapshot).unwrap();
+            let disabled = load_preferences(&config).unwrap();
+            assert!(disabled.inputs.is_empty());
+            assert!(disabled.destinations.is_empty());
+            assert_eq!(disabled.settings, snapshot.settings);
+            assert_eq!(disabled.selection, snapshot.selection);
+            assert_eq!(disabled.output, Some(snapshot.output));
+
+            // Invalid serialized values still fail deserialization; only u8
+            // display metadata is repaired, without weakening validation.
+            for invalid in [-1, 256] {
+                let mut value: serde_json::Value = serde_json::from_slice(&saved_bytes).unwrap();
+                value["inputs"][0]["colourSlot"] = invalid.into();
+                std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                assert!(load_preferences(&config).is_err());
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn destination_gain_preserves_fractional_db_and_one_destination_limit() {

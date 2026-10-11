@@ -521,7 +521,9 @@ export class FixtureTransport implements Transport {
         const s = this.current.sources.find((s) => s.id === c.sourceId);
         if (s) {
           const colour =
-            Math.max(-1, ...this.current.inputs.map((s) => s.colourSlot)) + 1;
+            [0, 1, 2, 3, 4].find(
+              (slot) => !this.current.inputs.some((s) => s.colourSlot === slot),
+            ) ?? 5;
           this.current.inputs.push({
             stripId: `strip:${Date.now()}`,
             sourceId: s.id,
@@ -532,7 +534,7 @@ export class FixtureTransport implements Transport {
             fault: null,
             gainDb: 0,
             muted: false,
-            colourSlot: Math.min(5, colour),
+            colourSlot: colour,
             restored: false,
           });
         }

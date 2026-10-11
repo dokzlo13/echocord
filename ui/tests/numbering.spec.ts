@@ -145,6 +145,71 @@ test("source ordinals compact after middle and first removal while colour, ident
   );
 });
 
+test("source card and jump colours reuse a freed slot through churn while peers stay unchanged", async ({
+  page,
+}) => {
+  await page.goto("/tests/harness.html?fixture=many");
+  const sources = page.getByRole("region", { name: "Sources", exact: true });
+  await sources
+    .getByRole("button", { name: "Unmute Preview browser in the mix" })
+    .click();
+  const peer = page.locator('[id="card-strip:2"]');
+  const node = await peer.elementHandle();
+  await page.clock.install();
+  await page.clock.pauseAt(new Date());
+  const history = await page.evaluateHandle(() => {
+    const h = window.uiHarness;
+    h.adapter.telemetry.ingest(h.transport.current.telemetry);
+    return h.adapter.telemetry.history("src:strip:2");
+  });
+  expect(await history.evaluate((ring) => !!ring)).toBe(true);
+  for (let cycle = 0; cycle < 7; cycle++) {
+    await sources
+      .getByRole("button", { name: "Remove Preview player" })
+      .click();
+    // Fixture identities use the clock; keep IDs distinct without introducing
+    // a telemetry gap while exercising repeated removal/addition.
+    await page.clock.fastForward(1);
+    await sources.getByRole("button", { name: "Add source" }).click();
+    await page.getByRole("option", { name: /Preview player/ }).press("Enter");
+    const added = sources.getByRole("article", {
+      name: "Source 3: Preview player",
+      exact: true,
+    });
+    await expect(added).toHaveAttribute("data-colour", "0");
+    await expect(added.locator(".identity-row > .ch")).toHaveCSS(
+      "background-color",
+      "rgb(57, 135, 229)",
+    );
+    await expect(
+      sources.getByRole("button", { name: "Show source 3: Preview player" }),
+    ).toHaveCSS("background-color", "rgb(57, 135, 229)");
+    await expect(peer).toHaveAttribute("data-colour", "1");
+    await expect(peer.locator(".identity-row > .ch")).toHaveCSS(
+      "background-color",
+      "rgb(25, 158, 112)",
+    );
+    await expect(
+      sources.getByRole("button", { name: "Show source 1: Preview browser" }),
+    ).toHaveCSS("background-color", "rgb(25, 158, 112)");
+  }
+  expect(await peer.evaluate((el, original) => el === original, node)).toBe(
+    true,
+  );
+  expect(
+    await page.evaluate(
+      (original) =>
+        window.uiHarness.adapter.telemetry.history("src:strip:2") === original,
+      history,
+    ),
+  ).toBe(true);
+  await numbers(sources, ["1", "2", "3"]);
+  await expect(page.locator(".dest-card")).toHaveAttribute(
+    "data-state",
+    "live",
+  );
+});
+
 test("destination ordinals compact without remounting or resetting a surviving room", async ({
   page,
 }) => {

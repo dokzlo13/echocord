@@ -72,7 +72,7 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-040 | Consistent progressive card/jump numbering | done | owner-selected scope; EC-041 design checkpoint | UI worker / a1; coordinator integration | main | [task](EC-040.md), 40155c8; 128 checks and native smokes |
 | EC-041 | Numbering design and implementation review | done | EC-040 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-041.md); exact-commit GO |
 
-| EC-042 | Reuse source colours and repair grey restore metadata | active | owner report; EC-043 design checkpoint before code | coordinator / design | main | [task](EC-042.md) |
+| EC-042 | Reuse source colours and repair grey restore metadata | active | owner report; EC-043 design checkpoint before code | implementation worker / a1; coordinator integration | agent/EC-042-a1 | [task](EC-042.md) |
 | EC-043 | Source-colour correction review | active | EC-042 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-043.md) |
 
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

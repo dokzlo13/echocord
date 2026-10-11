@@ -4,15 +4,15 @@ Only the coordinator edits scheduling state. Individual task files hold evidence
 
 ## Delivered multiple-room epoch
 
-Session close is complete: EC-036 restores joining progress styles, EC-037 records the unproven Firefox distortion report without an audio change, EC-038 reviews, and EC-039 delivers the corrected build. The owner confirms multi-server operation. The owner confirmed the updated joining display and the running owner session is preserved. Discord-as-source remains the main next-agent priority.
+Session close is complete: EC-036 restores joining progress styles, EC-037 records the unproven Firefox distortion report without an audio change, EC-038 reviews, and EC-039 delivers the corrected build. The owner confirms multi-server operation. The owner confirmed the updated joining display and the running owner session is preserved. Discord-as-input is on hold until the owner reopens it. EC-040 is the current small UI epoch.
 
 EC-030–033 are integrated and independently reviewed. Four total destinations can include multiple Discord rooms in distinct servers under the existing bot and at most three playback devices. Controls, reservations, cleanup and histories are independent; all outputs restore idle. Final integrated checks passed 120 portable library, nine probe, 132 Windows library and 124 UI checks in the final closing build plus staged build/native shell/worker gates. The native empty-source/four-room overlap is corrected and verified at 125% scaling. Owner confirms multi-server operation; controlled listener/failure/latency measurements remain open.
 
 ## Next pickup order
 
-1. **EC-035 — main priority:** bounded proof and reviewed design for a Discord room as one aggregate participant-audio source. EC-034 records receive/encryption, packet timing, resource and feedback constraints. Per-participant mute follows later; no room-source control ships yet.
-2. **EC-040:** consistent source/destination card and jump-control numbering, with proposed hiding for a single entry and revealing matching numbers when a second entry is added. This is queued work, not part of the closing build.
-3. **EC-006 / EC-037:** suitable coordinated listening for the unresolved Firefox report and controlled delivery/recovery/resource/latency/five-hour acceptance. Owner observations remain distinct from measurements; no speculative audio timing/routing fix was made.
+1. **EC-040 — current small UI epoch:** matching source/destination card and jump-control numbering; hide numbering with one card, reveal matching numbers with multiple cards. EC-041 supplies design and implementation review checkpoints.
+2. **EC-006 / EC-037:** suitable coordinated listening and controlled delivery/recovery/resource/latency/five-hour acceptance remain open. No audio experiment belongs to this UI epoch.
+3. **EC-035 — owner hold until further notice:** Discord-room input research is retained in EC-034; do not dispatch proof, receive implementation or lifecycle design without the owner reopening this work.
 
 The joining visual fix is available through the existing launcher for manual review. Preserve any owner session that is running when work resumes; do not infer runtime state from this record.
 
@@ -54,11 +54,12 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-032 | Independent multi-room review | done | owner-authorized epoch | reviewers / r1 gateway, r2 controller | read-only | [task](EC-032.md); native/UI exact-hash GO and final integration evidence |
 | EC-033 | Multiple-room integration | done | EC-030/031/032 checkpoints | coordinator / a1 | main | [task](EC-033.md); staged release activated and app open |
 | EC-034 | Discord room source feasibility research | done | owner next-priority request | research worker / r1; coordinator verification | read-only | [task](EC-034.md); no receive implementation/live proof |
-| EC-035 | Discord room source proof and lifecycle design | ready | EC-033 delivery, EC-034 | unassigned | — | [task](EC-035.md) |
+| EC-035 | Discord room source proof and lifecycle design | blocked (owner hold) | EC-033 delivery, EC-034 | unassigned | — | [task](EC-035.md) |
 | EC-036 | Joining progress presentation | done | owner feedback, EC-033 | UI worker / a1; coordinator integration | main | [task](EC-036.md), 94bea10; 124 UI checks and native shell gates |
 | EC-037 | Idle/capture audio interference investigation | done | owner feedback, EC-033 | native investigation worker / a1 | main | [task](EC-037.md), fb044e2; no proven cause or audio change |
 | EC-038 | Independent session-close review | done | EC-036/037 checkpoints | reviewer / r1 | read-only | [task](EC-038.md); exact-hash GO |
 | EC-039 | Minor fixes and session close | done | EC-036/037/038 | coordinator / a1 | main | [task](EC-039.md); corrected executable installed, owner-confirmed UI |
-| EC-040 | Consistent progressive card/jump numbering | ready | owner next-session feedback | unassigned | — | [task](EC-040.md) |
+| EC-040 | Consistent progressive card/jump numbering | active | owner-selected scope; EC-041 design checkpoint before code | coordinator / design | main | [task](EC-040.md) |
+| EC-041 | Numbering design and implementation review | active | EC-040 design brief | reviewer / r1 | read-only main; coordinator records evidence | [task](EC-041.md) |
 
-Blocked here means an explicit task dependency, not a stalled runtime goal.
+Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

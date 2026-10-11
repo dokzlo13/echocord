@@ -11,6 +11,10 @@ test("bot setup explains the required permissions and Enter saves without joinin
 }) => {
   await openSetup(page);
   const guide = page.locator(".setup-guide");
+  await expect(
+    page.getByRole("dialog", { name: "Set up Discord bot" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Bot token", { exact: true })).toBeFocused();
   await expect(guide).not.toHaveAttribute("open");
   await expect(page.getByLabel("Bot token", { exact: true })).toBeVisible();
   await page.getByText("Create and invite a bot", { exact: true }).click();
@@ -41,6 +45,16 @@ test("bot setup explains the required permissions and Enter saves without joinin
   expect(
     await page.evaluate(() => (window.uiHarness as Harness).transport.commands),
   ).toEqual([]);
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await page.locator(".bot-chip").click();
+  await page
+    .getByRole("button", { name: "Replace token", exact: true })
+    .click();
+  await expect(
+    page.getByRole("dialog", { name: "Replace bot token" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Bot token", { exact: true })).toBeFocused();
+  await expect(page.locator(".setup-guide")).not.toHaveAttribute("open");
 });
 
 test("native help sends only fixed keys and browser failures keep a usable public URL", async ({

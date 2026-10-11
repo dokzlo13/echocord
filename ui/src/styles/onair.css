@@ -86,6 +86,3 @@
 .dest-card[data-status="live"] {
   border-color: #4a3634;
 }
-.titlebar .mark {
-  filter: drop-shadow(0 0 4px rgb(255 75 62 / 0.4));
-}

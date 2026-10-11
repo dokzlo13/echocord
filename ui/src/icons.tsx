@@ -48,29 +48,14 @@ export function ServerTile({
 }
 export function Mark() {
   return (
-    <svg
+    <img
       className="mark"
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
+      src="/brand/echocord-symbol.svg"
+      width="23"
+      height="12"
+      alt=""
       aria-hidden
-    >
-      <circle cx="7" cy="12" r="3" fill="currentColor" />
-      <path
-        d="M12 6.5a7.5 7.5 0 0 1 0 11"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-      <path
-        d="M16 3.5a11.5 11.5 0 0 1 0 17"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        opacity=".55"
-      />
-    </svg>
+      draggable={false}
+    />
   );
 }

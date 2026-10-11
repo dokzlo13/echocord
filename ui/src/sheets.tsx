@@ -40,12 +40,14 @@ function Sheet({
   footer,
   children,
   label,
+  initialFocus,
 }: {
   title: string;
   onClose: () => void;
   footer?: ReactNode | undefined;
   children: ReactNode;
   label?: string | undefined;
+  initialFocus?: string | undefined;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -54,7 +56,7 @@ function Sheet({
     const root = ref.current;
     if (!root) return;
     if (!root.contains(document.activeElement))
-      root.querySelector<HTMLElement>("input,button")?.focus();
+      root.querySelector<HTMLElement>(initialFocus ?? "input,button")?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -91,7 +93,7 @@ function Sheet({
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [initialFocus]);
   return (
     <div
       ref={ref}
@@ -935,6 +937,7 @@ export function BotSetup({
   const [token, setToken] = useState("");
   const [show, setShow] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [replacing] = useState(bot === "ready");
   const phase = busy
     ? "checking"
     : saved && bot === "ready"
@@ -950,7 +953,8 @@ export function BotSetup({
   };
   return (
     <Sheet
-      title="Discord bot"
+      title={replacing ? "Replace bot token" : "Set up Discord bot"}
+      initialFocus={phase === "ok" ? ".sheet-foot .btn-primary" : "#bot-token"}
       onClose={onClose}
       footer={
         phase === "ok" ? (
@@ -998,6 +1002,7 @@ export function BotSetup({
               <span className="field-label">Bot token</span>
               <span className="field-input">
                 <input
+                  id="bot-token"
                   type={show ? "text" : "password"}
                   value={token}
                   autoComplete="off"
@@ -1430,7 +1435,7 @@ export function ConnectionSheet({
       </div>
       <StatTiles uid={dest.uid} local={local} />
       <dl className="facts-list tabular">
-        <dt>Underruns</dt>
+        <dt>Underrun frames</dt>
         <dd ref={underruns}>Unavailable</dd>
         <dt>Audio</dt>
         <dd>{local ? "Native mix · 48 kHz stereo" : "Opus · 48 kHz stereo"}</dd>

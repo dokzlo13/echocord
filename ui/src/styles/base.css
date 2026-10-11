@@ -1419,12 +1419,22 @@ input {
 .field-input:focus-within {
   border-color: var(--focus);
 }
+.window .field-input:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.window .field-input input:focus-visible {
+  outline: 0;
+}
 .field-input input {
   flex: 1;
   min-width: 0;
   border: 0;
   outline: 0;
   background: transparent;
+}
+.field-input input::-ms-reveal {
+  display: none;
 }
 .field-error {
   color: var(--fault);
@@ -1656,9 +1666,6 @@ input {
   background: var(--inset);
   color: var(--ink-2);
   font-size: 12px;
-}
-.server-fact[data-reservation="connected"] {
-  color: var(--live-ink);
 }
 .server-fact[data-reservation="joining"],
 .server-fact[data-reservation="leaving"] {

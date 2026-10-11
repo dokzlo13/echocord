@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { ExternalLink } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 
 const HELP_LINKS = {
   portal: "https://discord.com/developers/applications",
@@ -12,7 +12,7 @@ export function HelpLink({
   children,
 }: {
   to: keyof typeof HELP_LINKS;
-  children: ReactNode;
+  children: string;
 }) {
   const [failed, setFailed] = useState(false);
   return (
@@ -20,6 +20,7 @@ export function HelpLink({
       <a
         className="help-link"
         href={HELP_LINKS[to]}
+        aria-label={`${children} (opens in browser)`}
         target="_blank"
         rel="noopener noreferrer"
         onClick={async (event) => {

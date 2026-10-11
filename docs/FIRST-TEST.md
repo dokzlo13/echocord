@@ -65,4 +65,4 @@ The new mix still needs coordinated listening. Quantitative listener delay, part
 
 `make check` checks production code and fixture UI behavior without joining voice. `make app-smoke` rebuilds and tests native UI/IPC/tray without sending Connect or joining voice; normal startup restoration may reopen saved recording inputs. It also verifies that destinations and the gateway remain idle. `make engine-smoke` checks the actual gateway/voice worker modes with synthetic invalid private setup, redacted diagnostics and observed exit. `make ui-dev` is explicitly a fixture preview. Native mixing regression helpers use owned synthetic sources and remain developer tools, not app setup steps.
 
-Discord room audio as an input is the next priority. Receive feasibility is researched in EC-034; EC-035 queues the bounded native proof and reviewed source design. This build does not capture participants or save room recordings.
+Discord room audio as an input is on hold until the owner reopens it. Receive feasibility is retained in EC-034; EC-035 holds the deferred native proof and source design. This build does not capture participants or save room recordings.

@@ -59,7 +59,7 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-037 | Idle/capture audio interference investigation | done | owner feedback, EC-033 | native investigation worker / a1 | main | [task](EC-037.md), fb044e2; no proven cause or audio change |
 | EC-038 | Independent session-close review | done | EC-036/037 checkpoints | reviewer / r1 | read-only | [task](EC-038.md); exact-hash GO |
 | EC-039 | Minor fixes and session close | done | EC-036/037/038 | coordinator / a1 | main | [task](EC-039.md); corrected executable installed, owner-confirmed UI |
-| EC-040 | Consistent progressive card/jump numbering | active | owner-selected scope; EC-041 design checkpoint before code | coordinator / design | main | [task](EC-040.md) |
-| EC-041 | Numbering design and implementation review | active | EC-040 design brief | reviewer / r1 | read-only main; coordinator records evidence | [task](EC-041.md) |
+| EC-040 | Consistent progressive card/jump numbering | active | owner-selected scope; EC-041 design checkpoint before code | UI worker / a1; coordinator integration | agent/EC-040-a1 | [task](EC-040.md) |
+| EC-041 | Numbering design and implementation review | active | design GO; EC-040 implementation checkpoint pending | reviewer / r1 | read-only main; coordinator records evidence | [task](EC-041.md) |
 
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

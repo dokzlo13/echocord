@@ -2,19 +2,25 @@
 
 Only the coordinator edits scheduling state. Individual task files hold evidence and handoff. Dependencies must be done before a task becomes active.
 
+## Delivered small UI epoch
+
+EC-040 matching progressive card/jump numbering is integrated as `40155c8`, with EC-041 design and exact-commit implementation GO. Each section hides singleton numbering and compacts multiple-card ordinals without changing identities, source colours or histories. The single-source summary retains state without its count; destination markers retain imagery.
+
+`make check` passed 120 portable library, nine probe and 128 UI/browser/adapter checks plus formatting/bindings/lint/type/build/Windows Clippy. The release and isolated empty/multiple-card native UI/IPC/discovery/idle-output/geometry/tray smokes passed. Ten browser captures were reviewed across five sizes and both meter styles. The existing launcher uses the updated build; test apps are closed. Owner visual feedback and wider native accessibility/scaling remain open. Discord-as-input is on hold until further notice.
+
 ## Delivered multiple-room epoch
 
-Session close is complete: EC-036 restores joining progress styles, EC-037 records the unproven Firefox distortion report without an audio change, EC-038 reviews, and EC-039 delivers the corrected build. The owner confirms multi-server operation. The owner confirmed the updated joining display and the running owner session is preserved. Discord-as-input is on hold until the owner reopens it. EC-040 is the current small UI epoch.
+Session close is complete: EC-036 restores joining progress styles, EC-037 records the unproven Firefox distortion report without an audio change, EC-038 reviews, and EC-039 delivers the corrected build. The owner confirms multi-server operation. The owner confirmed the updated joining display, and that owner session was preserved at the prior closeout. Discord-as-input is on hold until the owner reopens it. EC-040 is the delivered small UI epoch.
 
 EC-030–033 are integrated and independently reviewed. Four total destinations can include multiple Discord rooms in distinct servers under the existing bot and at most three playback devices. Controls, reservations, cleanup and histories are independent; all outputs restore idle. Final integrated checks passed 120 portable library, nine probe, 132 Windows library and 124 UI checks in the final closing build plus staged build/native shell/worker gates. The native empty-source/four-room overlap is corrected and verified at 125% scaling. Owner confirms multi-server operation; controlled listener/failure/latency measurements remain open.
 
 ## Next pickup order
 
-1. **EC-040 — current small UI epoch:** matching source/destination card and jump-control numbering; hide numbering with one card, reveal matching numbers with multiple cards. EC-041 supplies design and implementation review checkpoints.
+1. **UI follow-up:** owner review of delivered EC-040 numbering and selection of any next small improvements. EC-041 design and implementation review are complete.
 2. **EC-006 / EC-037:** suitable coordinated listening and controlled delivery/recovery/resource/latency/five-hour acceptance remain open. No audio experiment belongs to this UI epoch.
 3. **EC-035 — owner hold until further notice:** Discord-room input research is retained in EC-034; do not dispatch proof, receive implementation or lifecycle design without the owner reopening this work.
 
-The joining visual fix is available through the existing launcher for manual review. Preserve any owner session that is running when work resumes; do not infer runtime state from this record.
+The numbering update and earlier joining fix are available through the existing launcher for manual review. Preserve any owner session that is running when work resumes; do not infer runtime state from this record.
 
 Original application playback remains an OS route; independent local mute, desktop capture and a new virtual driver are outside the release. The approved UI and original owner/prototype artifacts are preserved. Current behavior and exact validation boundaries are in STATE and the task records.
 
@@ -59,7 +65,7 @@ Original application playback remains an OS route; independent local mute, deskt
 | EC-037 | Idle/capture audio interference investigation | done | owner feedback, EC-033 | native investigation worker / a1 | main | [task](EC-037.md), fb044e2; no proven cause or audio change |
 | EC-038 | Independent session-close review | done | EC-036/037 checkpoints | reviewer / r1 | read-only | [task](EC-038.md); exact-hash GO |
 | EC-039 | Minor fixes and session close | done | EC-036/037/038 | coordinator / a1 | main | [task](EC-039.md); corrected executable installed, owner-confirmed UI |
-| EC-040 | Consistent progressive card/jump numbering | active | owner-selected scope; EC-041 design checkpoint before code | UI worker / a1; coordinator integration | agent/EC-040-a1 | [task](EC-040.md) |
-| EC-041 | Numbering design and implementation review | active | design GO; EC-040 implementation checkpoint pending | reviewer / r1 | read-only main; coordinator records evidence | [task](EC-041.md) |
+| EC-040 | Consistent progressive card/jump numbering | done | owner-selected scope; EC-041 design checkpoint | UI worker / a1; coordinator integration | main | [task](EC-040.md), 40155c8; 128 checks and native smokes |
+| EC-041 | Numbering design and implementation review | done | EC-040 design and implementation checkpoints | reviewer / r1 | read-only | [task](EC-041.md); exact-commit GO |
 
 Blocked here means an explicit task dependency or owner hold, not a stalled runtime goal.

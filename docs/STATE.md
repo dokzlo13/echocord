@@ -1,5 +1,7 @@
 # Current state
 
+Current follow-up: EC-042 corrects confirmed source-colour exhaustion after repeated add/remove operations and repairs affected saved grey assignments on restore; EC-043 owns independent design/code review. The owner confirms the symptom while capturing. Existing coloured peers and audio identities/lifetimes must remain unchanged.
+
 The small UI numbering epoch is delivered. Source and destination sections independently hide card numbers and jump navigation for a single card, then show matching contiguous ordinals for multiple cards. Removal compacts numbers while preserving native identities, source colours and histories. Destination markers retain server/device imagery; the single-source summary keeps state without a redundant count. EC-040 implementation and EC-041 independent design/code review are complete. Discord-as-input is on hold until the owner reopens it. The prior joining-display fix remains owner-confirmed; this numbering update awaits owner feedback.
 
 The multiple-room release is delivered as a manually testable Windows app. Up to eight selected application process trees/recording inputs feed one native mix and four total destinations: Discord rooms in different servers under the existing bot, and at most three explicit Windows playback devices. Each output has independent start/cancel/stop, gain, mute, fault and session-fenced telemetry. One configured or retiring room reserves each server. New and restored outputs stay idle; source changes and ordinary output failures preserve their peers.

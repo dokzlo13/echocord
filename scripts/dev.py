@@ -147,42 +147,98 @@ def build_environment():
     os.environ.setdefault("XWIN_CACHE_DIR", str(ROOT / ".cache/xwin"))
 
 
-def msvc_path_environment(env, roots):
+def msvc_path_environment(env, roots, *, trim=False):
     # MSVC reads _CL_ after its command line, including compiler invocations
     # launched by CMake/MSBuild. This avoids CMake flattening quoted CFLAGS.
     mapped = env.copy()
-    flags = [f"/pathmap:{path}={replacement}" for path, replacement in roots]
+    flags = (
+        [f"/d1trimfile:{roots[0][0]}"]
+        if trim
+        else [
+            f"/pathmap:{path}={replacement.lstrip('/')}" for path, replacement in roots
+        ]
+    )
     mapped["_CL_"] = " ".join(
         filter(None, (env.get("_CL_", ""), subprocess.list2cmdline(flags)))
     )
     return mapped
 
 
-def verify_msvc_path_mapping(env):
-    """Prove the installed compiler remaps __FILE__ before a long release build."""
+def verify_msvc_path_mapping(env, *, trim=False):
+    """Prove emitted __FILE__ strings using an owned, side-effect-free C program."""
     directory = ROOT / ".tools"
     directory.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="path-map-", dir=directory) as temporary:
         source = Path(temporary) / "probe.c"
+        executable = Path(temporary) / "probe.exe"
         source.write_text(
-            "const char *echocord_probe_source = __FILE__;\n", encoding="utf-8"
+            "#include <stdio.h>\nint main(void) { puts(__FILE__); return 0; }\n",
+            encoding="utf-8",
         )
-        try:
-            expanded = run("cl", "/nologo", "/EP", "/FC", source, capture=True, env=env)
-        except subprocess.CalledProcessError:
-            raise SystemExit(
-                "MSVC source-path mapping probe failed; install current Visual Studio C++ Build Tools"
-            ) from None
-    match = re.search(r'echocord_probe_source\s*=\s*("(?:\\.|[^"\\])*")', expanded)
-    try:
-        mapped = json.loads(match[1]).replace("\\", "/") if match else ""
-    except ValueError:
+        result = subprocess.run(
+            [
+                shutil.which("cl") or "cl",
+                "/nologo",
+                "/O1",
+                "/MD",
+                "/FC",
+                str(source),
+                f"/Fo{Path(temporary) / 'probe.obj'}",
+                f"/Fe{executable}",
+            ],
+            cwd=temporary,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        relative = source.relative_to(ROOT).as_posix()
+        codes = sorted(
+            set(re.findall(r"\b(?:[CD]\d{4}|LNK\d{4})\b", result.stdout + result.stderr))
+        )
+        diagnostics = (
+            f"compiler exit {result.returncode}; codes {','.join(codes) or 'none'}"
+        )
         mapped = ""
-    if not mapped.startswith("/echocord/"):
-        raise SystemExit(
-            "MSVC did not remap __FILE__; install current Visual Studio C++ Build Tools before making a release"
+        if result.returncode == 0:
+            emitted = subprocess.run(
+                [str(executable)],
+                cwd=temporary,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            if emitted.returncode:
+                raise SystemExit(
+                    f"MSVC source-path probe program failed (exit {emitted.returncode})"
+                )
+            mapped = emitted.stdout.strip().replace("\\", "/")
+    expected = relative if trim else f"echocord/{relative}"
+    if result.returncode or mapped.lstrip("/") != expected:
+        category = (
+            "missing marker"
+            if not mapped
+            else "absolute"
+            if re.match(r"^(?:[A-Za-z]:|/)", mapped)
+            else "unexpected relative"
         )
-    print("MSVC source-path mapping: verified")
+        raise SystemExit(
+            f"MSVC source-path probe failed ({diagnostics}; marker {category})"
+        )
+    print(f"MSVC source-path mapping: verified ({'trimfile' if trim else 'pathmap'})")
+
+
+def verified_msvc_environment(env, roots):
+    mapped = msvc_path_environment(env, roots)
+    try:
+        verify_msvc_path_mapping(mapped)
+        return mapped
+    except SystemExit as failure:
+        # Windows App SDK uses this older MSVC option for reproducible builds.
+        # Only select it after the same compiler proves the exact relative path.
+        print(f"{failure}; testing trimfile compatibility")
+    trimmed = msvc_path_environment(env, roots, trim=True)
+    verify_msvc_path_mapping(trimmed, trim=True)
+    return trimmed
 
 
 def windows_flags():
@@ -204,8 +260,7 @@ def windows_flags():
     ]
     env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
     if WINDOWS:
-        env = msvc_path_environment(env, roots)
-        verify_msvc_path_mapping(env)
+        env = verified_msvc_environment(env, roots)
     else:
         # Opus assertion filenames come from C, not Rust. cc/cmake parse these
         # quoted flags; clang-cl supports the same file-prefix mapping as clang.

@@ -19,7 +19,7 @@ npm run dev
 | `npm test` | Build and browser/adapter tests |
 | `npm run check` | Lint, build and tests |
 
-Tests default to fixture port4184 and production-preview port4185. Set `ECHOCORD_TEST_PORT` and `ECHOCORD_PREVIEW_PORT` for isolated parallel checkouts. Artifacts go to the root `artifacts/test-results/` directory. No bot credentials or real Discord services are used.
+Tests default to fixture port 4184 and production-preview port 4185. Set `ECHOCORD_TEST_PORT` and `ECHOCORD_PREVIEW_PORT` for isolated parallel checkouts. Artifacts go to the root `artifacts/test-results/` directory. No bot credentials or real Discord services are used.
 
 `src/generated.ts` is generated from the Rust control model; do not hand-edit it. `nativeAdapter.ts` is production transport, and `fixtures.ts` is test/preview only. Package version is injected by Vite for the Settings display. Setup links use an exact native allowlist; adding a new external destination requires updating and testing that allowlist.
 

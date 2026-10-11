@@ -1,64 +1,90 @@
-# WSL development environment
+# Development
 
-## Boundary
+Echocord builds a Windows x64 application. You can contribute from native Windows, Linux, or WSL using the same repository and Python entry point. Linux/WSL cross-compilation produces a Windows executable; it does not create a Linux audio application.
 
-Keep the authoritative checkout on the WSL Linux filesystem. Keep dependencies, SDK caches, build output, and agent worktrees there. Use the Windows host to run the produced executable, access WASAPI/VB-Cable, and exercise the native UI. Do not create a second Windows source checkout.
+## Tools
 
-For the Tauri runtime, verify existing WebView2 before installing anything; copy an executable and proven runtime dependencies to a small staging directory only if direct WSL launch proves insufficient. No Windows Rust, Node, Visual Studio, or CMake installation is planned.
+| Tool | Requirement | Purpose |
+| --- | --- | --- |
+| Git | Current supported release | Clone and contribute |
+| Python | 3.12 or newer, with venv/pip | Bootstrap, verification, packaging |
+| Rustup | [Official installer](https://rustup.rs/) | Installs the exact Rust toolchain/target in `rust-toolchain.toml` |
+| Node.js | Version in [`.node-version`](../.node-version), currently24.11.1 | Locked frontend dependencies, tests, assets |
+| Windows C++ tools | MSVC x64 C++ Build Tools + Windows SDK | Native Windows compilation and bundled Opus |
+| Linux C++ tools | C/C++ build essentials, Clang/LLD/LLVM | Portable tests and Windows cross-compilation |
 
-## Project tool versions
+The repository pins Rust 1.99.0 and the Windows MSVC target. Bootstrap creates a repository-local Python tool environment containing pinned CMake 4.4.4 and Ninja 1.13.2; Linux/WSL also gets cargo-xwin0.23.1. These are build tools, not application runtime requirements.
 
-The initial build recipe uses Rust 1.99.0 with rustfmt, Clippy, and x86_64-pc-windows-msvc support; cargo-xwin 0.23.1, CMake 4.4.4, and Ninja 1.13.2 via uv; LLVM 18; and Node 24.11.1. These are project tool versions, not a machine inventory or claim to be latest. Keep host-specific inventory in ignored `.trash/`.
+### Native Windows
 
-Install Git, GNU Make, Python 3.12+, `patch`, rustup, uv, and the project's Node version first. Then install the pinned user-level WSL tools:
+Install Python, [Node 24.11.1](https://nodejs.org/dist/v24.11.1/), Git, and Rustup. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) with **Desktop development with C++**, including the **MSVC x64/x86 build tools** and a **Windows SDK**. The Visual Studio IDE itself is not required. The build script discovers the installed Visual Studio environment; an ordinary PowerShell terminal is sufficient.
 
-```sh
-make setup-wsl
+The application also needs [WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) and the [Visual C++ v14 Redistributable x64](https://aka.ms/vc14/vc_redist.x64.exe) when run. Microsoft/Tauri's [Windows prerequisites](https://v2.tauri.app/start/prerequisites/#windows) explain the platform setup.
+
+```powershell
+git clone https://github.com/dokzlo13/echocord.git
+cd echocord
+python scripts/dev.py setup --browser
+python scripts/dev.py check
+python scripts/dev.py build
+.\target\x86_64-pc-windows-msvc\release\echocord.exe
 ```
 
-Install Clang, LLD, and LLVM tools from suitable distro packages matching the validated LLVM version. CMake/Ninja matter for native dependencies even though the generic Rust probe does not use them.
+If your installation exposes only the Python launcher, use `py -3` in place of `python` and make sure it selects Python 3.12 or newer.
 
-## Development commands
+### Linux and WSL
 
-The root Makefile is the command entry point. Run `make` or `make help` to list targets. Missing prerequisites fail explicitly. Install UI dependencies and the browser before aggregate checks:
+Use a recent distribution with Python 3.12+. For Ubuntu 24.04 or newer:
 
 ```sh
-make ui-install
-make ui-browser-install
-make build
-make check
+sudo apt-get update
+sudo apt-get install -y git curl build-essential clang lld llvm pkg-config python3 python3-venv
 ```
+
+Install Rustup and the Node version in `.node-version`, using the official installers or a version manager. Then:
+
+```sh
+git clone https://github.com/dokzlo13/echocord.git
+cd echocord
+python3 scripts/dev.py setup --browser
+python3 scripts/dev.py check
+python3 scripts/dev.py build
+```
+
+cargo-xwin obtains the Windows SDK/import libraries and cross-compiles with Clang/LLD; a Windows compiler installation is not needed for this path. Downloaded Microsoft SDK components remain subject to their upstream license terms. See [cargo-xwin](https://github.com/rust-cross/cargo-xwin) for details.
+
+In WSL, keep the checkout and dependency/build caches on the Linux filesystem for build performance. The resulting EXE can run on the Windows host. On ordinary Linux, copy the resulting release package to a supported Windows machine for runtime testing. WASAPI, the tray, DPAPI, and actual voice/audio behavior cannot be validated by Linux portable tests alone.
+
+## Daily commands
+
+Run `python scripts/dev.py --help` for the complete command list; substitute `python3` on Linux/WSL.
 
 | Command | Purpose |
 | --- | --- |
-| `make build` | Build the Windows app in WSL |
-| `make check` | Production Rust, bindings, frontend, and Windows checks |
-| `make app-run` | Run the built app; restore capture preferences but never auto-connect Discord |
-| `make app-smoke` | Build and verify native UI/tray/IPC without voice joining |
-| `make engine-smoke` | Exercise gateway/voice worker rejection and observed exit with synthetic private setup |
-| `make ui-dev` | Local fixture preview for development |
-| `make bindings` | Regenerate the TypeScript control contract |
+| `python scripts/dev.py setup --browser` | Prepare verified dependencies and test browser |
+| `python scripts/dev.py check` | Portable checks plus Windows compilation checks |
+| `python scripts/dev.py check --portable` | Core/UI checks without Windows compilation |
+| `python scripts/dev.py build` | Build the Windows release executable |
+| `python scripts/dev.py app-test` | Run application unit tests on native Windows |
+| `npm --prefix ui run dev` | Start the isolated fixture UI preview |
+| `python scripts/dev.py version` | Verify versions agree across release metadata |
+| `python scripts/package-third-party.py` | Generate release licenses and corresponding sources |
+| `python scripts/dev.py package` | Package the checked EXE, notices, and checksums |
 
-`make build` builds the production Windows app; `make check` checks its core, generated types, frontend, and Windows integration without opening a window or connecting voice. Use `make app-run` for the real app, `make app-smoke` for native UI checks, and `make engine-smoke` for synthetic gateway/voice-worker rejection and observed-exit checks. App smoke sends no Connect and joins no voice, but normal startup restoration may capture saved recording inputs. Browser tests use fixtures. The frontend uses the adopted On Air source with native controls and self-hosted fonts; Mantine is retired. Worker previews/tests must use distinct ports, and owned previews stop before cleanup. Source, caches, and build artifacts remain in WSL. Retired prototypes and one-off dependency probes are preserved in Git history, not the working tree.
+Do not run frontend builds and app builds concurrently in the same checkout: both update `ui/dist`. Parallel workers should use isolated checkouts/targets and distinct preview ports. The Makefile and shell wrappers are conveniences around the same build entry point.
 
-To stage a replacement while an older app is running, set `ECHOCORD_APP_TARGET_DIR` to a separate WSL directory for both `make app-build` and `make app-run`/`make app-smoke`. This explicitly redirects native app artifacts; the default remains the repository's `target/`. Keep the running executable intact until its session ends, then activate the reviewed replacement. The single-instance guard still applies, including smoke runs; a different target or data directory does not bypass it. Native probe commands retain their normal target.
+For UI/core work without a Windows build toolchain, install Rustup, Node, Python and a native C linker, run `python scripts/prepare-opus.py`, `npm --prefix ui ci`, and `npx --prefix ui --no-install playwright install chromium`, then `check --portable`. On Linux, Playwright may also need distribution browser libraries; use its documented `install --with-deps chromium` setup on a suitable development machine.
 
-Production regression helpers remain available for focused native diagnostics. The combined app uses consistent dynamic CRT linking because bundled Opus requests that runtime. WebView2 and Visual C++ runtime availability remain distribution requirements. Native capture and combined startup have been checked; earlier recording and application-to-Discord delivery with low perceived delay were owner-confirmed; live mixed delivery, measured listener latency and long sessions remain open in [acceptance](FIRST-TEST.md).
+## Dependencies and generated files
 
-The `capture-probe` supports `--application-suite` for owned synthetic application/child/isolation checks and `--mixing-suite` for credential-free two-source/common-reader checks; build it with `bash scripts/build-native-tool.sh capture-probe`. The read-only `--playback-list` reports endpoint support, default roles and active sessions; keep that identifying inventory private. `--playback-suite ENDPOINT_ID` exercises owned signal/fan-out only on an explicitly selected non-default endpoint with no active session, rechecking before playback and never changing endpoint volume/routing. Its `--browser-suite` requires an explicitly dedicated disposable browser profile and two synthetic tone URLs; see EC-017 for the measurement boundaries. These are developer regression helpers, not app setup prerequisites. Keep raw output/profile data ignored and never use a personal browser profile for a fixture.
+Commit Cargo/npm lockfiles and use locked installs. The small `libopus_sys` compatibility patch is materialized and checksum-verified by `scripts/prepare-opus.py`; do not edit a global Cargo registry cache. The patcher is Python-only, so Unix `patch` is not a Windows prerequisite. [Patch notes](../patches/README.md) explain the upstream changes and removal condition.
 
-Concurrent worktrees should use separate portable Cargo target directories. Sharing unqualified executable outputs such as `target/debug/export-bindings` can run a different branch's cached generator even when Cargo considers the current branch fresh. Final integrated checks use the normal commands after worker builds have stopped.
+Rust control types generate `ui/src/generated.ts`; regenerate through the export-bindings command when changing the contract, then run the drift check. Frontend fixture data must remain separate from the production native adapter. Audio samples never pass through frontend IPC.
 
-cargo-xwin documents cross-compilation and WSL execution, including CMake/Ninja support. Tauri documents a cross-compilation route but cautions that it is less tested than native builds. This project investigates that route to keep development in WSL. Start with an executable; NSIS packaging can follow, and MSI packaging is not a prerequisite.
+Release builds remap source paths and avoid distributing personal machine paths. Packaging requires the third-party notices and exact covered source archive; see [RELEASING.md](RELEASING.md). Build outputs, dependency caches, browser artifacts, and local runtime profiles are not source files.
 
-Sources: [cargo-xwin](https://github.com/rust-cross/cargo-xwin), [Tauri Windows build](https://v2.tauri.app/distribute/windows-installer/), [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+## Runtime configuration and tests
 
-## Runtime storage
+A normal Windows launch stores encrypted credentials and versioned preferences under `%LOCALAPPDATA%\Echocord\data`. Development and CI do not need a bot token. Use a separate disposable data directory for native fixtures; the app accepts `--data-dir`, `--settings-file`, and `--token-file` overrides. Plaintext credential files are not accepted as protected storage.
 
-A normal executable launch uses `ProjectDirs` local application data: `%LOCALAPPDATA%\Echocord\data` on Windows. The token is encrypted for the current Windows user with DPAPI; versioned ordinary JSON stores source/destination cards, dB gain/mute and app preferences. The shell remembers safe window size in a separate sidecar. Prior recording/destination/output preferences migrate; future-version files are preserved. In-app Test & Save validates the token before encrypted persistence and never joins voice. Rust reads tokens; frontend snapshots contain no secret. Restore setup defaults on: recording cards reopen, app cards wait for explicit exact-identity attachment, and rooms stay idle. Turning restore off starts with empty cards. A source added through the picker captures before any destination connects. Keep running in tray defaults on; turning it off makes Close quit.
-
-`make app-run` uses those defaults. Set `ECHOCORD_DATA_DIR` to an ignored WSL directory for isolated development storage. `ECHOCORD_TOKEN_FILE` explicitly overrides the encrypted credential destination. Plaintext credential files are not accepted. The executable also accepts `--data-dir`, `--token-file`, and `--settings-file`. Keep all private paths and fixtures outside Git. Tests and probes use explicit private directories and synthetic values.
-
-## Secrets and live tests
-
-Use a locally configured bot only during coordinated tests, with other clients using that bot stopped. Enter the token locally into a secret store or ignored runtime mechanism; do not paste it into chat, commits, or test logs. CI/static validation should not require the bot token or live Discord. Keep raw logs, recordings, original notes, local paths, machine inventory, and account details under ignored `.trash/`; only sanitized generic evidence belongs in Git. Gitignore is an exclusion mechanism, not encryption or backup. Remote backup/CI hosting is a separate configuration decision.
+Do not test against somebody's running session or personal browser profile. Use owned synthetic sources and explicit devices for audio checks, and coordinate any real Discord join. Read [TESTING.md](TESTING.md) for the validation boundaries.

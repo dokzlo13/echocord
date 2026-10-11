@@ -1,34 +1,21 @@
 # Working on Echocord
 
-Start with `docs/STATE.md`, `tasks/BOARD.md`, and your assigned task. Read `docs/BRIEF.md` before changing product behavior. If `.trash/LOCAL.md` exists, read it for private local context without copying its contents into tracked files. Owner-authored inputs belong in ignored `.trash/owner/`, indexed by `.trash/LOCAL.md`; preserve them verbatim and keep agent-generated material outside that folder. User corrections override older documents; reconcile the documents when decisions change. Keep accepted requirements separate from proposals and measured results.
+Read README.md and the relevant docs/DEVELOPMENT.md, docs/ARCHITECTURE.md, docs/TESTING.md and docs/RELEASING.md before changing their areas. Product behavior is described in PRODUCT.md; UI rules are in DESIGN.md. These tracked files and the code are the project context; no private files or particular agent harness are prerequisites.
 
-## Product and environment
+## Product boundaries
 
-- Current scope: up to eight explicit Windows recording/application inputs feeding one shared mix, one Discord destination and up to three explicitly selected Windows playback outputs. Preserve independent controls, audio isolation and idle output restoration. Additional Discord rooms need a separate gateway/voice-lifecycle review.
-- Source, dependencies, builds, and agent worktrees stay in WSL. Keep Windows additions small and runtime-focused. Do not introduce a Windows source checkout or full development toolchain as an assumed prerequisite.
-- Rust owns audio and recovery. The UI is a control surface; do not move sample buffers through frontend IPC.
-- Keep the committed tree public-ready. Store personal notes, machine inventory, local paths, session transcripts, credentials, and raw test evidence in ignored `.trash/`. Publish only generic requirements and sanitized evidence. Never force-add private files or treat `.trash/` as permission to delete its contents. Ignoring a file does not remove it from existing history; review staged changes and commit identity before committing.
+Echocord streams explicitly selected local Windows audio to Discord as a bot, with optional selected playback outputs. Rust owns audio buffers, mixing, recovery and credentials. The frontend carries controls and scalar telemetry, never PCM. Preserve exact source identity, independent controls, one room per bot/server, bounded work and idle output restoration. No automatic room join, broader/default source fallback or unrelated routing change.
 
-## Coordinated work
+## Contributions
 
-Use an orchestrator with delegated implementation and review for independent, bounded tasks. Model selection is a local harness preference; keep account-specific settings and thread identifiers out of Git.
+Use the same documented bootstrap/check/build commands as human contributors. Windows native and Linux/WSL cross-build paths are supported for development; native audio behavior requires Windows validation. Keep changes bounded and reviewable, update affected public docs/changelog, and report checks actually run plus limitations.
 
-One coordinator owns `tasks/BOARD.md` and integration. Each worker gets a task ID, dependencies, acceptance criteria, a branch/worktree, and an explicit file scope. Read `docs/WORKFLOW.md` before dispatching workers. Shared manifests, lockfiles, and IPC contracts need a designated owner. Never assume a spawned agent has an isolated checkout; verify its working directory.
+For substantial work, establish design and interfaces before implementation, then obtain independent review. Delegate independent bounded tasks with an explicit checkout/branch and file scope; spawning an agent does not isolate the filesystem. Designate one owner for shared manifests, lockfiles and IPC contracts. Integrate scoped commits linearly and retire accepted worktrees after verifying no intended changes remain. Never discard unidentified work.
 
-Checkpoint task evidence and next actions in Git before handoff. A chat summary or running agent is not durable project state. After interruption, inspect worktrees and running processes before retrying or reassigning work.
+For UI changes, manually read the vetted .agents/skills/frontend-design/SKILL.md and relevant .agents/skills/impeccable/SKILL.md guidance. For browser review, read .agents/skills/playwright-cli/SKILL.md. Follow .agents/SOURCES.md licenses/applicability; the compact desktop product and current task override generic website advice. Keep raw test artifacts untracked.
 
-Finish with a clean working tree and linear `main` history: integrate scoped worker commits without merge commits, remove accepted worker branches/worktrees after verification, and remove rejected or permanently frozen work when the owner concludes the session. Preserve private/user artifacts under `.trash/` before worktree removal; never discard an active worker or unidentified changes. Retire obsolete prototypes and duplicate commands after production replacements are verified; Git history preserves the experiment.
+Do not read, print, commit or upload bot tokens or personal runtime data. Automated tests use fixture data and no Discord credentials. Preserve running app sessions; do not stop them or overwrite an in-use executable as housekeeping. Live capture, playback and Discord tests require explicit coordinated scope.
 
-At session close, remove redundant agent-created logs, synthetic fixtures, obsolete previews and copied build artifacts under `.trash/` after recording useful final evidence. Keep a small current handoff/evidence set. Preserve user notes, credentials, settings, recordings and artifacts of unclear ownership; ignored does not mean disposable. Stop owned preview/test processes before removing their files.
+## Releases
 
-Before handoff, reconcile STATE, the board, current architecture/design, commands, and next actions with the actual code. Distinguish user-confirmed behavior from automated measurements and unfinished acceptance. Every substantial feature set needs a design → review → implementation seam.
-
-## Validation and design
-
-Read `docs/QUALITY.md` for applicable gates. Report checks actually run and limitations. Mark tasks done only after integration and relevant checks; Linux checks do not prove Windows audio behavior.
-
-Use only researched existing skills after the stack is validated. Record source, pinned revision, license, maintenance/adoption evidence, and applicability before importing a skill. Do not generate placeholder skills or copy third-party material without checking its license. UI acceptance belongs in `docs/QUALITY.md` until suitable skills are selected. Keep this file short; task-specific detail belongs in the task or relevant document.
-
-For UI work, read the vetted `.agents/skills/frontend-design/SKILL.md`; for browser review/testing, read `.agents/skills/playwright-cli/SKILL.md`. Pins, licenses, applicability limits, and private artifact handling are in `.agents/SOURCES.md`. Project desktop/privacy requirements take precedence over generic skill advice.
-
-For redesigns, also read the pinned `.agents/skills/impeccable/SKILL.md` and its applicable references. Preserve useful upstream skill content verbatim with license/attribution. Delegation prompts must explicitly name the skills and require workers to open them manually; do not assume sub-agent skill discovery.
+Follow docs/RELEASING.md. Keep Cargo, Tauri and UI versions consistent; update CHANGELOG.md and verify the intended tag. Use checked CI-produced Windows assets with full dependency notices, corresponding sources and checksums. Never bypass a failed gate, publish a personal-machine binary containing private paths, force-move a published version tag, or omit licensing files. Publishing requires explicit maintainer authorization; ordinary implementation work does not authorize a release.

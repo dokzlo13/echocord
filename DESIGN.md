@@ -1,59 +1,53 @@
-# On Air · Stack
+# On Air desktop interface
 
-Mode: Operate. This is the owner-approved mixing-era design, adopted from the accepted working prototype. It replaces Signal Bridge. The production implementation reuses the prototype's components, styles and layout; simulation and fictional measurements are not product behavior. Core/API and platform choices are reviewed implementation decisions, separate from the approved appearance.
+Mode: Operate. Echocord is a compact audio control surface. Its maintained React components/styles and this document define the interface; mock data and demonstrations are not product behavior.
 
-## Visual contract
+## Visual system
 
-Dark, opaque slate with label-paper controls; red denotes an active Discord destination and orange denotes faults. No game-themed decoration, remote fonts, translucent window or dashboard boxes. Self-host Sofia Sans for UI and Sofia Sans Condensed for names/headings/brand, with tabular live numbers and Cyrillic coverage. Keep font/icon licenses with the adopted assets.
+Use opaque slate surfaces and warm paper controls. Red denotes active Discord transmission; orange denotes faults. Self-host Sofia Sans for UI and Sofia Sans Condensed for names/headings, with tabular readouts and Cyrillic coverage. Keep source, font and icon licenses with their assets.
 
-| Role | Value |
+| Role | Values |
 | --- | --- |
 | Ground / chrome / panel / hover / inset | #1d2226 / #181c1f / #262c31 / #313940 / #14181b |
 | Lines / strong line / card border | #323a40 / #47515a / #343c43 |
 | Primary / secondary / muted ink | #f2efe7 / #b4bdc2 / #939ca2 |
 | Action / hover / action ink | #ebe5d5 / #fffaf0 / #191c1e |
 | Live / live ink | #ff4b3e / #ff8c82 |
-| Standby / fault / fault ground / fault border | #f3c552 / #ff8b4a / #33241b / #6b4128 |
-| Source slots 1–5, then neutral | #3987e5 / #199e70 / #9085e9 / #d55181 / #008300 / #6b757b |
+| Standby / fault / fault ground / border | #f3c552 / #ff8b4a / #33241b / #6b4128 |
+| Five source colours, then neutral | #3987e5 / #199e70 / #9085e9 / #d55181 / #008300 / #6b757b |
 | Gain lane / track / thumb / clip | #9aa4aa / #3a434a / #ebe5d5 / #ffd166 |
 | Card / control radius | 10px / 6px |
 
-Names are 16px; slot titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px label-paper ring with 2px offset. Source colours remain assigned to native source identities; removing a source never reassigns surviving colours. Display numbers are list ordinals, independent of colour slots. New sources use the lowest unused coloured slot (0–4), with neutral slot5 only when those colours are occupied; colours never derive from lifetime source IDs. Live add/remove/replace preserves surviving colours. On restore, valid coloured assignments are reserved first, then saved neutral/out-of-range slots recover available colours in saved order; remaining overflow stays neutral.
+Names are 16px; section titles 15px; body 14px; secondary text 12.5px; readouts 12px; tags 11.5px. Focus uses a 2px paper ring with 2px offset. The static Echo trail logo is described in [BRAND.md](docs/BRAND.md); it must not glow like a live signal.
 
-## Shell, slots and cards
+## Window and cards
 
-Default 440×640, minimum 420×420, resizable and size remembered. A 36px custom title bar holds brand, bot identity/status, settings, minimize and close-to-tray; no maximize. The two slots are Sources above Destination, becoming side-by-side at 700px. Each header has a summary, numbered jump chips when useful and Add. Up to eight sources feed four total destinations: Discord rooms in different servers and at most three Windows playback devices. Destination Add explains capacity and per-server reservations.
+Default 440×640, minimum 420×420, with remembered size. A 36px custom title bar holds brand, bot status, settings, minimize and Close; no maximize. Sources and Destination stack vertically and become two columns from 700px. Card lists scroll independently; the whole document does not scroll. Short windows compress spacing/diagnostics while keeping full-card controls reachable.
 
-Source and destination numbering is independent: zero or one card has no number or jump navigation; two or more cards reveal matching one-based card markers and jump buttons. Removing cards compacts visible ordinals and returning to one hides them again. Numbers never replace native IDs, React/telemetry keys, source colour slots or server/device imagery. Destination card markers use readable neutral ink; state remains in existing badges. A single source retains its On/Muted/Off header summary without a numeric count; a single destination retains its state on the card. Accessible card/jump names include section and identity, plus the ordinal when shown; room jump names retain server context.
+A source shows identity, state/remove, Capture/Stop, mix-only Mute and a combined gain/meter. A destination shows identity, state/remove, output controls, Mute/volume and progressive diagnostics. Discord uses Connect/Cancel/Disconnect and On air; a playback device uses Play/Stop and Playing/Stopped. Keep real server/device imagery and accessible fallbacks. Source faults stay on their cards; removing an active output uses inline confirmation.
 
-Both lists scroll independently. Their heights follow content, preserve access to whole-card controls, and give spare height to useful destination telemetry. Short windows compress spacing and diagnostics. In wide layouts, one or two source cards expand into observed level histories and fill their list, matching the accepted prototype. Compact History diagnostics retain measured sparklines. Completed source/room changes briefly show the observed previous identity; pending work must not claim completion. Use fallback layout when advanced container/scroll-state features are unavailable. Do not scroll the whole document.
+Source and destination numbering is independent: hide numbers/jump navigation with zero or one card; show matching contiguous one-based card/jump ordinals with multiple cards. Removal compacts display numbers without changing IDs, actions or histories. A single source keeps its on/muted/off summary without a numeric count. Jump labels identify section, ordinal and full identity; Discord room labels include server context.
 
-A source card has identity, state/remove, Capture/Stop, mix-only Mute, and a combined gain/meter. Destination cards have identity, status/remove, destination Mute/volume and progressive diagnostics. Discord uses Connect/Cancel/Disconnect and On air; playback uses Play/Stop and Playing/Stopped with local device facts. Identity is one actionable unit opening the corresponding full-window picker. Normal source faults stay on their own cards; live destination removal asks for inline confirmation. The shared mix exists in Rust but has no separate Mix bar.
+Colours remain separate from ordinals. New sources use the lowest free coloured slot 0–4, then neutral 5 while all five are occupied. Live operations preserve surviving colours. On restore, reserve every valid coloured assignment before repairing neutral/out-of-range slots with available colours in saved order. Destination card numbers stay neutral; their state remains in existing status badges.
 
-## Fader and telemetry
+Wide layouts with one or two sources expand useful measured histories. Compact History diagnostics retain observed sparklines. Completed identity changes can briefly show the previous identity; pending work must not claim completion. Use a usable fallback when advanced container/scroll-state features are unavailable.
 
-One -60…0dB axis combines a thin gain lane, round thumb/ceiling and post-gain meter. Gain retains half-dB precision; the bottom is Off. Arrows change 0.5 dB, Page keys 6 dB, Home/End reach limits; accessible values name dB. Native pre-gain clipping is an amber indication. Source meters are after gain but before source mute so activity stays visible under hatching; destination levels are actual post-volume/mute observations at native handoff. Idle labels say Not capturing/Not sending.
+## Faders and measured data
 
-Simple and History are real persisted settings. History uses bounded rings of observed values, no invented past. Paint through refs/canvas at most 20 Hz and stop visual work while document/native visibility is hidden. Reduced motion disables decorative transitions. Telemetry must not rerender the control tree.
+Use one −60…0dB axis for gain and post-gain level. The bottom is Off, gain has no boost, arrows change 0.5 dB, Page keys 6 dB, and Home/End reach limits. Accessible values name dB. Source clipping and shared-mix overload are separate indications.
 
-The outlined On air badge has a level-responsive red dot; it represents the actual connection/sending state, not proof of listener receipt. Muting retains the connection badge with no signal glow. Destination diagnostics expand or compact with available height. Queue/buffer and drop counts name their local measurement boundary. Gateway ping is labelled gateway if available; do not label it voice or listener latency. Unknown ping, people, permissions, voice-host or encryption facts are unavailable/omitted, never sample values from the prototype. Stage logs use observed transitions and elapsed times, not estimates.
+Source meters are after gain and before source mute, so muted activity remains visible under hatching. Output meters observe actual native post-volume/mute handoff; idle text says Not capturing/Not sending/Not playing as appropriate. On air means the local connection/sending state, not verified listener receipt.
 
-## Sheets and targeted behavior
+Simple and History are persisted settings. Histories use bounded observed samples; do not invent past data. Paint meters at most 20 Hz, level histories 10 Hz and network readouts/plots 2 Hz. Suspend visual work while hidden, gap/reset stale history on return, and preserve reduced motion. Scalar telemetry must not rerender the control tree.
 
-Full-window sheets sit below the title bar, with back/title, searchable lists, stable footer actions, Escape and focus return. The underlying surface is inert. Applications and recording inputs are separate source-picker tabs. Current/In mix/unavailable rows are explicit; browser scope and continuing original playback remain clear. Source activity/icons are real when available, with honest generic fallbacks.
+Label gateway ping as gateway, and buffer/drop/underrun measurements with their local units and boundary. They do not measure voice or listener latency. Omit unsupported transport/profile facts rather than adding permanent Unavailable placeholders or fictional values.
 
-No global Apply or queued-change band remains. Adding a source captures immediately without joining Discord; capture/stop and gain/mute operate independently per source. Replacing or removing a source does not leave the Discord room. Room selection is targeted; this implementation may reconnect even within the same server and must show that gap honestly. All outputs restore idle; neither voice connection nor playback starts automatically. Restored recording sources reopen when Restore setup is enabled. Restored applications wait for explicit safe reattachment; ambiguous/stale identities require selection.
+## Sheets and onboarding
 
-The bot chip opens real configuration/status and available metadata; token entry stays ephemeral and protected storage stays backend-owned. Settings expose only wired controls: Simple/History, Restore setup and Keep running in tray. Connection details replace the old prose-heavy Audio details sheet. No inactive future-routing controls, synthetic statistics or prototype scenario navigation ship.
+Sheets fill the window below the title bar, with stable header/footer, a scrolling body, initial focus, Tab trapping, Escape and focus return. The underlying surface is inert. Source pickers separate Applications and Inputs; choices show selected/unavailable states and real identities. Edits are immediate and targeted, with no global Apply workflow.
 
-## Review and acceptance
+Bot setup puts the token field first, focuses it and supports Enter to submit. A collapsed Create and invite a bot guide explains creating the application, copying a bot token and inviting with View Channels/Connect/Speak. Native help links use fixed allowlisted destinations and indicate browser opening; failures show a copyable public URL. Saving validates/encrypts a token without joining voice. Replacement is labelled distinctly and respects active Discord lifetimes.
 
-The owner approved the prototype and explicitly authorized direct source adoption. The coordinator records technical decisions, independent review and integration in EC-020/023–029. Compare actual production output at 440×640, 455×455, 420×420, 760×440 and 1000×640 with the accepted reference. Test keyboard/focus, full-sheet sizing, multiple-card density, source faults, connection cancellation, native titlebar/tray and telemetry isolation. Native/audio evidence and owner listening feedback remain distinct.
+Bot details show real profile/shared-gateway facts, discovered room counts and reservation status. Room discovery is not proof of access; permissions are checked when connecting. Do not display hardcoded Connect/Speak grants or unexplained OK badges. Settings shows the package-derived app version and only wired controls.
 
-## Destination continuation
-
-EC-027 compares production against the actual accepted prototype at equivalent states and logical sizes. That comparison takes precedence over earlier prose that limited expanded source history to a lone source. Fonts, tokens and measured compact geometry match; two-source expansion, compact history trends and observed swap notices are restored as deliberate fidelity corrections.
-
-The reviewed output extension retains this visual language: up to four cards, multiple Discord rooms under the existing bot in distinct servers, and at most three Windows playback devices. Destination type selection belongs inside the full-window picker. Playback requires explicit Play/Stop and uses local device identity, availability and post-gain/mute output telemetry; it must not display Discord On air or gateway facts. Red remains reserved for Discord On air. New and restored output cards stay idle. A concise routing note explains feedback when playback returns into a captured recording input. No routing matrix, implicit monitoring or default-device fallback is introduced.
-
-EC-031 extends the same cards and picker to multiple Discord rooms. Per-server reservations explain conflicts and retained cleanup; changing one room never replaces another card. Shared gateway status belongs in the existing bot chip/details. Per-card controls, idle restoration, histories and compact geometry remain independent; no multiple-account interface is introduced.
+Test relevant states, keyboard behavior and the five documented sizes in [TESTING.md](docs/TESTING.md). Browser screenshots do not establish native accessibility, display scaling or physical audio behavior.

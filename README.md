@@ -1,25 +1,118 @@
-# Echocord
+<p align="center">
+  <img src="ui/public/brand/echocord-mark.png" width="112" alt="Echocord logo">
+</p>
+<h1 align="center">Echocord</h1>
+<p align="center">Stream local audio into Discord as your own bot.</p>
+<p align="center">
+  <a href="https://github.com/dokzlo13/echocord/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/dokzlo13/echocord?color=ff4b3e"></a>
+  <a href="https://github.com/dokzlo13/echocord/actions/workflows/ci.yml"><img alt="Build and tests" src="https://github.com/dokzlo13/echocord/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue"></a>
+  <img alt="Windows 11 x64" src="https://img.shields.io/badge/Windows_11-x64-0078D4">
+</p>
+<p align="center">
+  <a href="https://github.com/dokzlo13/echocord/releases/latest"><strong>Download for Windows</strong></a> ·
+  <a href="#discord-bot-setup">Set up your bot</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-A small Windows utility that mixes selected application audio and recording inputs, then sends the shared mix to Discord rooms in different servers and selected Windows playback devices.
+Echocord captures audio from selected applications or recording devices, mixes it locally, and sends it to Discord voice rooms. Each source and destination has its own gain, mute, and start/stop controls. Optional Windows playback outputs let you send the same mix to selected speakers or headphones.
 
-`Selected applications / recording inputs → native shared mix → Discord + selected playback devices`
+- Up to **8 sources**: application process trees or Windows recording inputs.
+- Up to **4 destinations**: Discord rooms in different servers, plus up to 3 Windows playback devices within that total.
+- Capture and meters work before Discord connects. Editing one source or output preserves the others.
+- Compact resizable window, Simple/History meters, saved setup, and tray controls.
+- Your bot token is encrypted locally for your Windows account. No hosted Echocord service or account is required.
 
-Add a source to start capture and see its level before connecting Discord. Each source has Capture/Stop, mix-only Mute and gain. Each destination has its own Mute and volume: Connect/Cancel/Disconnect for Discord, Play/Stop for a Windows device. Source changes take effect on their card and keep the bot connection; room changes briefly reconnect. Up to eight sources feed four total destinations: Discord rooms under the same bot, one room per server, and at most three Windows playback devices. New and restored outputs stay idle until explicitly started.
+<p align="center"><img src="docs/images/app.png" width="440" alt="Echocord showing two audio sources and a Discord destination"></p>
+<p align="center"><sub>Interface shown with demonstration sources and account data.</sub></p>
 
-Application capture includes the selected process and its children, which can include other browser tabs/windows. Original playback continues. Local playback is explicit and optional; it does not suppress original application playback. No independent local-mute control or custom virtual driver ships. An existing cable can be a recording source or playback destination; avoid routing the mix back into a captured input.
+## Download and run
 
-Development, dependencies, builds and agent worktrees live in WSL. Windows runs the built application and native audio tests.
+1. Download **`echocord-<version>-windows-x64.zip`** from [Releases](https://github.com/dokzlo13/echocord/releases/latest).
+2. Extract the whole archive to a writable folder and run `echocord.exe`.
+3. Add a source, then follow [Discord bot setup](#discord-bot-setup) to send audio to a voice room.
 
-## Start or resume
+**Supported runtime: Windows 11 x64.** Linux and WSL can build the Windows app and run development checks; a Linux or macOS audio application is not currently shipped.
 
-Read [AGENTS.md](AGENTS.md), [project state](docs/STATE.md) and the [task board](tasks/BOARD.md). Product decisions are in the [brief](docs/BRIEF.md); the adopted On Air Stack design is in [DESIGN.md](DESIGN.md). Personal notes and temporary evidence belong in ignored `.trash/`.
+The app needs the [Microsoft Visual C++ v14 Redistributable (x64)](https://aka.ms/vc14/vc_redist.x64.exe) and [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/). These may already be installed. If startup reports a missing `VCRUNTIME` DLL or WebView2, install the corresponding Microsoft runtime and try again. No Rust, Node, Python, audio driver, or development tools are needed to use the downloaded app.
 
-- [Development environment](docs/DEVELOPMENT.md)
-- [Capture and mixing boundaries](docs/CAPTURE.md)
-- [Current architecture](docs/ARCHITECTURE.md)
-- [Agent coordination](docs/WORKFLOW.md)
-- [Quality gates](docs/QUALITY.md)
+Early builds are unsigned and may trigger Windows SmartScreen. Download from this repository's Releases page; `SHA256SUMS` is provided with each release. The third-party source archive is for license compliance and source inspection, and is not needed to run the app.
 
-Use `make help` for supported commands. Setup is in [DEVELOPMENT.md](docs/DEVELOPMENT.md), and the current app flow is in [FIRST-TEST.md](docs/FIRST-TEST.md).
+<a id="discord-bot-setup"></a>
 
-Status: On Air cards, full-window pickers, capture independent of Discord, protected bot setup, shared native mixing, multiple independently controlled Discord rooms and explicit playback fan-out are implemented. Owner testing confirmed the earlier recording and application-to-Discord routes with low perceived delay. Automated native fixtures cover isolation and multi-source behavior; live listening on the new mix, measured listener latency and five-hour stability remain separate acceptance. Final integrated build/check evidence is recorded in STATE and the task board.
+## Discord bot setup
+
+You need permission to **Manage Server** in each Discord server where you install the bot. Use a dedicated bot for Echocord; do not run another bot client with the same token.
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications), choose **New Application**, and give it a name. Open its **Bot** page.
+2. Use **Reset Token** to obtain a bot token. Keep it private. Echocord needs the **bot token**, not the Application ID, client secret, or a user account token. Leave the privileged **Presence**, **Server Members**, and **Message Content** intents off; Echocord does not require them.
+3. Open **OAuth2 → URL Generator**. Select only the **bot** scope, then these bot permissions:
+
+   | Permission | Why it is needed |
+   | --- | --- |
+   | View Channels | Find the voice room |
+   | Connect | Join the selected room |
+   | Speak | Send audio to that room |
+
+   Administrator, message access, and slash-command permissions are not required. Do not enable **Requires OAuth2 Code Grant** for this bot-only flow.
+4. Open the generated URL in your browser, choose your server, and authorize the bot. Repeat for any other servers you want to use. A room's permission overrides must also allow **View Channel**, **Connect**, and **Speak**.
+5. In Echocord, open **Set up bot**, paste the token, and choose **Test & save**. Successful setup does not join a room.
+6. Choose **Add destination → Discord**, select an ordinary voice room, and press **Connect** on its card. Join that room with your normal Discord client to listen.
+
+Discord allows one voice room per bot per server, so multiple Discord destinations must use different servers. Stage channels are not supported. If a token is exposed, reset it in the Developer Portal and replace it in Echocord. Do not include tokens in screenshots, issues, or logs.
+
+Discord's [OAuth2 documentation](https://docs.discord.com/developers/topics/oauth2) and [permissions reference](https://docs.discord.com/developers/topics/permissions) explain the installation and channel-permission rules.
+
+## Sources and destinations
+
+**Sources** are what you capture. Choose **Add source**, then an application or a recording input. Adding a source starts capture immediately. Use **Capture/Stop**, **Mute**, and the dB fader independently on each card. With multiple cards, matching numbered buttons jump to each source or destination.
+
+Application capture includes the selected process and its child processes; a browser can include other tabs or windows. Keep a voice call in a separate application when necessary. Source mute removes that source from Echocord's mix; it does **not** mute the application's original speaker playback. Recording inputs currently need 48 kHz mono or stereo support.
+
+**Destinations** are where the shared mix goes. A Discord card has **Connect/Cancel/Disconnect**; a playback-device card has **Play/Stop**. Each has its own volume and mute. Adding or restoring a destination leaves it stopped until you start it. Switching a Discord room briefly reconnects that destination.
+
+Avoid sending a playback destination back into a recording input you are capturing: that can create feedback. Playing both an application's original output and the captured mix on the same speakers can produce doubled sound. Echocord does not change Windows' default devices or the original application's audio route.
+
+**Saved setup and closing:** recording inputs can resume capture when Restore setup is enabled; restored applications wait for explicit Capture, and every output stays idle. Closing the window keeps the app running in the tray by default. Use **Quit** in the tray to exit, or turn off **Keep running in tray** in Settings.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Bot or server is missing | Confirm the bot was invited to that server, save the correct bot token, and refresh/recheck the bot configuration. |
+| Cannot join or send audio | Check View Channel, Connect, and Speak, including room overrides; make sure the bot is not server-muted and the room is not full. |
+| Meters move but nobody hears audio | Confirm the destination is connected, unmuted, and audible at its volume setting. Meters report local audio, not confirmed listener delivery. |
+| Application disappeared after restarting it | Refresh the source picker and select the new instance. Echocord will not capture a different process silently. |
+| Local sound is doubled | Stop the local playback destination or change the original application's Windows audio route. |
+| App is still sending after closing the window | It is running in the tray. Stop the output or choose Quit there. |
+
+Report reproducible problems in [Issues](https://github.com/dokzlo13/echocord/issues), including app version, Windows version, source/output types, and steps to reproduce. Remove account details and tokens from any attachments.
+
+## Development
+
+Contributions are welcome. The application uses **Rust + Tauri + React/TypeScript**. Audio processing and recovery stay in native Rust; the UI carries controls and telemetry, never audio sample buffers.
+
+Install Git, Python 3.12+, Rust through rustup, the Node version in [`.node-version`](.node-version), and your platform's C++ build prerequisites. See [Development](docs/DEVELOPMENT.md) for the complete Windows and Linux/WSL setup.
+
+```sh
+git clone https://github.com/dokzlo13/echocord.git
+cd echocord
+python scripts/dev.py setup --browser
+python scripts/dev.py check
+python scripts/dev.py build
+```
+
+Use `python3` instead of `python` on Linux/WSL. The build produces `target/x86_64-pc-windows-msvc/release/echocord.exe` on either platform. No existing local configuration, bot token, private files, or coding-agent harness is required.
+
+- [Development and bootstrap](docs/DEVELOPMENT.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Testing and validation boundaries](docs/TESTING.md)
+- [Contributing](CONTRIBUTING.md)
+- [Versioning and releases](docs/RELEASING.md)
+- [Changelog](CHANGELOG.md)
+
+## Project status and license
+
+Echocord is an **AI-generated and AI-maintained hobby project**. It is early software, provided **as is**, with **no guarantees of any kind**. Reliability, compatibility, security, and long-session performance are not guaranteed. Review changes and test your own setup before relying on it.
+
+Original Echocord code is licensed under [MIT](LICENSE). Dependencies, fonts, icons, and other third-party material retain their own licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md) and the notices/source archives included with each release. Echocord is independent of Discord and is not an official Discord product.

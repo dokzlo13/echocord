@@ -290,7 +290,7 @@ for (const [w, h] of [
     ).toBeFocused();
   });
 
-test("wide two-source histories fill the column like the actual prototype", async ({
+test("wide two-source histories fill their column", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1000, height: 640 });

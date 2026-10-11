@@ -79,7 +79,7 @@ fn browser_suite(args: &[String]) -> ProbeResult<()> {
         }
     }
     let _com = Com;
-    // Caller supplies a dedicated ignored profile and synthetic URLs; never an owner profile.
+    // Caller supplies a dedicated ignored profile and synthetic URLs; never a personal browser profile.
     let browser = EngineProcess::spawn(
         Path::new(&args[0]),
         &[

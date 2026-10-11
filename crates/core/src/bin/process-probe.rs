@@ -323,7 +323,7 @@ mod probe {
 
     fn quoting(exe: &Path, evidence: &Path) -> io::Result<()> {
         // Copy to a path with spaces and Unicode to test lpApplicationName and
-        // argv[0] as well as argument escaping; the copy remains inside .trash.
+        // argv[0] as well as argument escaping; the copy remains inside the selected evidence directory.
         let copy = evidence.join("quoted executable 音.exe");
         fs::copy(exe, &copy)?;
         let args: Vec<OsString> = [
@@ -739,7 +739,7 @@ mod probe {
         let exe = std::env::current_exe()?;
         let root = args.first().map(PathBuf::from).unwrap_or(
             std::env::current_dir()?
-                .join(".trash")
+                .join("artifacts")
                 .join("process-probe"),
         );
         fs::create_dir_all(&root)?;

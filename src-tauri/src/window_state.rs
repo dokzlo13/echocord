@@ -94,7 +94,7 @@ pub fn remember(window: &tauri::Window) {
     }
 }
 
-/// A failed native smoke resize must not overwrite the owner's saved geometry.
+/// A failed native smoke resize must not overwrite the user's saved geometry.
 pub fn protect_saved_size(app: &tauri::AppHandle) {
     if let Some(memory) = app.try_state::<WindowMemory>() {
         memory.suppress_persistence.store(true, Ordering::SeqCst);

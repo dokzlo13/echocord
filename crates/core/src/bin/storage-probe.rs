@@ -1,5 +1,5 @@
-//! Synthetic secure-storage regression. Requires an explicit absolute .trash
-//! destination; never reads real credentials or writes application defaults.
+//! Synthetic secure-storage regression. Requires an explicit absolute directory
+//! for a uniquely named disposable test child; never reads real credentials or writes application defaults.
 use echocord_core::model;
 #[path = "../storage.rs"]
 mod storage;
@@ -22,7 +22,7 @@ fn run() -> Result<(), model::AppError> {
         })?;
         let rendered = format!("{failure:?} {failure}");
         check(
-            !rendered.contains("synthetic") && !rendered.contains(".trash"),
+            !rendered.contains("synthetic") && !rendered.contains(path.to_string_lossy().as_ref()),
             "A storage failure exposed private input.",
         )
     }
@@ -33,12 +33,12 @@ fn run() -> Result<(), model::AppError> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     check(
         args.len() == 1,
-        "Pass one explicit absolute .trash directory.",
+        "Pass one explicit absolute directory for disposable test data.",
     )?;
     let root = PathBuf::from(&args[0]);
     check(
-        root.is_absolute() && root.components().any(|part| part.as_os_str() == ".trash"),
-        "The synthetic destination must be an absolute .trash directory.",
+        root.is_absolute(),
+        "The synthetic destination must be an absolute directory.",
     )?;
     check(
         root.is_dir(),
@@ -50,11 +50,14 @@ fn run() -> Result<(), model::AppError> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| AppError::new(ErrorCode::Internal, "Probe clock is unavailable."))?
         .as_nanos();
-    let directory = root.join(format!("ec-016-synthetic-{}-{nonce}", std::process::id()));
+    let directory = root.join(format!(
+        "storage-probe-synthetic-{}-{nonce}",
+        std::process::id()
+    ));
     fs::create_dir(&directory).map_err(io_error)?;
     let path = directory.join("nested/token.bin");
-    let first = "synthetic-ec016-token-first";
-    let second = "synthetic-ec016-token-second";
+    let first = "synthetic-storage-token-first";
+    let second = "synthetic-storage-token-second";
 
     storage::save_token(&path, first)?;
     check(
@@ -187,7 +190,7 @@ fn run() -> Result<(), model::AppError> {
     }
     // Remove only this invocation's synthetic directory, never supplied roots.
     fs::remove_dir_all(&directory).map_err(io_error)?;
-    println!("EC-016 synthetic Windows storage checks passed.");
+    println!("Synthetic Windows storage checks passed.");
     Ok(())
 }
 
@@ -202,7 +205,7 @@ fn main() {
         // Exercise public APIs without filesystem access on unsupported hosts.
         let _ = storage::default_data_dir();
         let _ = storage::is_encrypted(&[]);
-        let path = std::path::Path::new(".trash/ec-016-synthetic-not-created/token.bin");
+        let path = std::path::Path::new("artifacts/storage-probe-synthetic-not-created/token.bin");
         assert!(storage::save_token(path, "synthetic-token").is_err());
         assert!(storage::load_token(path).is_err());
         eprintln!("The synthetic native storage probe requires Windows.");

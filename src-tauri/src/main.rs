@@ -515,7 +515,7 @@ async fn native_smoke(app: &tauri::AppHandle) -> bool {
         true
     }
     .await;
-    // Restore the owner's size even if a geometry assertion fails.
+    // Restore the user's size even if a geometry assertion fails.
     let restored = window.set_size(original).is_ok()
         && wait_window_size(&window, original.width, original.height).await;
     if !restored {

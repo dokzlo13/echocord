@@ -105,7 +105,7 @@ body {
   text-overflow: ellipsis;
 }
 
-/* Restored verbatim geometry from the actual prototype; traces use native rings. */
+/* Compact progress geometry; traces use native rings. */
 .spark {
   grid-row: 1 / span 2;
   grid-column: 2;

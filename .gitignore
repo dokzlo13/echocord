@@ -6,7 +6,6 @@
 /.worktrees
 /.tools
 /.cache
-/.trash
 /artifacts
 .env
 .env.*

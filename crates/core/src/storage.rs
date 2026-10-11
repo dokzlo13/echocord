@@ -422,12 +422,12 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn unsupported_operations_do_not_access_files() {
-        let path = Path::new(".trash/ec-016-synthetic-not-created/token.bin");
+        let path = Path::new("artifacts/storage-probe-synthetic-not-created/token.bin");
         let saved = save_token(path, "synthetic-token").unwrap_err();
         let loaded = load_token(path).unwrap_err();
         assert!(saved.message.contains("only on Windows"));
         assert!(loaded.message.contains("only on Windows"));
         assert!(!path.exists());
-        assert!(!format!("{saved:?} {loaded:?}").contains("ec-016-synthetic"));
+        assert!(!format!("{saved:?} {loaded:?}").contains("storage-probe-synthetic"));
     }
 }

@@ -379,7 +379,7 @@ impl Link {
             return Plan::Cut { frames: queued };
         }
         self.last_ns = Some(now_ns);
-        let packet = producer_packet.max(240).min(CAPACITY);
+        let packet = producer_packet.clamp(240, CAPACITY);
         self.target = match self.direction {
             Direction::Capture => 720 + packet / 2,
             Direction::Playback => output_frames + 144 + (packet + output_frames) / 2,

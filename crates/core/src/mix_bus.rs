@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 pub const CAPACITY: usize = 4096;
 const LEGACY_CAPACITY: usize = 1920;
+#[cfg(any(windows, test))]
 const CORRECTION_MAX_AGE_MS: u64 = 80;
 const MAX_AGE_MS: u64 = 40;
 const VERSION: u64 = 3;
@@ -32,6 +33,7 @@ pub struct ReadStats {
 }
 
 /// Snapshot for bounded admission; a subsequent exact pull validates it again.
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CorrectionWindow {
     pub latest: u64,
@@ -39,6 +41,7 @@ pub(crate) struct CorrectionWindow {
     pub continuity: u64,
     pub alive: bool,
 }
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CorrectionRead {
     pub valid_frames: usize,
@@ -107,6 +110,7 @@ impl Bus {
         self.heartbeat_ms.store(now_ms, SeqCst);
         self.cursor.store(cursor, SeqCst);
     }
+    #[cfg(any(windows, test))]
     pub(crate) fn correction_window(&self, cursor: u64, now_ms: u64) -> CorrectionWindow {
         let latest = self.cursor();
         let heartbeat = self.heartbeat_ms.load(SeqCst);
@@ -128,6 +132,7 @@ impl Bus {
             alive,
         }
     }
+    #[cfg(any(windows, test))]
     pub(crate) fn correction_lease_valid(
         &self,
         continuity: u64,
@@ -142,6 +147,7 @@ impl Bus {
     }
     /// No synthetic silence enters a correction filter. Only an entirely
     /// coherent/fresh block returns a nonzero valid_frames count.
+    #[cfg(test)]
     pub(crate) fn read_correction(
         &self,
         cursor: &mut u64,
@@ -157,6 +163,7 @@ impl Bus {
             |_| {},
         )
     }
+    #[cfg(any(windows, test))]
     pub(crate) fn read_correction_with_origins(
         &self,
         cursor: &mut u64,
@@ -177,6 +184,7 @@ impl Bus {
             |_| {},
         )
     }
+    #[cfg(any(windows, test))]
     fn read_correction_clocked(
         &self,
         cursor: &mut u64,

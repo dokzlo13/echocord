@@ -1232,29 +1232,38 @@ impl Actor {
         #[cfg(windows)]
         if let Some(audio) = &self.audio {
             let exit = audio.exit.load(std::sync::atomic::Ordering::Acquire);
-            if exit != 0 && !self.audio_failed {
-                self.audio_failed = true;
-                for input in &mut self.snapshot.inputs {
-                    input.phase = InputPhase::Fault;
-                    input.fault = Some(error(
-                        if exit == 2 {
-                            ErrorCode::CleanupIncomplete
-                        } else {
-                            ErrorCode::EngineStopped
-                        },
-                        "The audio engine stopped. Quit Echocord from the tray icon, then open it again.",
-                    ));
-                }
-                self.snapshot.telemetry.inputs.clear();
-                self.snapshot.telemetry.mix_observed_at_ms = None;
-                self.snapshot.telemetry.mix_pre_clip = false;
-                // Network worker remains owned; the dead producer yields paced silence.
-                self.publish();
-            } else if let Some(observation) = audio.snapshot() {
+            if exit != 0 {
+                self.observe_audio_exit(exit);
+            } else if !self.audio_failed
+                && let Some(observation) = audio.snapshot()
+            {
                 let expected_revision = audio.revision();
                 self.accept_audio_observation(observation, expected_revision);
             }
         }
+    }
+    #[cfg(any(windows, test))]
+    fn observe_audio_exit(&mut self, exit: u8) {
+        if self.audio_failed {
+            return;
+        }
+        self.audio_failed = true;
+        for input in &mut self.snapshot.inputs {
+            input.phase = InputPhase::Fault;
+            input.fault = Some(error(
+                if exit == 2 {
+                    ErrorCode::CleanupIncomplete
+                } else {
+                    ErrorCode::EngineStopped
+                },
+                "The audio engine stopped. Quit Echocord from the tray icon, then open it again.",
+            ));
+        }
+        self.snapshot.telemetry.inputs.clear();
+        self.snapshot.telemetry.mix_observed_at_ms = None;
+        self.snapshot.telemetry.mix_pre_clip = false;
+        // Network worker remains owned; the dead producer yields paced silence.
+        self.publish();
     }
     #[cfg(any(windows, test))]
     fn accept_audio_observation(
@@ -1262,9 +1271,14 @@ impl Actor {
         observation: crate::mixing::AudioSnapshot,
         expected_revision: u64,
     ) {
+        // A final buffered report must not revive measurements after terminal failure.
+        if self.audio_failed {
+            return;
+        }
         let now = crate::audio::observation_clock_ms();
         let observed_at_ms = crate::audio::clean_observation_time(observation.observed_at_ms, now);
-        if observation.revision == expected_revision {
+        let current_revision = observation.revision == expected_revision;
+        if current_revision {
             for observed in &observation.inputs {
                 if let Some(input) = self.snapshot.inputs.iter_mut().find(|input| {
                     input.strip_id == observed.strip_id && input.source_id == observed.source_id
@@ -1305,7 +1319,10 @@ impl Actor {
             if !self.snapshot.inputs.iter().any(|input| {
                 input.strip_id == observed.strip_id
                     && input.source_id == observed.source_id
-                    && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                    // Pending faders may lag an established capture. Reopening the
+                    // same identity needs a report acknowledging the new intent.
+                    && (input.phase == InputPhase::Capturing
+                        || (input.phase == InputPhase::Opening && current_revision))
             }) {
                 continue;
             }
@@ -3103,9 +3120,7 @@ mod tests {
         actor
     }
 
-    #[test]
-    fn control_publications_preserve_origins_and_pending_faders_do_not_starve_meters() {
-        let mut a = actor();
+    fn audio_observation_fixture(revision: u64) -> crate::mixing::AudioSnapshot {
         let input = InputStrip {
             strip_id: "input-1".into(),
             source_id: "fixture-source".into(),
@@ -3119,21 +3134,32 @@ mod tests {
             colour_slot: 0,
             restored: false,
         };
-        a.snapshot.inputs.push(input.clone());
-        let report = |source: &InputStrip, revision| crate::mixing::AudioSnapshot {
+        crate::mixing::AudioSnapshot {
             observed_at_ms: Some(0.0),
             revision,
-            inputs: vec![source.clone()],
-            mix_pre_clip: true,
             telemetry: vec![InputTelemetry {
                 observed_at_ms: Some(0.0),
-                strip_id: source.strip_id.clone(),
+                strip_id: input.strip_id.clone(),
                 level_dbfs: Some(-24.0),
                 pre_clip: false,
                 dropped_frames: 1,
                 underrun_frames: 2,
                 queued_frames: 240,
             }],
+            inputs: vec![input],
+            mix_pre_clip: true,
+        }
+    }
+
+    #[test]
+    fn control_publications_preserve_origins_and_pending_faders_do_not_starve_meters() {
+        let mut a = actor();
+        let input = audio_observation_fixture(1).inputs.remove(0);
+        a.snapshot.inputs.push(input.clone());
+        let report = |source: &InputStrip, revision| {
+            let mut observation = audio_observation_fixture(revision);
+            observation.inputs = vec![source.clone()];
+            observation
         };
         let mut old_control = input.clone();
         old_control.phase = InputPhase::Fault;
@@ -3162,6 +3188,68 @@ mod tests {
         a.accept_audio_observation(report(&current, 31), 31);
         assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Stopped);
         assert!(a.snapshot.telemetry.inputs.is_empty());
+    }
+
+    #[test]
+    fn reopening_same_source_requires_current_capture_revision_for_meters() {
+        for replacement in [false, true] {
+            let mut a = actor();
+            a.snapshot.inputs = audio_observation_fixture(1).inputs;
+            a.accept_audio_observation(audio_observation_fixture(1), 1);
+            assert_eq!(a.snapshot.telemetry.inputs.len(), 1);
+
+            // Model Stop→Start or A→B→A without starting a native capture worker.
+            if replacement {
+                a.snapshot.inputs[0].source_id = "replacement".into();
+                a.snapshot.inputs[0].phase = InputPhase::Opening;
+            } else {
+                a.snapshot.inputs[0].phase = InputPhase::Stopped;
+            }
+            a.publish();
+            assert!(a.snapshot.telemetry.inputs.is_empty());
+            a.snapshot.inputs[0].source_id = "fixture-source".into();
+            a.snapshot.inputs[0].phase = InputPhase::Opening;
+            a.publish();
+
+            a.accept_audio_observation(audio_observation_fixture(1), 3);
+            assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Opening);
+            assert!(a.snapshot.telemetry.inputs.is_empty());
+            a.accept_audio_observation(audio_observation_fixture(3), 3);
+            assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Capturing);
+            assert_eq!(a.snapshot.telemetry.inputs[0].level_dbfs, Some(-24.0));
+        }
+    }
+
+    #[test]
+    fn buffered_audio_report_cannot_revive_telemetry_after_engine_exit() {
+        for exit in [1, 2] {
+            let mut a = actor();
+            a.snapshot.inputs = audio_observation_fixture(1).inputs;
+            a.accept_audio_observation(audio_observation_fixture(1), 1);
+            assert!(a.snapshot.telemetry.mix_pre_clip);
+            assert!(a.snapshot.telemetry.mix_observed_at_ms.is_some());
+            assert_eq!(a.snapshot.telemetry.inputs.len(), 1);
+
+            a.observe_audio_exit(exit);
+            assert!(a.audio_failed);
+            assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Fault);
+            assert_eq!(
+                a.snapshot.inputs[0].fault.as_ref().unwrap().code,
+                if exit == 2 {
+                    ErrorCode::CleanupIncomplete
+                } else {
+                    ErrorCode::EngineStopped
+                }
+            );
+            for _ in 0..3 {
+                a.accept_audio_observation(audio_observation_fixture(1), 1);
+                a.publish();
+                assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Fault);
+                assert!(a.snapshot.telemetry.inputs.is_empty());
+                assert_eq!(a.snapshot.telemetry.mix_observed_at_ms, None);
+                assert!(!a.snapshot.telemetry.mix_pre_clip);
+            }
+        }
     }
 
     fn await_preferences(actor: &mut Actor) {

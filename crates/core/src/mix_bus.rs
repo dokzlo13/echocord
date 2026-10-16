@@ -625,6 +625,8 @@ mod tests {
         max_queued: u32,
         final_queued: u32,
         stale_silence_callbacks: u32,
+        gap_callbacks: u64,
+        first_gap_ns: Option<u64>,
     }
 
     // A virtual-clock harness for the real Bus implementation. It models a
@@ -632,6 +634,15 @@ mod tests {
     // clock skew, a 60 ms producer stall and an optional 80 ms reader stall.
     // This exercises transport policy, not Windows scheduling or audibility.
     fn simulate(skew_ppm: i64, producer_stall: bool, reader_stall: bool) -> [SimulatedReader; 2] {
+        simulate_seconds(skew_ppm, producer_stall, reader_stall, 60)
+    }
+
+    fn simulate_seconds(
+        skew_ppm: i64,
+        producer_stall: bool,
+        reader_stall: bool,
+        seconds: u64,
+    ) -> [SimulatedReader; 2] {
         let bus = bus();
         let mut readers = std::array::from_fn(|_| SimulatedReader::default());
         let mut next_writer = 0;
@@ -645,16 +656,17 @@ mod tests {
         let mut reader_paused = false;
         loop {
             let now = next_writer.min(next_reader[0]).min(next_reader[1]);
-            if now > 60_000_000_000 {
+            if now > seconds * 1_000_000_000 {
                 break;
             }
             if now == next_writer {
                 if !producer_stall || !(5_000_000_000..5_060_000_000).contains(&now) {
                     let frames: [[f32; 2]; 240] = std::array::from_fn(|_| {
                         sample += 1;
-                        // Exact integer markers are valid finite Bus samples;
-                        // opposite channels detect tearing and channel swaps.
-                        [sample as f32, -(sample as f32)]
+                        // Encode exact positive finite bit-pattern markers so
+                        // long fixtures do not hit f32's integer precision limit.
+                        let marker = f32::from_bits(0x3f00_0000 + sample as u32);
+                        [marker, -marker]
                     });
                     bus.write(&frames, now / 1_000_000);
                 }
@@ -682,6 +694,10 @@ mod tests {
                 reader.underrun += u64::from(stats.underrun_frames);
                 reader.max_queued = reader.max_queued.max(stats.queued_frames);
                 reader.final_queued = stats.queued_frames;
+                if stats.dropped_frames != 0 || stats.underrun_frames != 0 {
+                    reader.gap_callbacks += 1;
+                    reader.first_gap_ns.get_or_insert(now);
+                }
                 assert!(stats.queued_frames as usize <= CAPACITY);
                 assert!(reader.cursor <= bus.cursor());
                 if producer_stall && (5_045_000_000..5_060_000_000).contains(&now) {
@@ -691,7 +707,7 @@ mod tests {
                 for frame in frames {
                     assert_eq!(frame[0], -frame[1]);
                     if frame[0] != 0.0 {
-                        let marker = frame[0] as u64;
+                        let marker = u64::from(frame[0].to_bits() - 0x3f00_0000);
                         assert!(marker > reader.last_sample, "overdue samples replayed");
                         reader.last_sample = marker;
                         reader.hash = reader.hash.wrapping_mul(16_777_619) ^ marker;
@@ -729,6 +745,41 @@ mod tests {
                 nominal[0]
             );
             assert!(slower[0].max_queued as usize <= CAPACITY);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual 600-second virtual-clock baseline; no devices or DSP correction"]
+    fn measure_long_session_clock_skew() {
+        let nominal = simulate_seconds(0, false, false, 600);
+        println!(
+            "600 virtual seconds; real Bus; writer 240 frames/5 ms with 2 ms jitter every 13 ticks; readers 480 frames/10 ms; peer nominal"
+        );
+        println!(
+            "ppm,underrun_frames,dropped_frames,gap_or_drop_callbacks,max_queued_frames,final_queued_frames,first_gap_seconds"
+        );
+        for skew in [-500, -100, -30, 0, 30, 100, 500] {
+            let result = simulate_seconds(skew, false, false, 600);
+            assert_eq!(result[1], nominal[1], "one reader changed its peer");
+            let reader = &result[0];
+            assert!(reader.max_queued as usize <= CAPACITY);
+            if skew >= 100 {
+                assert!(reader.underrun > nominal[0].underrun);
+            }
+            if skew <= -100 {
+                assert!(reader.dropped > nominal[0].dropped);
+            }
+            println!(
+                "{skew},{},{},{},{},{},{}",
+                reader.underrun,
+                reader.dropped,
+                reader.gap_callbacks,
+                reader.max_queued,
+                reader.final_queued,
+                reader
+                    .first_gap_ns
+                    .map_or_else(|| "none".into(), |time| format!("{:.3}", time as f64 / 1e9))
+            );
         }
     }
 

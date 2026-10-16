@@ -31,6 +31,9 @@ class PacketContractTests(unittest.TestCase):
         start = source.index("fn process_input(")
         end = source.index("// The loop for writing output data.", start)
         packet_function = source[start:end]
+        start = source.index("fn input_timestamp(")
+        end = source.index("/// Produce the output stream timestamp.", start)
+        input_timestamp_function = source[start:end]
         equilibrium = (package / "src/host/equilibrium.rs").read_text(encoding="utf-8")
         harness = (ROOT / "scripts/fixtures/cpal-silent-harness.rs").read_text(
             encoding="utf-8"
@@ -38,7 +41,9 @@ class PacketContractTests(unittest.TestCase):
         harness = harness.replace(
             "// __UPSTREAM_EQUILIBRIUM__",
             "mod equilibrium {\n" + equilibrium + "\n}\nuse equilibrium::fill_equilibrium;",
-        ).replace("// __PATCHED_PROCESS_INPUT__", packet_function)
+        ).replace("// __PATCHED_PROCESS_INPUT__", packet_function).replace(
+            "// __UPSTREAM_INPUT_TIMESTAMP__", input_timestamp_function
+        )
         with tempfile.TemporaryDirectory(prefix="echocord-cpal-test-") as temporary:
             directory = Path(temporary)
             rust = directory / "packet-contract.rs"
@@ -63,7 +68,7 @@ class PacketContractTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("4 passed", result.stdout)
+            self.assertIn("5 passed", result.stdout)
 
 
 class CacheIntegrityTests(unittest.TestCase):

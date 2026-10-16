@@ -135,6 +135,7 @@ struct StreamInner {
     bytes_per_frame: u16,
     sample_format: SampleFormat,
     max_frames_in_buffer: u32,
+    clock_fails: bool,
 }
 struct Data {
     data: *mut (),
@@ -147,21 +148,39 @@ impl Data {
     }
 }
 struct InputCallbackInfo {
-    timestamp: u64,
+    timestamp: InputStreamTimestamp,
 }
-fn input_timestamp(_: &StreamInner, timestamp: u64) -> Result<u64, Error> {
-    if timestamp == u64::MAX {
-        Err(Error)
-    } else {
-        Ok(timestamp)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamInstant {
+    seconds: u64,
+    nanos: u32,
+}
+impl StreamInstant {
+    const ZERO: Self = Self::new(0, 0);
+    const fn new(seconds: u64, nanos: u32) -> Self {
+        Self { seconds, nanos }
     }
 }
+struct InputStreamTimestamp {
+    capture: StreamInstant,
+    callback: StreamInstant,
+}
+const CALLBACK_CLOCK: StreamInstant = StreamInstant::new(4321, 123_400);
+fn clock_position(stream: &StreamInner) -> Result<(StreamInstant, u64), Error> {
+    if stream.clock_fails {
+        Err(Error)
+    } else {
+        Ok((CALLBACK_CLOCK, 42))
+    }
+}
+// __UPSTREAM_INPUT_TIMESTAMP__
 
 mod Audio {
     use super::*;
     pub struct Flag(pub i32);
     pub const AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY: Flag = Flag(1);
     pub const AUDCLNT_BUFFERFLAGS_SILENT: Flag = Flag(2);
+    pub const AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR: Flag = Flag(4);
     pub struct State {
         pub payload: Vec<u64>,
         pub flags: u32,
@@ -170,6 +189,7 @@ mod Audio {
         pub timestamp: u64,
         pub releases: Cell<usize>,
         pub release_fails: bool,
+        pub clock_fails: bool,
     }
     #[derive(Clone)]
     pub struct IAudioCaptureClient(pub Rc<State>);
@@ -233,6 +253,7 @@ fn state(flags: u32, null: bool) -> Audio::State {
         timestamp: 123,
         releases: Cell::new(0),
         release_fails: false,
+        clock_fails: false,
     }
 }
 
@@ -253,6 +274,7 @@ fn inspect(
         bytes_per_frame: (format.sample_size() * 2) as u16,
         sample_format: format,
         max_frames_in_buffer: max_frames,
+        clock_fails: packet.clock_fails,
     };
     let packet = Rc::new(packet);
     let mut scratch = vec![0u64; scratch_words];
@@ -266,7 +288,15 @@ fn inspect(
         &stream,
         client,
         &mut |data, info| {
-            assert_eq!(info.timestamp, 123);
+            let expected_capture = if packet.flags & 4 != 0 {
+                StreamInstant::ZERO
+            } else {
+                let ns = u128::from(packet.timestamp) * 100;
+                StreamInstant::new((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u32)
+            };
+            assert_eq!(info.timestamp.capture, expected_capture);
+            assert_eq!(info.timestamp.callback, CALLBACK_CLOCK);
+            assert_ne!(info.timestamp.capture, info.timestamp.callback);
             assert_eq!(data.data as usize % format.sample_size(), 0);
             let bytes = unsafe {
                 slice::from_raw_parts(data.data.cast::<u8>(), data.len * format.sample_size())
@@ -352,16 +382,16 @@ fn ordinary_packets_preserve_bytes_and_i24_conversion() {
 
 #[test]
 fn every_acquired_packet_is_released_on_error_and_empty_packets_are_ignored() {
-    for (frames, capacity, scratch, flags, null, timestamp, release_fails) in [
-        (3, 2, 8, 2, true, 123, false), // Oversize: must not inspect null silent data.
-        (2, 2, 1, 2, true, 123, false), // Scratch capacity is independently bounded.
-        (2, 2, 8, 0, true, 123, false), // Null nonsilent packet.
-        (2, 2, 8, 2, false, u64::MAX, false), // Timestamp query fails.
-        (2, 2, 8, 2, false, 123, true), // Release failure remains an error.
+    for (frames, capacity, scratch, flags, null, clock_fails, release_fails) in [
+        (3, 2, 8, 2, true, false, false), // Oversize: must not inspect null silent data.
+        (2, 2, 1, 2, true, false, false), // Scratch capacity is independently bounded.
+        (2, 2, 8, 0, true, false, false), // Null nonsilent packet.
+        (2, 2, 8, 2, false, true, false), // Callback clock query fails.
+        (2, 2, 8, 2, false, false, true), // Release failure remains an error.
     ] {
         let mut packet = state(flags, null);
         packet.frames = frames;
-        packet.timestamp = timestamp;
+        packet.clock_fails = clock_fails;
         packet.release_fails = release_fails;
         let (result, packet, _, _, _, _) = inspect(SampleFormat::F32, packet, capacity, scratch);
         assert!(result.is_err());
@@ -384,4 +414,31 @@ fn discontinuity_and_silence_are_independent_flags() {
     assert_eq!(xruns, 1);
     assert!(actual[..len].iter().all(|byte| *byte == 0));
     assert_eq!(packet.releases.get(), 1);
+}
+
+#[test]
+fn uncertain_capture_time_preserves_pcm_callback_clock_and_packet_release() {
+    for timestamp in [123, u64::MAX] {
+        for flags in [4, 4 | 1, 4 | 2, 4 | 1 | 2] {
+            let silent = flags & 2 != 0;
+            let mut input = state(flags, silent);
+            input.timestamp = timestamp;
+            let pair = u64::from(0.75f32.to_bits()) | (u64::from((-0.25f32).to_bits()) << 32);
+            input.payload[0] = pair;
+            input.payload[1] = pair;
+            let (result, packet, actual, len, callbacks, xruns) =
+                inspect(SampleFormat::F32, input, 2, 8);
+            result.unwrap();
+            assert_eq!(callbacks, 1);
+            assert_eq!(xruns, usize::from(flags & 1 != 0));
+            assert_eq!(len, 16);
+            if silent {
+                assert!(actual[..len].iter().all(|byte| *byte == 0));
+            } else {
+                assert_eq!(&actual[..8], &pair.to_ne_bytes());
+                assert_eq!(&actual[8..16], &pair.to_ne_bytes());
+            }
+            assert_eq!(packet.releases.get(), 1);
+        }
+    }
 }

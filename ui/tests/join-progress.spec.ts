@@ -171,7 +171,10 @@ for (const [style, threshold] of [
 test("full log records only observed stage intervals and resets for a new session", async ({
   page,
 }) => {
-  await page.clock.install();
+  // Installation alone keeps ticking while navigation/fonts/assertions run.
+  // Freeze before the first observed stage so only runFor advances intervals.
+  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T01:00:00Z"));
   const target = await joining(page, "simple", false);
   await expect(target.locator(".d-log")).toBeVisible();
   await page.clock.runFor(1000);

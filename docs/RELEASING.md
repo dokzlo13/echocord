@@ -64,3 +64,14 @@ Keep GitHub Actions pinned to reviewed commit SHAs and permissions scoped to eac
 Build source paths are remapped and PDB references are generic. C/C++ dependencies can embed assertion filenames too, so Rust remapping alone is insufficient. Changing native compiler flags may require cleaning that dependency's previous output before a local rebuild; clean CI checkouts avoid stale flags.
 
 Source, scripts and this guide must remain sufficient to reproduce the process from a fresh checkout. Releases must not depend on local notes, personal accounts beyond ordinary GitHub maintainer permissions, or a particular coding-agent harness.
+
+The Windows CI cache may restore an older dependency set only within the same
+native compatibility prefix: hosted image, Rust toolchain, relevant compiler
+environment, remapped paths, build scripts and dependency patches. Cargo manifests,
+lockfile and Tauri metadata form the dependency suffix, so a version-only change
+can reuse compatible dependencies. Missing compatibility context skips caching
+only. Every check, build, notice, path scan and receipt gate still runs; cached
+binaries are never release provenance. Native compiler inputs such as `_CL_` are
+not automatically tracked by all dependency build scripts, so broader prefixes
+are intentionally excluded. See [Cargo change detection](https://doc.rust-lang.org/cargo/reference/build-scripts.html#change-detection)
+and [GitHub cache scope and security](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache).

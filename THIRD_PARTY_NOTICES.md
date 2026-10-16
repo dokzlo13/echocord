@@ -4,6 +4,8 @@ Echocord's original code is licensed under [MIT](LICENSE). Its dependencies reta
 
 Every Windows release executable embeds the complete generated dependency inventory, copyright notices and license texts, available offline in **Settings → Licenses**. Original notice files are retained verbatim; HTML notices also have readable text views. The generated source files are `licenses/generated/INDEX.md` and `licenses/generated/texts/`. The inventory records exact package versions, checksums and source locations. It includes the Windows Rust dependency graph, production frontend packages, the Rust standard library, bundled Opus, the WebView2 SDK loader, and embedded third-party notices. Build and cross-platform code can appear in upstream notices even when it is not used by the Windows executable.
 
+The generated index and JSON inventory retain the original generator paths as provenance. The app's catalog resolves their embedded locations. HTML originals use an additional `.txt` suffix inside the app so webview packaging cannot alter their bytes; their readable text views are separate derived documents.
+
 ## Corresponding source
 
 The MPL-2.0 portions remain under the Mozilla Public License 2.0. Their exact, unchanged published source packages are provided as **echocord-<version>-third-party-sources.zip**, beside the Windows download on the [same GitHub release](https://github.com/dokzlo13/echocord/releases). That archive contains a manifest, checksum-verified `.crate` source archives and the MPL license. `.crate` files are ordinary gzip-compressed tar archives. Each package's original source notices remain intact. The generated inventory also links to each exact source archive on crates.io. No MPL-covered source is modified by Echocord.

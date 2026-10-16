@@ -43,22 +43,36 @@ class EmbeddedLicenseTests(ReleaseInventoryTests):
         (self.generated / "private-note.txt").write_text("must stay local")
         self.assertNotIn(b"must stay local", self.assets().values())
 
-    def test_html_notice_has_readable_text_and_verbatim_original(self):
-        original = b"<!doctype html><style>hidden CSS</style><h1>Copyright &amp; terms</h1><p>Permission is granted.</p>"
-        path = self.generated / "texts/notice.html"
-        path.write_bytes(original)
-        digest = self.digest(path)
-        self.inventory["packages"][0]["notices"] = [{
-            "path": "texts/notice.html", "sha256": digest, "original_name": "COPYRIGHT.html",
-        }]
-        self.save_inventory()
-        assets = self.assets()
-        self.assertEqual(assets["generated/texts/notice.html"], original)
-        readable = assets[f"readable/{digest}.txt"].decode()
-        self.assertIn("Copyright & terms", readable)
-        self.assertIn("Permission is granted.", readable)
-        self.assertNotIn("hidden CSS", readable)
-        self.assertNotIn("<p>", readable)
+    def test_html_notice_has_readable_text_and_byte_exact_plain_text_original(self):
+        original = (
+            "<!doctype html>\r\n<style>hidden CSS</style><h1>Copyright © &amp; terms</h1>"
+            "<p>Permission is granted.</p>\r\n"
+        ).encode("utf-8")
+        for extension in ("html", "htm", "HTML"):
+            with self.subTest(extension=extension):
+                relative = f"texts/notice.{extension}"
+                path = self.generated / relative
+                path.write_bytes(original)
+                digest = self.digest(path)
+                self.inventory["packages"][0]["notices"] = [{
+                    "path": relative, "sha256": digest,
+                    "original_name": f"COPYRIGHT.{extension}",
+                }]
+                self.save_inventory()
+                assets = self.assets()
+                embedded = f"generated/{relative}.txt"
+                self.assertEqual(assets[embedded], original)
+                self.assertEqual(hashlib.sha256(assets[embedded]).hexdigest(), digest)
+                self.assertNotIn(f"generated/{relative}", assets)
+                self.assertFalse(any(Path(name).suffix.lower() in (".html", ".htm") for name in assets))
+                catalog = json.loads(assets["catalog.json"])
+                originals = [d for d in catalog["documents"] if d["title"].endswith("(original HTML)")]
+                self.assertEqual([d["path"] for d in originals], [f"/licenses/{embedded}"])
+                readable = assets[f"readable/{digest}.txt"].decode()
+                self.assertIn("Copyright © & terms", readable)
+                self.assertIn("Permission is granted.", readable)
+                self.assertNotIn("hidden CSS", readable)
+                self.assertNotIn("<p>", readable)
 
     def save_receipt(self, binary=b"fixture EXE"):
         receipt = DEV.receipt_data("0.1.0", binary, self.assets())

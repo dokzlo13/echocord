@@ -566,6 +566,13 @@ class NoticeText(HTMLParser):
             self.parts.append(data)
 
 
+def embedded_notice_path(relative):
+    # Tauri parses HTML assets to inject CSP. Keep original HTML as plain text
+    # so its notice bytes and recorded upstream checksum remain unchanged.
+    suffix = ".txt" if PurePosixPath(relative).suffix.lower() in (".html", ".htm") else ""
+    return f"generated/{relative}{suffix}"
+
+
 def license_assets(release_version, notice_files):
     """Build a deterministic, self-contained offline license catalog."""
     assets = {
@@ -582,17 +589,17 @@ def license_assets(release_version, notice_files):
     generated = ROOT / "licenses/generated"
     for path in notice_files:
         relative = path.relative_to(generated).as_posix()
-        assets[f"generated/{relative}"] = path.read_bytes()
+        assets[embedded_notice_path(relative)] = path.read_bytes()
     inventory = json.loads(assets["generated/inventory.json"])
     for package in inventory["packages"]:
         entries = package["notices"] + (
             [package["attribution"]] if "attribution" in package else []
         )
         for entry in entries:
-            path = f"generated/{entry['path']}"
+            path = embedded_notice_path(entry["path"])
             original_name = entry.get("original_name", "Published attribution")
             title = f"{package['name']} {package['version']} · {original_name}"
-            if PurePosixPath(path).suffix.lower() in (".html", ".htm"):
+            if PurePosixPath(entry["path"]).suffix.lower() in (".html", ".htm"):
                 parser = NoticeText()
                 parser.feed(assets[path].decode("utf-8"))
                 readable = f"readable/{entry['sha256']}.txt"

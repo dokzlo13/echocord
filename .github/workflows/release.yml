@@ -13,9 +13,18 @@ concurrency:
 
 jobs:
   version:
-    name: Validate release tag
+    name: Validate tag and checked main artifact
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      commit: ${{ steps.checked.outputs.commit }}
+      run_id: ${{ steps.checked.outputs.run_id }}
+      run_attempt: ${{ steps.checked.outputs.run_attempt }}
+      artifact_id: ${{ steps.checked.outputs.artifact_id }}
+      artifact_digest: ${{ steps.checked.outputs.artifact_digest }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -27,23 +36,47 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: python scripts/dev.py version --tag "$RELEASE_TAG"
-
-  checks:
-    needs: version
-    uses: ./.github/workflows/ci.yml
+      - name: Identify exact successful main CI artifact
+        id: checked
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python scripts/release_assets.py resolve \
+            --repository "$GITHUB_REPOSITORY" --commit "$(git rev-parse HEAD)" \
+            --tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
   publish:
-    name: Publish GitHub release
-    needs: checks
+    name: Publish checked GitHub release
+    needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
+      actions: read
     steps:
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          name: release-assets
-          path: artifacts/release
+          ref: ${{ needs.version.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Download and verify immutable CI artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SOURCE_COMMIT: ${{ needs.version.outputs.commit }}
+          CHECKED_RUN: ${{ needs.version.outputs.run_id }}
+          CHECKED_ATTEMPT: ${{ needs.version.outputs.run_attempt }}
+          CHECKED_ARTIFACT: ${{ needs.version.outputs.artifact_id }}
+          CHECKED_DIGEST: ${{ needs.version.outputs.artifact_digest }}
+        run: |
+          python scripts/release_assets.py download \
+            --repository "$GITHUB_REPOSITORY" --commit "$SOURCE_COMMIT" \
+            --tag "$RELEASE_TAG" --run-id "$CHECKED_RUN" \
+            --run-attempt "$CHECKED_ATTEMPT" --artifact-id "$CHECKED_ARTIFACT" \
+            --artifact-digest "$CHECKED_DIGEST" --output artifacts/release
       - name: Publish checked artifacts
         env:
           GH_TOKEN: ${{ github.token }}

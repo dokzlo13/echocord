@@ -6,7 +6,11 @@ Echocord uses stable Semantic Versioning tags (`vMAJOR.MINOR.PATCH`). The initia
 
 `.github/workflows/ci.yml` runs on main, pull requests and manual dispatch. Ubuntu checks portable Rust and frontend behavior. Windows sets up the documented native toolchain, runs native core/application checks, generates full third-party notices/corresponding sources, embeds the notices in the Windows executable, and packages the tested binary. Its downloadable artifact is the complete licensed `release-assets` set, not an unaccompanied executable.
 
-`.github/workflows/release.yml` runs for `v*` tags. It verifies the tag against all version declarations, calls the same CI workflow, and publishes the exact checked assets after every required job succeeds. Only the final publishing job has repository-content write permission. Tests use no Discord token and never join voice.
+`.github/workflows/release.yml` runs for `v*` tags. It verifies the tag against all version declarations and reuses the existing successful **CI push run on main for that exact commit**. It does not repeat the Windows build. Only the final publishing job has repository-content write permission; provenance queries use Actions read permission. Tests use no Discord token and never join voice.
+
+The release gate resolves the source commit and peels the remote tag, selects the newest matching main-push run of `ci.yml`, and requires both **Portable core and UI** and **Windows x64 build and native core** to have passed in its latest attempt. Their required check/build/package steps must also have passed. PR, manual-dispatch, other-commit and older-attempt results are not substitutes.
+
+There must be one unexpired `release-assets` artifact belonging to that run, repository and SHA, created during its latest Windows job. The workflow passes its immutable run/attempt/artifact IDs and GitHub SHA-256 digest to publication. Publication rechecks those identities, downloads the original artifact by ID, verifies the archive digest, then checks the exact four internal files, `SHA256SUMS`, source-manifest version and covered-source checksums. Release notes must exactly match the tagged changelog. It rechecks provenance and the remote tag after transfer. No executable is run in the publishing job.
 
 Release files include:
 
@@ -38,14 +42,16 @@ The app is currently unsigned. Require Windows 11 x64, Microsoft WebView2 Evergr
 
 ## Publish
 
-Publishing requires explicit maintainer authorization. After the reviewed commit is on main and CI is green:
+Publishing requires explicit maintainer authorization. After the reviewed commit is on main, wait for its **main-push CI run** to finish successfully and confirm its `release-assets` artifact is available (retained for seven days). Tag that exact commit:
 
 ```sh
 git tag -a v0.1.0 -m "Echocord 0.1.0"
 git push origin v0.1.0
 ```
 
-The release workflow performs its own gates and publication. Check the completed run, tag/commit, release notes, all expected assets and their checksums. Download and inspect the published EXE and source archive; perform a credential-free Windows startup and offline-license check where available. Keep the corresponding-source archive beside the binary for the lifetime of the release.
+The release workflow performs provenance and content checks before publication. Check its reported source CI run and artifact ID, completed release run, tag/commit, release notes, all expected assets and their checksums. Download and inspect the published EXE and source archive; perform a credential-free Windows startup and offline-license check where available. Keep the corresponding-source archive beside the binary for the lifetime of the release.
+
+If the exact main CI run is pending, wait for it before rerunning the unpublished release workflow. If its artifact expired or validation needs a fresh run, rerun **all jobs of that same main-push CI run**, then rerun the release workflow. A failed-jobs-only attempt does not establish both required jobs in the latest attempt. Missing, ambiguous, expired or mismatched provenance fails closed; there is no fallback build or alternate-commit download.
 
 If validation fails before publication, fix the cause and rerun the failed workflow only when its source remains correct. Do not bypass checks or upload an unrelated local binary. If source must change, choose the next version or an unpublished replacement tag according to review; never move/delete a version tag or replace assets after that release has been published. Publish a new patch version for corrections.
 

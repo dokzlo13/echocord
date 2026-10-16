@@ -30,7 +30,7 @@ Old changes.
         self.assertIn("### Added\n- A user-facing feature.", notes)
         self.assertNotIn("Do not publish this yet", notes)
         self.assertNotIn("Old changes", notes)
-        self.assertIn("echocord-0.1.0-windows-x64.zip", notes)
+        self.assertIn("releases/download/v0.1.0/echocord.exe", notes)
         self.assertIn("echocord-0.1.0-third-party-sources.zip", notes)
         self.assertIn("Visual C++ v14 x64", notes)
         self.assertIn("https://github.com/dokzlo13/echocord#readme", notes)
@@ -38,7 +38,7 @@ Old changes.
     def test_accepts_link_style_version_heading(self):
         notes = DEV.release_notes("## [0.2.0] - 2026-11-01\n\nChanges.\n", "0.2.0")
         self.assertIn("Changes.", notes)
-        self.assertIn("echocord-0.2.0-windows-x64.zip", notes)
+        self.assertIn("releases/download/v0.2.0/echocord.exe", notes)
 
     def test_missing_exact_version_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, "exactly one"):

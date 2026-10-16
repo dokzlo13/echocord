@@ -74,8 +74,6 @@ jobs:
         run: python scripts/dev.py build
       - name: Test application unit behavior
         run: python scripts/dev.py app-test
-      - name: Prepare third-party notices and corresponding sources
-        run: python scripts/package-third-party.py
       - name: Package checked Windows release
         run: python scripts/dev.py package
       - name: Identify checked release version
@@ -88,8 +86,7 @@ jobs:
         with:
           name: release-assets
           path: |
-            artifacts/release/echocord-${{ steps.version.outputs.version }}-windows-x64.zip
-            artifacts/release/echocord-${{ steps.version.outputs.version }}-windows-x64.zip.sha256
+            artifacts/release/echocord.exe
             artifacts/release/echocord-${{ steps.version.outputs.version }}-third-party-sources.zip
             artifacts/release/RELEASE-NOTES.md
             artifacts/release/SHA256SUMS

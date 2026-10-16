@@ -49,4 +49,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" artifacts/release/* --verify-tag --title "Echocord $RELEASE_TAG" --notes-file artifacts/release/RELEASE-NOTES.md
+        run: |
+          gh release create "$RELEASE_TAG" \
+            artifacts/release/echocord.exe \
+            "artifacts/release/echocord-${RELEASE_TAG#v}-third-party-sources.zip" \
+            artifacts/release/SHA256SUMS \
+            --verify-tag --title "Echocord $RELEASE_TAG" \
+            --notes-file artifacts/release/RELEASE-NOTES.md

@@ -3,6 +3,7 @@
 
 import argparse
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -14,7 +15,6 @@ import sys
 import tempfile
 import tomllib
 import venv
-import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 WINDOWS = sys.platform == "win32"
@@ -354,6 +354,9 @@ def build(check=False, prepared=False):
         version()
         bindings()
         frontend()
+    if not check:
+        run(sys.executable, ROOT / "scripts/package-third-party.py")
+        stage_license_assets()
     cargo = ["cargo"] if WINDOWS else ["cargo", "xwin"]
     args = [
         "clippy" if check else "build",
@@ -373,6 +376,8 @@ def build(check=False, prepared=False):
     if check:
         args += ["--", "-D", "warnings"]
     run(*cargo, *args, env=windows_flags())
+    if not check:
+        write_build_receipt()
 
 
 def check(portable=False):
@@ -448,7 +453,6 @@ def release_notes(changelog, release_version):
         raise SystemExit(
             f"CHANGELOG.md has an empty version section for {release_version}"
         )
-    filename = f"echocord-{release_version}-windows-x64.zip"
     sources = f"echocord-{release_version}-third-party-sources.zip"
     return f"""# Echocord {release_version}
 
@@ -456,11 +460,11 @@ def release_notes(changelog, release_version):
 
 ## Download and setup
 
-Download **{filename}**, extract the complete ZIP, and run `echocord.exe` on Windows 11 x64. This early hobby release is unsigned and provided without guarantees.
+Download and run **[echocord.exe](https://github.com/dokzlo13/echocord/releases/download/v{release_version}/echocord.exe)** on Windows 11 x64. This early hobby release is unsigned.
 
 Install [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) and the [Visual C++ v14 x64 runtime](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist) if needed. See the [bot setup and usage guide](https://github.com/dokzlo13/echocord#readme) before connecting.
 
-Use `SHA256SUMS` to verify the release downloads. The application ZIP includes its MIT license and complete third-party notices. **{sources}** contains the corresponding covered third-party sources; retain those notices when redistributing.
+Licenses and complete third-party notices are available offline in **Settings → Licenses**. `SHA256SUMS` verifies the downloads; **{sources}** supplies corresponding covered sources and is not needed to run the app.
 """
 
 
@@ -537,25 +541,185 @@ def validated_notices(release_version, source_archive):
         ) from None
 
 
+class NoticeText(HTMLParser):
+    """Readable HTML notice text; the original HTML remains bundled verbatim."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.hidden = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self.hidden += 1
+        if tag in ("p", "div", "br", "li", "h1", "h2", "h3", "pre", "tr"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style"):
+            self.hidden = max(0, self.hidden - 1)
+        if tag in ("p", "div", "li", "h1", "h2", "h3", "pre", "tr"):
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+def license_assets(release_version, notice_files):
+    """Build a deterministic, self-contained offline license catalog."""
+    assets = {
+        "LICENSE.txt": (ROOT / "LICENSE").read_bytes(),
+        "THIRD_PARTY_NOTICES.txt": (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes(),
+    }
+    documents = [
+        {"title": "Echocord · MIT license", "path": "/licenses/LICENSE.txt"},
+        {
+            "title": "Echocord · Third-party notices and corresponding source",
+            "path": "/licenses/THIRD_PARTY_NOTICES.txt",
+        },
+    ]
+    generated = ROOT / "licenses/generated"
+    for path in notice_files:
+        relative = path.relative_to(generated).as_posix()
+        assets[f"generated/{relative}"] = path.read_bytes()
+    inventory = json.loads(assets["generated/inventory.json"])
+    for package in inventory["packages"]:
+        entries = package["notices"] + (
+            [package["attribution"]] if "attribution" in package else []
+        )
+        for entry in entries:
+            path = f"generated/{entry['path']}"
+            original_name = entry.get("original_name", "Published attribution")
+            title = f"{package['name']} {package['version']} · {original_name}"
+            if PurePosixPath(path).suffix.lower() in (".html", ".htm"):
+                parser = NoticeText()
+                parser.feed(assets[path].decode("utf-8"))
+                readable = f"readable/{entry['sha256']}.txt"
+                assets[readable] = ("".join(parser.parts).strip() + "\n").encode()
+                # Offer both: readable text for the app and the untouched source.
+                documents.append({
+                    "title": title + " (original HTML)", "path": "/licenses/" + path,
+                })
+                path = readable
+            documents.append({"title": title, "path": "/licenses/" + path})
+    documents.extend([
+        {"title": "Complete dependency inventory", "path": "/licenses/generated/INDEX.md"},
+        {"title": "Machine-readable provenance", "path": "/licenses/generated/inventory.json"},
+    ])
+    filename = inventory["source_archive"]["name"]
+    catalog = {
+        "version": release_version,
+        "sourceUrl": f"https://github.com/dokzlo13/echocord/releases/download/v{release_version}/{filename}",
+        "documents": documents,
+    }
+    assets["catalog.json"] = (
+        json.dumps(catalog, ensure_ascii=False, indent=2) + "\n"
+    ).encode()
+    return assets
+
+
+def asset_digest(assets):
+    """Length-prefix paths/content so file boundaries cannot collide."""
+    digest = hashlib.sha256()
+    for name, data in sorted(assets.items()):
+        encoded = name.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def current_license_assets(release_version):
+    source_archive = (
+        ROOT / "artifacts/release" / f"echocord-{release_version}-third-party-sources.zip"
+    )
+    return license_assets(
+        release_version, validated_notices(release_version, source_archive)
+    )
+
+
+def stage_license_assets():
+    release_version = version()
+    assets = current_license_assets(release_version)
+    output = ROOT / "ui/dist/licenses"
+    if output.is_symlink():
+        raise SystemExit("Refusing to replace symlinked frontend licenses")
+    if output.exists():
+        shutil.rmtree(output)
+    for name, data in assets.items():
+        path = output / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    print(f"Embedded license assets prepared ({len(assets)} files)")
+
+
+def build_receipt_path():
+    return TARGET_DIR / TARGET / "release/echocord-build.json"
+
+
+def receipt_data(release_version, binary, assets):
+    return {
+        "schema": 1,
+        "version": release_version,
+        "target": TARGET,
+        "executable_sha256": hashlib.sha256(binary).hexdigest(),
+        "licenses_sha256": asset_digest(assets),
+        "cargo_lock_sha256": hashlib.sha256(
+            (ROOT / "Cargo.lock").read_bytes()
+        ).hexdigest(),
+        "npm_lock_sha256": hashlib.sha256(
+            (ROOT / "ui/package-lock.json").read_bytes()
+        ).hexdigest(),
+    }
+
+
+def write_build_receipt():
+    release_version = version()
+    assets = current_license_assets(release_version)
+    # Check that compilation was given the exact complete assets, never the
+    # development preview's license placeholder or an unindexed local file.
+    staged = ROOT / "ui/dist/licenses"
+    actual = {
+        path.relative_to(staged).as_posix(): path.read_bytes()
+        for path in staged.rglob("*") if path.is_file()
+    }
+    if actual != assets:
+        raise SystemExit("Frontend license assets changed during the build")
+    binary = (TARGET_DIR / TARGET / "release/echocord.exe").read_bytes()
+    receipt = receipt_data(release_version, binary, assets)
+    build_receipt_path().write_text(
+        json.dumps(receipt, indent=2) + "\n", encoding="utf-8", newline="\n"
+    )
+
+
+def validated_build_receipt(release_version, binary, assets):
+    try:
+        receipt = json.loads(build_receipt_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise SystemExit(
+            "Missing or invalid build receipt; run scripts/dev.py build"
+        ) from None
+    if receipt != receipt_data(release_version, binary, assets):
+        raise SystemExit(
+            "Executable or embedded licenses are stale; run scripts/dev.py build"
+        )
+
+
 def package(tag=None):
     release_version = version(tag)
     executable = TARGET_DIR / TARGET / "release/echocord.exe"
     required = [
-        executable,
-        ROOT / "LICENSE",
-        ROOT / "THIRD_PARTY_NOTICES.md",
-        ROOT / "README.md",
+        executable, ROOT / "LICENSE", ROOT / "THIRD_PARTY_NOTICES.md",
         ROOT / "CHANGELOG.md",
     ]
     for path in required:
         if not path.is_file():
-            raise SystemExit(
-                f"Missing release input: {path.name}; build and prepare notices before packaging"
-            )
+            raise SystemExit(f"Missing release input: {path.name}; build before packaging")
     notes = release_notes(
         (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), release_version
     )
-    # Refuse accidental packaging of an old, unsanitized local executable.
     binary = executable.read_bytes()
     private_roots = (
         ("workspace", ROOT),
@@ -570,57 +734,21 @@ def package(tag=None):
                     raise SystemExit(
                         f"A local build path remains in the executable ({origin}, {encoding}, {occurrences} occurrences); clean native dependency output and rebuild with scripts/dev.py build before packaging"
                     )
+    assets = current_license_assets(release_version)
+    validated_build_receipt(release_version, binary, assets)
     output = ROOT / "artifacts/release"
     source_archive = output / f"echocord-{release_version}-third-party-sources.zip"
-    notice_files = validated_notices(release_version, source_archive)
-    name = f"echocord-{release_version}-windows-x64"
-    archive = output / f"{name}.zip"
-    notes_path = output / "RELEASE-NOTES.md"
-    notes_path.write_text(notes, encoding="utf-8", newline="\n")
-    usage = """Echocord — stream local audio to Discord as a bot
-
-Extract the complete ZIP, then run echocord.exe. Windows 11 x64 is supported.
-Install Microsoft Edge WebView2 Evergreen Runtime and the Visual C++ v14 x64
-runtime if they are not installed:
-https://developer.microsoft.com/microsoft-edge/webview2/
-https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist
-
-This early hobby release is unsigned. No guarantees are given.
-Open the complete setup and usage guide online:
-https://github.com/dokzlo13/echocord#readme
-The bundled README is a source copy; its relative links/images use the online
-repository. Use the online guide for bot setup and permissions.
-
-App settings and the protected bot token are stored in your Windows user profile,
-not alongside the executable. Closing the window keeps it running in the tray
-by default; use the tray menu's Quit to exit.
-
-See LICENSE, THIRD_PARTY_NOTICES.md and licenses/ for redistribution notices.
-"""
-    with zipfile.ZipFile(
-        archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
-    ) as bundle:
-        for path in required:
-            bundle.write(path, f"{name}/{path.name}")
-        for path in notice_files:
-            bundle.write(path, f"{name}/{path.relative_to(ROOT).as_posix()}")
-        bundle.writestr(f"{name}/START-HERE.txt", usage)
-        bundle.write(notes_path, f"{name}/RELEASE-NOTES.md")
-    checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-    checksum_path = archive.with_suffix(".zip.sha256")
-    checksum_path.write_text(
-        f"{checksum}  {archive.name}\n", encoding="utf-8", newline="\n"
-    )
-    assets = sorted((archive, checksum_path, source_archive, notes_path))
+    published_executable = output / "echocord.exe"
+    shutil.copyfile(executable, published_executable)
+    (output / "RELEASE-NOTES.md").write_text(notes, encoding="utf-8", newline="\n")
     (output / "SHA256SUMS").write_text(
         "".join(
             f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
-            for path in assets
+            for path in sorted((published_executable, source_archive))
         ),
-        encoding="utf-8",
-        newline="\n",
+        encoding="utf-8", newline="\n",
     )
-    print(f"Packaged {archive.name} and SHA-256 checksums in artifacts/release/")
+    print("Packaged echocord.exe, corresponding sources and SHA256SUMS in artifacts/release/")
 
 
 def main():

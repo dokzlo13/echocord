@@ -616,3 +616,34 @@ fn switching_to_legacy_and_back_starts_clean_counter_baselines() {
         (0, 0, 0)
     );
 }
+
+#[test]
+fn lifetime_loss_totals_survive_mute_and_mode_timing_baselines() {
+    let bus = Bus::test_bus();
+    let c = control(true);
+    let mut r = Renderer::attach(&bus, c.clone()).unwrap();
+    let mut now = START_NS;
+    let mut next = now + 5_000_000;
+    warm(&bus, &mut r, &mut now, &mut next);
+    let mut out = [0.0; 960];
+    now += 60_000_000;
+    write_until(&bus, &mut next, now);
+    tick(&bus, &mut r, &mut out, now);
+    let before = c.snapshot(now / 1_000_000);
+    assert!(before.dropped_frames > 0 && before.underrun_frames > 0);
+    for (muted, enabled) in [(true, true), (true, false), (false, false), (false, true)] {
+        c.set_output(1.0, muted);
+        c.set_drift(enabled);
+        now += 10_000_000;
+        write_until(&bus, &mut next, now);
+        tick(&bus, &mut r, &mut out, now);
+        let after = c.snapshot(now / 1_000_000);
+        assert_eq!(after.dropped_frames, before.dropped_frames);
+        assert_eq!(after.underrun_frames, before.underrun_frames);
+        let timing = after.timing.unwrap();
+        assert_eq!(
+            (timing.dropped_input_frames, timing.gap_output_frames),
+            (0, 0)
+        );
+    }
+}

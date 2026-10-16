@@ -96,6 +96,8 @@ pub struct RenderControl {
     meter_drift_epoch: AtomicU64,
     meter_peak: AtomicU32,
     meter_ms: AtomicU64,
+    dropped_total: AtomicU64,
+    gap_total: AtomicU64,
     callback_frames: AtomicU32,
     callback_ms: AtomicU64,
     timing: TimingPublication,
@@ -135,6 +137,8 @@ impl RenderControl {
             meter_drift_epoch: AtomicU64::new(0),
             meter_peak: AtomicU32::new(0),
             meter_ms: AtomicU64::new(u64::MAX),
+            dropped_total: AtomicU64::new(0),
+            gap_total: AtomicU64::new(0),
             callback_frames: AtomicU32::new(0),
             callback_ms: AtomicU64::new(0),
             timing: TimingPublication::default(),
@@ -219,16 +223,22 @@ impl RenderControl {
             return RenderObservation::default();
         };
         let epoch = settings.epoch(self.session);
+        let sequence = self.meter_sequence.load(SeqCst);
         let timing = self
             .timing
             .snapshot()
             .filter(|v| v.epoch == format!("{}:{}:{}", epoch[0], epoch[1], epoch[2]));
-        let sequence = self.meter_sequence.load(SeqCst);
+        let dropped_total = self.dropped_total.load(SeqCst);
+        let gap_total = self.gap_total.load(SeqCst);
         let peak = f32::from_bits(self.meter_peak.load(SeqCst));
         let measured = self.meter_ms.load(SeqCst);
-        let valid = sequence != 0
-            && sequence.is_multiple_of(2)
-            && self.meter_output.load(SeqCst) == settings.output
+        if sequence == 0
+            || !sequence.is_multiple_of(2)
+            || sequence != self.meter_sequence.load(SeqCst)
+        {
+            return RenderObservation::default();
+        }
+        let valid = self.meter_output.load(SeqCst) == settings.output
             && self.meter_output_epoch.load(SeqCst) == settings.output_epoch
             && self.meter_drift_epoch.load(SeqCst) == settings.drift.epoch
             && sequence == self.meter_sequence.load(SeqCst)
@@ -249,12 +259,8 @@ impl RenderControl {
                 }
             }),
             queued_frames: timing.as_ref().and_then(|v| v.queued_frames).unwrap_or(0),
-            dropped_frames: timing.as_ref().map_or(0, |v| {
-                v.dropped_input_frames.min(u64::from(u32::MAX)) as u32
-            }),
-            underrun_frames: timing
-                .as_ref()
-                .map_or(0, |v| v.gap_output_frames.min(u64::from(u32::MAX)) as u32),
+            dropped_frames: dropped_total.min(u64::from(u32::MAX)) as u32,
+            underrun_frames: gap_total.min(u64::from(u32::MAX)) as u32,
             callback_frames: self.callback_frames.load(SeqCst),
             timing,
         }
@@ -288,6 +294,8 @@ pub struct Renderer {
     input: Vec<[f32; 2]>,
     origins: Vec<u64>,
     timing: Timing,
+    dropped_base: u64,
+    gap_base: u64,
     clock: RateEstimator,
     native_position: u64,
     last_callback_ns: Option<u64>,
@@ -305,6 +313,8 @@ impl Renderer {
             cursor,
             continuity: bus.correction_window(cursor, 0).continuity,
             timing: Timing::new(settings.drift.enabled, settings.epoch(control.session)),
+            dropped_base: 0,
+            gap_base: 0,
             control,
             link: Link::new(Direction::Playback, link::CAPACITY)?,
             input: vec![[0.0; 2]; link::CAPACITY],
@@ -341,6 +351,10 @@ impl Renderer {
         self.continuity = bus.correction_window(self.cursor, 0).continuity;
         self.link.reset(false);
         self.clock.reset();
+        // Public legacy totals cover the worker lifetime; timing counters cover
+        // only this control epoch. The intentional flush itself is not loss.
+        self.dropped_base = self.dropped_base.saturating_add(self.timing.dropped);
+        self.gap_base = self.gap_base.saturating_add(self.timing.gaps);
         self.timing = Timing::new(settings.drift.enabled, settings.epoch(self.control.session));
         self.unsupported = UnsupportedCallbacks::default();
         self.held_peak = 0.0;
@@ -677,8 +691,15 @@ impl Renderer {
         self.control
             .meter_ms
             .store(if audio { final_ms } else { u64::MAX }, SeqCst);
-        self.control.meter_sequence.fetch_add(1, SeqCst);
+        self.control.dropped_total.store(
+            self.dropped_base.saturating_add(self.timing.dropped),
+            SeqCst,
+        );
+        self.control
+            .gap_total
+            .store(self.gap_base.saturating_add(self.timing.gaps), SeqCst);
         self.control.timing.publish(&self.timing);
+        self.control.meter_sequence.fetch_add(1, SeqCst);
     }
 }
 

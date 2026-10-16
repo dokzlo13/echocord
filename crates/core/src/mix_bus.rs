@@ -297,6 +297,19 @@ mod native {
         // quantization is unsuitable for the bus's 40 ms freshness boundary.
         counter_millis(counter as u64, frequency)
     }
+    #[cfg(test)]
+    #[test]
+    fn shared_milliseconds_are_bracketed_by_native_counter_samples() {
+        let frequency = clock_frequency();
+        let mut before = 0;
+        let mut after = 0;
+        assert_ne!(unsafe { QueryPerformanceCounter(&mut before) }, 0);
+        let milliseconds = now_ms();
+        assert_ne!(unsafe { QueryPerformanceCounter(&mut after) }, 0);
+        assert!(milliseconds >= counter_millis(before as u64, frequency));
+        assert!(milliseconds <= counter_millis(after as u64, frequency));
+        assert_eq!(clock_frequency(), frequency);
+    }
     pub fn capture(id: &str) -> Result<crate::audio::CaptureSession, crate::model::AppError> {
         let failure = || {
             crate::model::AppError::new(

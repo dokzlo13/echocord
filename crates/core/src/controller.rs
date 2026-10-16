@@ -530,6 +530,12 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
         output: Some(snapshot.output.clone()),
     })
     .map_err(|_| Failure::Configuration.error())?;
+    if bytes.len() as u64 > MAX_SETTINGS_BYTES {
+        return Err(error(
+            ErrorCode::Configuration,
+            "This setup is too large to save. Remove a source or destination and retry.",
+        ));
+    }
     static NEXT_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let suffix = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), suffix));
@@ -2897,6 +2903,98 @@ mod tests {
         actor
     }
 
+    #[test]
+    fn oversized_serialized_setup_keeps_live_state_and_preserves_last_saved_file() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-audit-save-bound-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut config = config();
+        config.settings_file = Some(directory.join("prefs.json"));
+        let field = "\\".repeat(1023);
+        let mut snapshot = ControlSnapshot::default();
+        for n in 0..8 {
+            snapshot.inputs.push(InputStrip {
+                strip_id: format!("input-{n}"),
+                source_id: format!("{field}{n}"),
+                kind: SourceKind::Recording,
+                display_name: format!("{field}a"),
+                detail: Some(format!("{field}a")),
+                phase: InputPhase::Stopped,
+                fault: None,
+                gain_db: Some(0.0),
+                muted: false,
+                colour_slot: 0,
+                restored: true,
+            });
+        }
+        for n in 0..3 {
+            snapshot.destinations.push(DestinationStrip {
+                session_id: 0,
+                destination_id: format!("playback-{n}"),
+                kind: DestinationKind::Playback,
+                device_id: Some(format!("{field}{n}")),
+                display_name: Some(format!("{field}a")),
+                server_id: String::new(),
+                channel_id: String::new(),
+                connection: Connection::Disconnected,
+                volume_db: Some(0.0),
+                muted: false,
+            });
+        }
+        snapshot.destinations.push(DestinationStrip {
+            session_id: 0,
+            destination_id: "discord-4".into(),
+            kind: DestinationKind::Discord,
+            device_id: None,
+            display_name: Some(format!("{field}a")),
+            server_id: "1".into(),
+            channel_id: "2".into(),
+            connection: Connection::Disconnected,
+            volume_db: Some(0.0),
+            muted: false,
+        });
+        validate_preferences(&Preferences {
+            inputs: snapshot.inputs.clone(),
+            destinations: snapshot.destinations.clone(),
+            ..Preferences::default()
+        })
+        .unwrap();
+        save_preferences(&config, &ControlSnapshot::default()).unwrap();
+        let path = config.settings_file.as_ref().unwrap().clone();
+        let previous = std::fs::read(&path).unwrap();
+        let mut a = actor();
+        a.config = config;
+        a.snapshot = snapshot;
+        a.command(ControlCommand::SetSettings {
+            settings: AppSettings {
+                keep_in_tray: false,
+                ..AppSettings::default()
+            },
+        })
+        .unwrap();
+        assert!(!a.snapshot.settings.keep_in_tray);
+        assert_eq!(a.snapshot.inputs.len(), MAX_INPUTS);
+        assert!(
+            a.snapshot
+                .preferences_warning
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("too large to save")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert!(load_preferences(&a.config).unwrap().inputs.is_empty());
+
+        // Reduce the synthetic setup without starting any native capture worker.
+        a.snapshot.inputs.pop();
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert!(a.snapshot.preferences_warning.is_none());
+        let restored = load_preferences(&a.config).unwrap();
+        assert_eq!(restored.inputs.len(), MAX_INPUTS - 1);
+        assert!(!restored.settings.keep_in_tray);
+        assert!((std::fs::metadata(&path).unwrap().len()) <= MAX_SETTINGS_BYTES);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
     #[test]
     fn source_discovery_is_independent_and_preserves_selected_descriptor() {
         let mut a = actor();

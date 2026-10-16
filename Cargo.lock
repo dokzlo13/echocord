@@ -1335,6 +1335,7 @@ dependencies = [
  "futures",
  "opus2",
  "rtrb",
+ "rubato",
  "serde",
  "serde_json",
  "serenity",

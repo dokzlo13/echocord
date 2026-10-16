@@ -19,6 +19,8 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 - Keep capture, volume and mute controls reachable on faulted cards, with direct retry or reselection actions and truthful cleanup/recovery states.
 - Distinguish rejected bot tokens from failed checks and offer Check again. Keep operation errors on the affected card and preserve keyboard focus through connection changes.
 - Prioritize problems in summaries, name states in navigation, wrap recovery explanations in compact windows, and reset only the replaced source's history.
+- Expire frozen audio and gateway readings using native observation times. Control changes cannot revive stale meters; histories retain real timing gaps.
+- Show recent local output drops and gaps separately from session totals, so an old incident does not leave a permanent warning.
 
 ### Scope
 

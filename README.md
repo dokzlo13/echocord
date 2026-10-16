@@ -75,7 +75,7 @@ Avoid sending a playback destination back into a recording input you are capturi
 
 **Saved setup and closing:** recording inputs can resume capture when Restore setup is enabled; restored applications wait for explicit Capture, and every output stays idle. Closing the window keeps the app running in the tray by default. Use **Quit** in the tray to exit, or turn off **Keep running in tray** in Settings.
 
-Settings from older releases migrate automatically in memory and are saved in the current format after a successful change. Newer-version files are preserved. If saving fails, live controls remain applied and Echocord shows a persistent notice with a save retry; those changes are not promised after restarting.
+Settings from older releases migrate automatically in memory and are saved in the current format after a successful change. Newer-version files are preserved. Saving runs in the background so disk access does not block live controls. If saving fails, live controls remain applied and Echocord shows a persistent notice with a save retry; those changes are not promised after restarting.
 
 ## Troubleshooting
 

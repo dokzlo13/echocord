@@ -46,6 +46,8 @@ Simple and History are persisted settings. Histories use bounded observed sample
 
 Label gateway ping as gateway, and buffer/drop/underrun measurements with their local units and boundary. They do not measure voice or listener latency. Omit unsupported transport/profile facts rather than adding permanent Unavailable placeholders or fictional values.
 
+A live meter with no recent observation says No recent data; unavailable data is not silence. Audio observations expire after one second and gateway readings after 2.5 seconds. Repeated control snapshots do not extend those ages or add history samples. Output diagnostics distinguish drops and gaps over the last 60 seconds from frame totals since start; only the recent window carries a warning colour. A counter reset or observation gap invalidates the delta baseline instead of inventing a rate.
+
 ## Sheets and onboarding
 
 Sheets fill the window below the title bar, with stable header/footer, a scrolling body, initial focus, Tab trapping, Escape and focus return. The underlying surface is inert. Source pickers separate Applications and Inputs; choices show selected/unavailable states and real identities. Edits are immediate and targeted, with no global Apply workflow.

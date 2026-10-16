@@ -66,4 +66,6 @@ Source colours are presentation metadata: new sources reuse unused coloured slot
 
 Meters and histories use bounded observed samples and suspend visual work while hidden. Source/device changes or destination-session changes reset only the relevant history. Local meter/buffer/drop observations are not listener receipt; gateway RTT is not voice latency. Unknown permissions, participant counts or transport facts must not be invented.
 
+Telemetry carries worker-origin monotonic observation times and the controller's envelope time. Repeated control publications cannot renew an old measurement. Source phases remain revision-fenced, while telemetry from an older fader revision can be accepted only for an exact current source identity. Output origins come from actual native callback/PCM handoff observations. Gateway time marks the worker reading the library's latest RTT, not a new heartbeat acknowledgement. The UI expires audio after one second and gateway observations after 2.5 seconds, preserves gaps in measured histories, and derives bounded recent output drop/gap counters separately from session totals.
+
 [DESIGN.md](../DESIGN.md) specifies the compact desktop presentation. [TESTING.md](TESTING.md) distinguishes portable logic, browser behavior, Windows runtime and physical/listener acceptance.

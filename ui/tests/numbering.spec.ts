@@ -7,6 +7,37 @@ async function holdHistoryClock(page: Page) {
   await page.clock.pauseAt(new Date("2026-01-01T01:00:00Z"));
 }
 
+async function seedObservedHistory(page: Page) {
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.stopTelemetry();
+    const inputs = structuredClone(t.current.inputs);
+    const destinations = structuredClone(t.current.destinations);
+    t.emit({
+      inputs: inputs.map((v) => ({ ...v, phase: "capturing" })),
+      destinations: destinations.map((v) => ({
+        ...v,
+        connection: { phase: "connected" },
+      })),
+    });
+    t.observeTelemetry(
+      {
+        ...t.current.telemetry,
+        inputs: t.current.telemetry.inputs.map((v) => ({
+          ...v,
+          levelDbfs: -18,
+        })),
+        destinations: t.current.telemetry.destinations.map((v) => ({
+          ...v,
+          levelDbfs: -24,
+        })),
+      },
+      t.current.telemetry.clockMs + 1,
+    );
+    t.emit({ inputs, destinations });
+  });
+}
+
 async function numbers(section: Locator, expected: string[]) {
   await expect(section.locator(".identity-row > .ch")).toHaveText(expected);
   await expect(section.locator(".chips .chip")).toHaveText(expected);
@@ -96,6 +127,7 @@ test("source ordinals compact after middle and first removal while colour, ident
   const survivor = page.locator('[id="card-strip:3"]');
   await expect(survivor).toHaveAttribute("data-colour", "2");
   const node = await survivor.elementHandle();
+  await seedObservedHistory(page);
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;
     h.adapter.telemetry.ingest(h.transport.current.telemetry);
@@ -159,6 +191,7 @@ test("source card and jump colours reuse a freed slot through churn while peers 
     .click();
   const peer = page.locator('[id="card-strip:2"]');
   const node = await peer.elementHandle();
+  await seedObservedHistory(page);
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;
     h.adapter.telemetry.ingest(h.transport.current.telemetry);
@@ -221,6 +254,7 @@ test("destination ordinals compact without remounting or resetting a surviving r
   const survivor = page.locator('[id="card-dest:3"]');
   await expect(survivor).toHaveAttribute("data-state", "live");
   const node = await survivor.elementHandle();
+  await seedObservedHistory(page);
   const history = await page.evaluateHandle(() => {
     const h = window.uiHarness;
     h.adapter.telemetry.ingest(h.transport.current.telemetry);

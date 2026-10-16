@@ -519,6 +519,7 @@ test("telemetry bursts update refs while control React commits stay constant", a
           inputs: [
             {
               stripId: "strip:1",
+              observedAtMs: performance.now(),
               levelDbfs: -8,
               preClip: true,
               queuedFrames: 0,
@@ -560,6 +561,7 @@ test("muting a source hatches a moving postgain meter, destination mute observes
         inputs: [
           {
             stripId: "strip:1",
+            observedAtMs: performance.now(),
             levelDbfs: -14,
             preClip: false,
             queuedFrames: 0,
@@ -567,7 +569,7 @@ test("muting a source hatches a moving postgain meter, destination mute observes
             underrunFrames: 0,
           },
         ],
-        outputLevelDbfs: null,
+        outputLevelDbfs: -96,
       },
     });
   });
@@ -608,6 +610,7 @@ test("native hidden state pauses paint and catches up on visibility return", asy
         inputs: [
           {
             stripId: "strip:1",
+            observedAtMs: performance.now(),
             levelDbfs: -4,
             preClip: false,
             queuedFrames: 0,

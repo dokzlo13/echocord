@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { appError, ControlAdapter, type Transport } from "../src/adapter";
-import { FixtureTransport, fixtureSnapshot } from "../src/fixtures";
+import {
+  FixtureTransport,
+  fixtureSnapshot,
+  freshTelemetry,
+} from "../src/fixtures";
 import type { ControlCommand, ControlSnapshot } from "../src/generated";
 
 function deferred<T>() {
@@ -63,11 +67,11 @@ test("meter-only snapshot bursts preserve the control subscription identity", as
   const before = adapter.getSnapshot();
   for (let i = 0; i < 500; i++)
     transport.emit({
-      telemetry: {
+      telemetry: freshTelemetry({
         ...transport.current.telemetry,
         outputLevelDbfs: -10,
         queuedFrames: i,
-      },
+      }),
     });
   expect(commits).toBe(0);
   expect(adapter.getSnapshot()).toBe(before);
@@ -206,13 +210,13 @@ test("history starts fresh after native visibility return and destination sessio
   const t = new FixtureTransport("connected");
   const a = new ControlAdapter(t);
   await a.start();
-  t.emit({ telemetry: t.current.telemetry });
+  t.observeTelemetry();
   expect(a.telemetry.history("src:strip:1")).toBeDefined();
   t.visible(false);
   t.visible(true);
   expect(a.telemetry.history("src:strip:1")).toBeUndefined();
   expect(Number.isNaN(a.telemetry.net().buffer2m.at(0))).toBe(true);
-  t.emit({ telemetry: t.current.telemetry });
+  t.observeTelemetry();
   expect(a.telemetry.history("src:strip:1")).toBeDefined();
   t.emit({ sessionId: t.current.sessionId + 1 });
   expect(Number.isNaN(a.telemetry.net().buffer2m.at(1))).toBe(true);
@@ -224,7 +228,7 @@ test("per-output sessions reject stale samples and retain unaffected histories",
   const a = new ControlAdapter(t);
   await a.start();
   const scalar = structuredClone(t.current.telemetry);
-  a.telemetry.ingest(scalar);
+  a.telemetry.ingest(freshTelemetry(scalar));
   const other = a.telemetry.history("dst:local:3");
   const source = a.telemetry.history("src:strip:1");
   const next = t.current.destinations.map((d) =>
@@ -234,25 +238,29 @@ test("per-output sessions reject stale samples and retain unaffected histories",
   expect(a.telemetry.history("dst:local:1")).toBeUndefined();
   expect(a.telemetry.history("dst:local:3")).toBe(other);
   expect(a.telemetry.history("src:strip:1")).toBe(source);
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: scalar.destinations.map((d) =>
-      d.destinationId === "local:1" ? { ...d, levelDbfs: -1 } : d,
-    ),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: scalar.destinations.map((d) =>
+        d.destinationId === "local:1" ? { ...d, levelDbfs: -1 } : d,
+      ),
+    }),
+  );
   expect(a.telemetry.read("dst:local:1").db).toBeNull();
   const session =
     next.find((d) => d.destinationId === "local:1")?.sessionId ?? 0;
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: scalar.destinations.map((d) =>
-      d.destinationId === "local:1"
-        ? { ...d, sessionId: session, levelDbfs: -32 }
-        : d,
-    ),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: scalar.destinations.map((d) =>
+        d.destinationId === "local:1"
+          ? { ...d, sessionId: session, levelDbfs: -32 }
+          : d,
+      ),
+    }),
+  );
   expect(a.telemetry.read("dst:local:1").db).toBe(-32);
-  a.telemetry.ingest(scalar);
+  a.telemetry.ingest(freshTelemetry(scalar));
   expect(a.telemetry.read("dst:local:1").db).toBe(-32);
   a.dispose();
 });
@@ -262,56 +270,66 @@ test("unknown scalar IDs and legacy aliases cannot bleed into another output met
   const a = new ControlAdapter(t);
   await a.start();
   const scalar = structuredClone(t.current.telemetry);
-  a.telemetry.ingest({
-    ...scalar,
-    outputLevelDbfs: 0,
-    destinations: scalar.destinations.map((d) => ({
-      ...d,
-      levelDbfs: d.destinationId === "local:1" ? -10 : -40,
-    })),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      outputLevelDbfs: 0,
+      destinations: scalar.destinations.map((d) => ({
+        ...d,
+        levelDbfs: d.destinationId === "local:1" ? -10 : -40,
+      })),
+    }),
+  );
   expect(a.telemetry.read("dst:local:1").db).toBe(-10);
   expect(a.telemetry.read("dst:dest:1").db).toBe(-40);
   expect(a.telemetry.read("dst:unknown").db).toBeNull();
   const before = a.telemetry.net("local:1");
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: [
-      {
-        destinationId: "unknown",
-        sessionId: 999,
-        levelDbfs: 0,
-        queuedFrames: 1920,
-        droppedFrames: 100,
-        underrunFrames: 100,
-        gatewayPingMs: 10,
-      },
-    ],
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: [
+        {
+          destinationId: "unknown",
+          observedAtMs: performance.now(),
+          gatewayObservedAtMs: performance.now(),
+          sessionId: 999,
+          levelDbfs: 0,
+          queuedFrames: 1920,
+          droppedFrames: 100,
+          underrunFrames: 100,
+          gatewayPingMs: 10,
+        },
+      ],
+    }),
+  );
   expect(a.telemetry.net("local:1")).toBe(before);
   expect(a.telemetry.net("unknown").buffer).toBeNull();
   a.dispose();
 });
 
 test("unavailable levels remain gaps while measured silence is a real sample", async () => {
-  const t = new FixtureTransport();
+  const t = new FixtureTransport("connected");
   const a = new ControlAdapter(t);
   await a.start();
   const scalar = structuredClone(t.current.telemetry);
   a.telemetry.resetHistory();
-  a.telemetry.ingest({
-    ...scalar,
-    inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: null })),
-    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: null })),
-  });
-  expect(Number.isNaN(a.telemetry.history("src:strip:1")?.at(0))).toBe(true);
-  expect(Number.isNaN(a.telemetry.history("dst:dest:1")?.at(0))).toBe(true);
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: null })),
+      destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: null })),
+    }),
+  );
+  expect(a.telemetry.history("src:strip:1")).toBeUndefined();
+  expect(a.telemetry.history("dst:dest:1")).toBeUndefined();
   a.telemetry.resetHistory();
-  a.telemetry.ingest({
-    ...scalar,
-    inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: -96 })),
-    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: -96 })),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      inputs: scalar.inputs.map((s) => ({ ...s, levelDbfs: -96 })),
+      destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: -96 })),
+    }),
+  );
   expect(a.telemetry.history("src:strip:1")?.at(0)).toBe(0);
   expect(a.telemetry.history("dst:dest:1")?.at(0)).toBe(0);
   a.dispose();
@@ -330,7 +348,7 @@ test("room telemetry is keyed by destination and session across independent reco
     gatewayPingMs: d.destinationId === "local:1" ? null : 42,
   }));
   scalar.outputLevelDbfs = 0;
-  a.telemetry.ingest(scalar);
+  a.telemetry.ingest(freshTelemetry(scalar));
   expect(a.telemetry.read("dst:dest:1").db).toBe(-10);
   expect(a.telemetry.read("dst:dest:2").db).toBe(-20);
   expect(a.telemetry.read("dst:dest:3").db).toBe(-30);
@@ -344,26 +362,34 @@ test("room telemetry is keyed by destination and session across independent reco
   );
   a.telemetry.setDestinations(next);
   expect(a.telemetry.history("dst:dest:2")).toBeUndefined();
-  a.telemetry.ingest(scalar);
+  a.telemetry.ingest(freshTelemetry(scalar));
   expect(a.telemetry.read("dst:dest:2").db).toBeNull();
   expect(a.telemetry.history("dst:dest:3")).toBe(peer);
   expect(a.telemetry.history("src:strip:1")).toBe(source);
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: scalar.destinations.map((d) =>
-      d.destinationId === "dest:2" ? { ...d, sessionId: 2, levelDbfs: -35 } : d,
-    ),
-  });
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: 0 })),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: scalar.destinations.map((d) =>
+        d.destinationId === "dest:2"
+          ? { ...d, sessionId: 2, levelDbfs: -35 }
+          : d,
+      ),
+    }),
+  );
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: scalar.destinations.map((d) => ({ ...d, levelDbfs: 0 })),
+    }),
+  );
   expect(a.telemetry.read("dst:dest:2").db).toBe(-35);
   a.telemetry.setDestinations(next.filter((d) => d.destinationId !== "dest:2"));
-  a.telemetry.ingest({
-    ...scalar,
-    destinations: scalar.destinations.map((d) => ({ ...d, sessionId: 999 })),
-  });
+  a.telemetry.ingest(
+    freshTelemetry({
+      ...scalar,
+      destinations: scalar.destinations.map((d) => ({ ...d, sessionId: 999 })),
+    }),
+  );
   expect(a.telemetry.read("dst:dest:2").db).toBeNull();
   expect(a.telemetry.history("dst:dest:2")).toBeUndefined();
   a.dispose();
@@ -485,9 +511,17 @@ test("token failures retain useful codes without propagating private exception t
 
 test("source replacement clears only that identity's history and peak while recapture preserves peers", async () => {
   const t = new FixtureTransport("many");
+  t.current.inputs = t.current.inputs.map((v) => ({
+    ...v,
+    phase: "capturing",
+  }));
+  t.current.telemetry.inputs = t.current.telemetry.inputs.map((v) => ({
+    ...v,
+    levelDbfs: -18,
+  }));
   const adapter = new ControlAdapter(t);
   await adapter.start();
-  adapter.telemetry.ingest(t.current.telemetry);
+  adapter.telemetry.ingest(freshTelemetry(t.current.telemetry));
   const peer = adapter.telemetry.history("src:strip:2");
   const original = adapter.telemetry.history("src:strip:1");
   expect(original).toBeDefined();
@@ -507,7 +541,10 @@ test("source replacement clears only that identity's history and peak while reca
   expect(adapter.telemetry.read("src:strip:1").peak).toBeNull();
   expect(adapter.telemetry.history("src:strip:2")).toBe(peer);
   await wait(110);
-  adapter.telemetry.ingest(t.current.telemetry);
+  t.emit({
+    inputs: t.current.inputs.map((v) => ({ ...v, phase: "capturing" })),
+  });
+  adapter.telemetry.ingest(freshTelemetry(t.current.telemetry));
   const replaced = adapter.telemetry.history("src:strip:1");
   expect(replaced).toBeDefined();
   expect(replaced).not.toBe(original);

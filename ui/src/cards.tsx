@@ -45,7 +45,9 @@ function useLevel(key: string) {
       el.style.setProperty("--level", fraction(r.db).toFixed(3));
       el.style.setProperty("--peak", fraction(r.peak).toFixed(3));
       el.dataset.signal = r.db === null ? "none" : r.db > -3 ? "hot" : "ok";
-      if (r.preClip) clipUntil = now + 1500;
+      el.dataset.stale = String(r.stale);
+      if (r.stale) clipUntil = 0;
+      else if (r.preClip) clipUntil = now + 1500;
       if (now < clipUntil) el.dataset.clip = "";
       else delete el.dataset.clip;
       if (readout.current)
@@ -91,16 +93,18 @@ function LevelWell({ levelKey }: { levelKey: string }) {
         ctx.clearRect(0, 0, w, h);
         const dpr = window.devicePixelRatio || 1;
         const col = Math.max(1, Math.round(1.5 * dpr));
-        const cols = Math.min(ring?.buf.length ?? 0, Math.floor(w / col));
+        const cols = ring?.buf.length ?? 0;
+        const duration = Math.max(1000, Math.floor(w / col) * 100);
         // History and the current level share one well: older samples fade towards the left,
         // the newest few are drawn brightest, and the live bar runs along the floor.
         ctx.fillStyle = colour;
         for (let k = 0; ring && k < cols; k++) {
           const f = ring.at(k);
           if (Number.isNaN(f) || f <= 0) continue;
-          const age = k / Math.max(1, cols - 1);
-          ctx.globalAlpha = k < 3 ? 0.9 : 0.62 - 0.5 * age;
-          ctx.fillRect(w - (k + 1) * col, h - f * h, col, f * h);
+          const age = (now - ring.timeAt(k)) / duration;
+          if (age < 0 || age > 1) continue;
+          ctx.globalAlpha = age < 0.05 ? 0.9 : 0.62 - 0.5 * age;
+          ctx.fillRect(w * (1 - age) - col, h - f * h, col, f * h);
         }
         ctx.globalAlpha = 1;
         ctx.fillStyle = guide;
@@ -129,7 +133,7 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
     if (!cv || !ctx) return;
     const stop = paint(
       store,
-      () => {
+      (now) => {
         const dpr = window.devicePixelRatio || 1;
         const w = Math.round(cv.clientWidth * dpr);
         const h = Math.round(cv.clientHeight * dpr);
@@ -163,60 +167,32 @@ function SourceHistory({ levelKey }: { levelKey: string }) {
           if (peakRef.current) peakRef.current.textContent = "";
           return;
         }
-        const n = ring.buf.length;
         let peak = 0;
         let observed = false;
-        const x = (k: number) => plotW - (k / (n - 1)) * plotW;
+        let previousTime = -Infinity;
         const y = (f: number) => padT + plotH - f * plotH;
-        let oldest = 0;
-        for (let k = n - 1; k >= 0; k--)
-          if (Number.isFinite(ring.at(k))) {
-            oldest = k;
-            break;
-          }
         ctx.beginPath();
-        let segment = false;
-        let newest = oldest;
-        for (let k = oldest; k >= 0; k--) {
-          const v = ring.at(k);
-          if (!Number.isFinite(v)) {
-            if (segment) {
-              ctx.lineTo(x(newest), y(0));
-              ctx.closePath();
-              segment = false;
-            }
-            continue;
-          }
+        for (let k = ring.buf.length - 1; k >= 0; k--) {
+          const value = ring.at(k);
+          const time = ring.timeAt(k);
+          const age = now - time;
+          if (!Number.isFinite(value) || age < 0 || age > 60_000) continue;
+          const x = plotW * (1 - age / 60_000);
           observed = true;
-          peak = Math.max(peak, v);
-          if (!segment) {
-            ctx.moveTo(x(k), y(0));
-            segment = true;
-          }
-          ctx.lineTo(x(k), y(v));
-          newest = k;
+          peak = Math.max(peak, value);
+          if (time - previousTime > 250) ctx.moveTo(x, y(value));
+          else ctx.lineTo(x, y(value));
+          previousTime = time;
+          ctx.globalAlpha = 0.16;
+          ctx.fillStyle = colour;
+          ctx.fillRect(
+            x,
+            y(value),
+            Math.max(dpr, plotW / 600),
+            y(0) - y(value),
+          );
         }
-        if (segment) {
-          ctx.lineTo(x(newest), y(0));
-          ctx.closePath();
-        }
-        ctx.globalAlpha = 0.16;
-        ctx.fillStyle = colour;
-        ctx.fill();
         ctx.globalAlpha = 1;
-        ctx.beginPath();
-        let connected = false;
-        for (let k = oldest; k >= 0; k--) {
-          const v = ring.at(k);
-          if (!Number.isFinite(v)) {
-            connected = false;
-            continue;
-          }
-          if (!connected) {
-            ctx.moveTo(x(k), y(v));
-            connected = true;
-          } else ctx.lineTo(x(k), y(v));
-        }
         ctx.strokeStyle = colour;
         ctx.lineWidth = 1.5 * dpr;
         ctx.lineJoin = "round";
@@ -333,7 +309,11 @@ function ChannelFader({
               ))}
             </span>
           )}
-          {idle && <span className="mf-idle">{idle}</span>}
+          {idle ? (
+            <span className="mf-idle">{idle}</span>
+          ) : (
+            <span className="mf-idle mf-stale">No recent data</span>
+          )}
         </div>
         <input
           type="range"
@@ -382,7 +362,7 @@ function Spark({ uid, kind }: { uid: string; kind: "gateway" | "buffer" }) {
     () =>
       paint(
         store,
-        () => {
+        (now) => {
           const cv = ref.current;
           const ctx = cv?.getContext("2d");
           if (!cv || !ctx) return;
@@ -405,13 +385,16 @@ function Spark({ uid, kind }: { uid: string; kind: "gateway" | "buffer" }) {
           ctx.strokeStyle = cs.getPropertyValue("--spark").trim() || "#888";
           ctx.beginPath();
           let connected = false;
-          for (let k = 23; k >= 0; k--) {
+          let previousTime = -Infinity;
+          for (let k = ring.buf.length - 1; k >= 0; k--) {
             const v = ring.at(k);
-            if (!Number.isFinite(v)) {
+            const time = ring.timeAt(k);
+            const age = now - time;
+            if (!Number.isFinite(v) || age < 0 || age > 12_000) continue;
+            if (time - previousTime > (kind === "gateway" ? 2500 : 1500))
               connected = false;
-              continue;
-            }
-            const x = ((23 - k) / 23) * (w - pad * 2) + pad;
+            previousTime = time;
+            const x = (1 - age / 12_000) * (w - pad * 2) + pad;
             if (!connected) {
               ctx.moveTo(x, y(v));
               connected = true;
@@ -419,11 +402,19 @@ function Spark({ uid, kind }: { uid: string; kind: "gateway" | "buffer" }) {
           }
           ctx.stroke();
           const current = ring.at(0);
-          cv.dataset.available = Number.isFinite(current) ? "true" : "false";
-          if (Number.isFinite(current)) {
+          const currentAge = now - ring.timeAt(0);
+          const available = Number.isFinite(current) && currentAge <= 12_000;
+          cv.dataset.available = available ? "true" : "false";
+          if (available) {
             ctx.fillStyle = cs.getPropertyValue("--spark-now").trim() || "#fff";
             ctx.beginPath();
-            ctx.arc(w - pad, y(current), 2.5 * dpr, 0, Math.PI * 2);
+            ctx.arc(
+              (1 - currentAge / 12_000) * (w - pad * 2) + pad,
+              y(current),
+              2.5 * dpr,
+              0,
+              Math.PI * 2,
+            );
             ctx.fill();
           }
         },
@@ -453,17 +444,24 @@ export function StatTiles({
         () => {
           const n = store.net(uid);
           const values = local
-            ? [n.buffer, n.drops]
-            : [n.ping, n.buffer, n.drops];
+            ? [n.buffer, n.recentDrops === null ? null : n.recentDrops / 48]
+            : [
+                n.ping,
+                n.buffer,
+                n.recentDrops === null ? null : n.recentDrops / 48,
+              ];
           host.current
             ?.querySelectorAll<HTMLElement>("[data-value]")
             .forEach((el, i) => {
               if (i === values.length - 1) {
-                // Session totals do not establish a current audio problem.
-                delete el.dataset.warn;
+                if ((n.recentDrops ?? 0) > 0) el.dataset.warn = "";
+                else delete el.dataset.warn;
               }
               el.textContent =
-                values[i] == null ? "—" : `${Math.round(values[i] ?? 0)}`;
+                values[i] == null
+                  ? "—"
+                  : `${i === values.length - 1 ? Math.ceil(values[i] ?? 0) : Math.round(values[i] ?? 0)}`;
+              el.title = values[i] === null ? "No recent data" : "";
             });
         },
         2,
@@ -503,11 +501,12 @@ export function StatTiles({
       </span>
       <span
         className="stat"
-        title="Native output frames dropped since this output started, to keep queued audio bounded"
+        title="Audio discarded in the last 60 seconds to keep this output queue bounded; rounded up to milliseconds"
       >
-        <span className="stat-label">Dropped frames</span>
-        <span className="stat-value tabular" data-value>
-          —
+        <span className="stat-label">Dropped · 60 s</span>
+        <span className="stat-value tabular">
+          <span data-value>—</span>
+          <small> ms</small>
         </span>
       </span>
     </span>
@@ -536,7 +535,7 @@ export function NetChart({
     () =>
       paint(
         store,
-        () => {
+        (now) => {
           const cv = cvs.current;
           const ctx = cv?.getContext("2d");
           const root = box.current;
@@ -553,13 +552,20 @@ export function NetChart({
           if (cv.height !== h) cv.height = h;
           const cs = getComputedStyle(cv);
           const n = store.net(uid);
-          const samples = Math.min(seconds * 2, n.buffer2m.buf.length);
+          const samples = n.buffer2m.buf.length;
+          const within = (time: number) =>
+            now - time >= 0 && now - time <= seconds * 1000;
           let max = 0;
           for (let k = 0; k < samples; k++) {
             const buffer = n.buffer2m.at(k);
             const gateway = n.ping2m.at(k);
-            if (Number.isFinite(buffer)) max = Math.max(max, buffer);
-            if (!local && Number.isFinite(gateway))
+            if (Number.isFinite(buffer) && within(n.buffer2m.timeAt(k)))
+              max = Math.max(max, buffer);
+            if (
+              !local &&
+              Number.isFinite(gateway) &&
+              within(n.ping2m.timeAt(k))
+            )
               max = Math.max(max, gateway);
           }
           const top = Math.max(60, Math.ceil(max / 20) * 20);
@@ -568,7 +574,8 @@ export function NetChart({
           const padB = 16 * dpr;
           const plotW = w - right;
           const plotH = h - padT - padB;
-          const x = (k: number) => plotW - (k / (samples - 1)) * plotW;
+          const x = (time: number) =>
+            plotW * (1 - (now - time) / (seconds * 1000));
           const y = (v: number) =>
             padT + plotH - (Math.min(v, top) / top) * plotH;
           ctx.clearRect(0, 0, w, h);
@@ -596,22 +603,19 @@ export function NetChart({
           ctx.lineJoin = "round";
           ctx.lineCap = "round";
           for (const series of [
-            ...(!local ? [{ ring: n.ping2m, css: "--net-a" }] : []),
-            { ring: n.buffer2m, css: "--net-b" },
+            ...(!local ? [{ ring: n.ping2m, css: "--net-a", gap: 2500 }] : []),
+            { ring: n.buffer2m, css: "--net-b", gap: 1500 },
           ]) {
             ctx.strokeStyle = cs.getPropertyValue(series.css).trim();
             ctx.beginPath();
-            let connected = false;
+            let previousTime = -Infinity;
             for (let k = samples - 1; k >= 0; k--) {
               const v = series.ring.at(k);
-              if (!Number.isFinite(v)) {
-                connected = false;
-                continue;
-              }
-              if (!connected) {
-                ctx.moveTo(x(k), y(v));
-                connected = true;
-              } else ctx.lineTo(x(k), y(v));
+              const time = series.ring.timeAt(k);
+              if (!Number.isFinite(v) || !within(time)) continue;
+              if (time - previousTime > series.gap) ctx.moveTo(x(time), y(v));
+              else ctx.lineTo(x(time), y(v));
+              previousTime = time;
             }
             ctx.stroke();
           }
@@ -620,13 +624,14 @@ export function NetChart({
           if (tooltip) {
             tooltip.hidden = at === null;
             if (at !== null) {
-              const v = n.buffer2m.at(at);
-              const gateway = n.ping2m.at(at);
-              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 2)} s`}${local ? "" : ` · Gateway ${Number.isFinite(gateway) ? `${Math.round(gateway)} ms` : "unavailable"}`} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
-              tooltip.style.left = `${Math.max(0, Math.min(cv.clientWidth - 150, x(at) / dpr + 12))}px`;
+              const time = now - at;
+              const v = n.buffer2m.near(time, 350);
+              const gateway = n.ping2m.near(time, 600);
+              tooltip.textContent = `${at === 0 ? "now" : `−${Math.round(at / 1000)} s`}${local ? "" : ` · Gateway ${Number.isFinite(gateway) ? `${Math.round(gateway)} ms` : "unavailable"}`} · Buffer ${Number.isFinite(v) ? `${Math.round(v)} ms` : "unavailable"}`;
+              tooltip.style.left = `${Math.max(0, Math.min(cv.clientWidth - 150, x(now - at) / dpr + 12))}px`;
               ctx.fillStyle = cs.getPropertyValue("--crosshair").trim();
               ctx.fillRect(
-                Math.round(x(at)),
+                Math.round(x(now - at)),
                 padT,
                 Math.max(1, Math.round(dpr)),
                 plotH,
@@ -663,7 +668,7 @@ export function NetChart({
               (1 -
                 Math.max(0, Math.min(r.width - 30, e.clientX - r.left)) /
                   (r.width - 30)) *
-                (seconds * 2 - 1),
+                (seconds * 1000),
             );
         }}
         onPointerLeave={() => {
@@ -711,33 +716,51 @@ function ConnectLog({
   }
   const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   return (
-    <ol className="connect-log d-log" aria-label="Connection progress">
-      {observations.current.map((observed) => {
-        const done = observed.end !== undefined;
-        return (
-          <li
-            key={observed.key}
-            data-status={done ? "done" : "now"}
-            aria-current={done ? undefined : "step"}
-          >
-            <span className="log-mark" aria-hidden>
-              {done ? <Check size={13} /> : <span className="log-dot" />}
-            </span>
-            <span className="log-label">{LOG_LABEL[observed.id]?.(room)}…</span>
-            <span className="log-result tabular">
-              {done ? (
-                <span className="log-ok">Done</span>
-              ) : (
-                <LoaderCircle size={13} className="spin" aria-hidden />
-              )}
-              <span className="log-time">
-                {secs((observed.end ?? now) - observed.start)}
+    <>
+      <ol className="connect-log d-log" aria-label="Connection progress">
+        {observations.current.map((observed) => {
+          const done = observed.end !== undefined;
+          return (
+            <li
+              key={observed.key}
+              data-status={done ? "done" : "now"}
+              aria-current={done ? undefined : "step"}
+            >
+              <span className="log-mark" aria-hidden>
+                {done ? <Check size={13} /> : <span className="log-dot" />}
               </span>
-            </span>
-          </li>
-        );
-      })}
-    </ol>
+              <span className="log-label">
+                {LOG_LABEL[observed.id]?.(room)}…
+              </span>
+              <span className="log-result tabular">
+                {done ? (
+                  <span className="log-ok">Done</span>
+                ) : (
+                  <LoaderCircle size={13} className="spin" aria-hidden />
+                )}
+                <span className="log-time">
+                  {secs((observed.end ?? now) - observed.start)}
+                </span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      <div className="stages d-stage-line" aria-live="polite">
+        <ol className="stage-steps" aria-label="Connection progress">
+          {observations.current.map((observed) => (
+            <li
+              key={observed.key}
+              data-now={observed.end === undefined || undefined}
+              aria-current={observed.end === undefined ? "step" : undefined}
+            >
+              {STAGES.find((s) => s.id === observed.id)?.label}
+            </li>
+          ))}
+        </ol>
+        <span className="stage-line">{stageLine(stage, room)}</span>
+      </div>
+    </>
   );
 }
 
@@ -751,7 +774,7 @@ function InlinePing({ uid }: { uid: string }) {
         () => {
           const n = store.net(uid);
           if (ref.current)
-            ref.current.textContent = `${n.buffer === null ? "—" : Math.round(n.buffer)} ms queued · ${n.drops ?? "—"} frames dropped since start`;
+            ref.current.textContent = `${n.buffer === null ? "—" : Math.round(n.buffer)} ms queued · ${n.recentDrops === null ? "—" : Math.ceil(n.recentDrops / 48)} ms dropped · 60 s`;
         },
         2,
       ),
@@ -917,9 +940,11 @@ export function SourceCard({
   ordinal,
   mode,
   expand,
+  discoveryReady,
   h,
 }: {
   card: Source;
+  discoveryReady: boolean;
   ordinal: number | undefined;
   mode: MeterMode;
   expand?: boolean | undefined;
@@ -947,8 +972,12 @@ export function SourceCard({
     card.operationError?.code === "engine-stopped";
   const selectRequired =
     !restartRequired &&
-    ((card.state === "fault" &&
-      (!s.available || card.fault?.code === "invalid-selection")) ||
+    ((card.state === "stopped" &&
+      s.kind === "application" &&
+      discoveryReady &&
+      !s.available) ||
+      (card.state === "fault" &&
+        (!s.available || card.fault?.code === "invalid-selection")) ||
       (card.operationError?.code === "invalid-selection" &&
         (card.operationCommand === "start-capture" ||
           card.operationCommand === "replace-source")));
@@ -1001,7 +1030,11 @@ export function SourceCard({
           selectRequired ? `Select ${s.name} again` : `Capture ${s.name}`
         }
       >
-        <Circle size={11} fill="currentColor" />
+        {selectRequired ? (
+          <ArrowRightLeft size={14} />
+        ) : (
+          <Circle size={11} fill="currentColor" />
+        )}
         <span>{selectRequired ? "Select again" : "Capture"}</span>
       </button>
     );
@@ -1059,6 +1092,7 @@ export function SourceCard({
       data-muted={card.muted || undefined}
       data-colour={card.colour}
       data-expand={expand || undefined}
+      data-note={hasNote || undefined}
       aria-label={`Source${ordinal ? ` ${ordinal}` : ""}: ${s.name}${tag ? `, ${tag.toLowerCase()}` : ""}`}
     >
       <div className="card-row identity-row">
@@ -1301,7 +1335,7 @@ export function DestCard({
       onClick={() => {
         if (hasNet) h.details();
       }}
-      aria-disabled={!hasNet}
+      disabled={!hasNet}
       title={
         cleanupUnconfirmed
           ? "Cleanup unconfirmed"
@@ -1413,28 +1447,7 @@ export function DestCard({
       </span>
     );
   } else if (card.state === "connecting") {
-    const idx = STAGES.findIndex((x) => x.id === card.stage);
-    body = (
-      <>
-        <ConnectLog key={card.op} stage={card.stage} room={channel.name} />
-        <div className="stages d-stage-line" aria-live="polite">
-          <ol className="stage-steps" aria-label="Connection progress">
-            {STAGES.map((st, i) => (
-              <li
-                key={st.id}
-                data-now={i === idx || undefined}
-                aria-current={i === idx ? "step" : undefined}
-              >
-                {st.label}
-              </li>
-            ))}
-          </ol>
-          <span className="stage-line">
-            {stageLine(card.stage, channel.name)}
-          </span>
-        </div>
-      </>
-    );
+    body = <ConnectLog key={card.op} stage={card.stage} room={channel.name} />;
   } else if (hasNet) {
     body = (
       <>
@@ -1565,7 +1578,13 @@ export function DestCard({
             onCommit={h.commit}
             label={`${identityName} volume`}
             muted={card.muted}
-            idle={live ? undefined : local ? "Not playing" : "Not sending"}
+            idle={
+              live || card.state === "recovering"
+                ? undefined
+                : local
+                  ? "Not playing"
+                  : "Not sending"
+            }
             readout={readout}
           />
         </div>
@@ -1582,6 +1601,7 @@ export interface Chip {
   label: string;
   colour?: number | undefined;
   state: string;
+  stateLabel?: string;
 }
 
 function jump(uid: string) {
@@ -1635,8 +1655,8 @@ export function SlotHead({
               className="ch chip tabular"
               data-colour={c.colour}
               data-state={c.state}
-              aria-label={`Show ${itemLabel.toLowerCase()} ${i + 1}: ${c.label}, ${c.state === "cleanup-incomplete" ? "cleanup unconfirmed" : c.state}`}
-              title={`${itemLabel} ${i + 1}: ${c.label}, ${c.state === "cleanup-incomplete" ? "cleanup unconfirmed" : c.state}`}
+              aria-label={`Show ${itemLabel.toLowerCase()} ${i + 1}: ${c.label}, ${c.stateLabel ?? c.state}`}
+              title={`${itemLabel} ${i + 1}: ${c.label}, ${c.stateLabel ?? c.state}`}
               onClick={() => jump(c.uid)}
             >
               {i + 1}

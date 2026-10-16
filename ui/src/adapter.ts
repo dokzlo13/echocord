@@ -175,8 +175,8 @@ export class ControlAdapter {
       return;
     this.revision = snapshot.revision;
     this.telemetry.setDestinations(snapshot.destinations);
-    this.telemetry.ingest(snapshot.telemetry);
     this.telemetry.setInputs(snapshot.inputs);
+    this.telemetry.ingest(snapshot.telemetry);
     if (
       !this.state.snapshot ||
       controls(this.state.snapshot) !== controls(snapshot) ||

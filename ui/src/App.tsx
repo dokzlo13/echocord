@@ -611,6 +611,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   <SourceCard
                     key={c.uid}
                     card={c}
+                    discoveryReady={snapshot?.sourceDiscovery.phase === "ready"}
                     ordinal={sources.length > 1 ? i + 1 : undefined}
                     mode={mode}
                     expand={wide && sources.length <= 2}
@@ -660,6 +661,10 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     ? `${d.channel.name}, playback output`
                     : `${d.channel.name} on ${d.server.name}`,
                 state: destinationChipState(d),
+                stateLabel:
+                  d.state === "cleanup-incomplete"
+                    ? "Cleanup unconfirmed"
+                    : destinationStatusLabel(d.state, d.kind),
               }))}
               addLabel="Add destination"
               onAdd={addDestination}

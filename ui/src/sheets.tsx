@@ -1049,7 +1049,11 @@ export function BotSetup({
             bot === "error" ||
             replacementBlocked ||
             (rechecked && checking)) && (
-            <div className="bot-recovery" role={checking ? "status" : "alert"}>
+            <div
+              className="bot-recovery"
+              data-neutral={bot === "ready" || undefined}
+              role={checking || bot === "ready" ? "status" : "alert"}
+            >
               <p>
                 {checking
                   ? "Checking the saved bot with Discord…"
@@ -1071,7 +1075,7 @@ export function BotSetup({
             </div>
           )}
           {replacementBlocked && (
-            <p className="field-error" role="status">
+            <p className="bot-replacement-note" role="status">
               Disconnect Discord outputs and finish any pending cleanup before
               replacing the token. You can still check the saved bot.
             </p>
@@ -1516,13 +1520,28 @@ export function ConnectionSheet({
   const channel = dest.channel;
   const store = useTelemetryStore();
   const underruns = useRef<HTMLElement>(null);
+  const drops = useRef<HTMLElement>(null);
+  const recentGaps = useRef<HTMLElement>(null);
+  const age = useRef<HTMLElement>(null);
   useEffect(
     () =>
       paint(
         store,
         () => {
+          const n = store.net(dest.uid);
           if (underruns.current)
-            underruns.current.textContent = `${store.net(dest.uid).underruns ?? "Unavailable"}`;
+            underruns.current.textContent = `${n.underruns ?? "Unavailable"}`;
+          if (drops.current)
+            drops.current.textContent = `${n.drops ?? "Unavailable"}`;
+          if (recentGaps.current)
+            recentGaps.current.textContent =
+              n.recentUnderruns === null
+                ? "No recent data"
+                : `${Math.ceil(n.recentUnderruns / 48)} ms`;
+          if (age.current)
+            age.current.textContent = n.stale
+              ? "No recent data"
+              : `${Math.round(n.ageMs ?? 0)} ms ago`;
         },
         2,
       ),
@@ -1556,6 +1575,12 @@ export function ConnectionSheet({
       </div>
       <StatTiles uid={dest.uid} local={local} />
       <dl className="facts-list tabular">
+        <dt>Audio measurement</dt>
+        <dd ref={age}>No recent data</dd>
+        <dt>Audio gaps · last 60 s</dt>
+        <dd ref={recentGaps}>No recent data</dd>
+        <dt>Dropped frames since start</dt>
+        <dd ref={drops}>Unavailable</dd>
         <dt>Underrun frames since start</dt>
         <dd ref={underruns}>Unavailable</dd>
         <dt>Audio</dt>
@@ -1569,8 +1594,11 @@ export function ConnectionSheet({
         </p>
       )}
       <p className="conn-note">
-        Dropped and underrun frames are totals since this output started. One
-        frame is one stereo sample pair; 48 frames represent 1 ms of audio.
+        Recent drops and audio gaps count observed increases during the last 60
+        seconds, rounded up to milliseconds. Interrupted measurements restart
+        this window; it may cover less than 60 seconds. Totals count frames
+        since this output started. One frame is one stereo sample pair; 48
+        frames represent 1 ms of audio.
       </p>
       <p className="conn-note">
         {local

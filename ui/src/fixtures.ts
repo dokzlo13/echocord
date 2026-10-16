@@ -16,6 +16,7 @@ function selectedReservations(
       serverId: d.serverId,
       channelId: d.channelId,
       destinationId: d.destinationId,
+
       sessionId: d.sessionId,
       phase:
         d.connection.phase === "cleanup-incomplete"
@@ -187,12 +188,17 @@ export function fixtureSnapshot(
     };
   }
   const telemetry: MixTelemetry = {
+    clockMs: 0,
+    mixObservedAtMs: null,
+    gatewayObservedAtMs: null,
     destinations:
       name === "first-run"
         ? []
         : [
             {
               destinationId: "dest:1",
+              observedAtMs: null,
+              gatewayObservedAtMs: null,
               sessionId: 1,
               levelDbfs:
                 connection.phase === "connected" && name !== "muted"
@@ -207,6 +213,7 @@ export function fixtureSnapshot(
     mixPreClip: false,
     inputs: inputs.map((s) => ({
       stripId: s.stripId,
+      observedAtMs: null,
       levelDbfs: s.phase === "capturing" ? -18 : null,
       preClip: false,
       queuedFrames: 0,
@@ -368,6 +375,8 @@ export function fixtureSnapshot(
     }
     snapshot.telemetry.destinations = snapshot.destinations.map((d) => ({
       destinationId: d.destinationId,
+      observedAtMs: null,
+      gatewayObservedAtMs: null,
       sessionId: d.sessionId,
       levelDbfs: d.connection.phase === "connected" ? -20 : null,
       queuedFrames: d.connection.phase === "connected" ? 480 : 0,
@@ -403,6 +412,8 @@ export function fixtureSnapshot(
     }
     snapshot.telemetry.destinations = snapshot.destinations.map((d) => ({
       destinationId: d.destinationId,
+      observedAtMs: null,
+      gatewayObservedAtMs: null,
       sessionId: d.sessionId,
       levelDbfs: d.connection.phase === "connected" && !d.muted ? -20 : null,
       queuedFrames: 480,
@@ -413,7 +424,29 @@ export function fixtureSnapshot(
   }
   snapshot.serverReservations = selectedReservations(snapshot.destinations);
   if (name === "rooms") snapshot.gateway.phase = "connected";
+  snapshot.telemetry = freshTelemetry(snapshot.telemetry);
   return snapshot;
+}
+/** Explicit synthetic observations. Control-only emits intentionally retain sample origins. */
+export function freshTelemetry(
+  value: MixTelemetry,
+  clockMs = performance.now(),
+): MixTelemetry {
+  return {
+    ...value,
+    clockMs,
+    mixObservedAtMs: clockMs,
+    gatewayObservedAtMs: value.gatewayPingMs === null ? null : clockMs,
+    inputs: value.inputs.map((v) => ({
+      ...v,
+      observedAtMs: v.levelDbfs === null ? null : clockMs,
+    })),
+    destinations: value.destinations.map((v) => ({
+      ...v,
+      observedAtMs: v.levelDbfs === null ? null : clockMs,
+      gatewayObservedAtMs: v.gatewayPingMs === null ? null : clockMs,
+    })),
+  };
 }
 export class FixtureTransport implements Transport {
   current: ControlSnapshot;
@@ -427,6 +460,84 @@ export class FixtureTransport implements Transport {
   closed = 0;
   dragged = 0;
   private nextDestination = 0;
+  private sampleTimer: ReturnType<typeof setInterval> | undefined;
+  private telemetryListeners = new Set<(value: MixTelemetry) => void>();
+  listenTelemetry = async (listener: (value: MixTelemetry) => void) => {
+    this.telemetryListeners.add(listener);
+    return () => this.telemetryListeners.delete(listener);
+  };
+  observeTelemetry(
+    value = this.current.telemetry,
+    clockMs = performance.now(),
+  ) {
+    this.current.telemetry = freshTelemetry(value, clockMs);
+    for (const listener of this.telemetryListeners)
+      listener(structuredClone(this.current.telemetry));
+  }
+  /** Browser fixtures explicitly simulate native audio every 100 ms and gateway reports each second. */
+  startTelemetry() {
+    this.stopTelemetry();
+    this.sampleTimer = setInterval(() => {
+      const prior = this.current.telemetry;
+      const now = performance.now();
+      const inputs = this.current.inputs.map((input) => {
+        const previous = prior.inputs.find((v) => v.stripId === input.stripId);
+        return {
+          stripId: input.stripId,
+          observedAtMs: null,
+          levelDbfs:
+            input.phase === "capturing" ? (previous?.levelDbfs ?? -18) : null,
+          preClip: previous?.preClip ?? false,
+          queuedFrames: previous?.queuedFrames ?? 0,
+          droppedFrames: previous?.droppedFrames ?? 0,
+          underrunFrames: previous?.underrunFrames ?? 0,
+        };
+      });
+      const destinations = this.current.destinations.map((destination) => {
+        const previous = prior.destinations.find(
+          (v) =>
+            v.destinationId === destination.destinationId &&
+            v.sessionId === destination.sessionId,
+        );
+        const active =
+          destination.connection.phase === "connected" ||
+          destination.connection.phase === "recovering";
+        return {
+          destinationId: destination.destinationId,
+          sessionId: destination.sessionId,
+          observedAtMs: null,
+          gatewayObservedAtMs: previous?.gatewayObservedAtMs ?? null,
+          levelDbfs: active
+            ? destination.muted
+              ? -96
+              : (previous?.levelDbfs ?? -24)
+            : null,
+          queuedFrames: active ? (previous?.queuedFrames ?? 480) : 0,
+          droppedFrames: previous?.droppedFrames ?? 0,
+          underrunFrames: previous?.underrunFrames ?? 0,
+          gatewayPingMs: previous?.gatewayPingMs ?? null,
+        };
+      });
+      const sample = freshTelemetry({ ...prior, inputs, destinations }, now);
+      sample.destinations = sample.destinations.map((v) => {
+        const previous = prior.destinations.find(
+          (p) =>
+            p.destinationId === v.destinationId && p.sessionId === v.sessionId,
+        );
+        return previous?.gatewayObservedAtMs != null &&
+          now - previous.gatewayObservedAtMs < 1000
+          ? { ...v, gatewayObservedAtMs: previous.gatewayObservedAtMs }
+          : v;
+      });
+      this.current.telemetry = sample;
+      for (const listener of this.telemetryListeners)
+        listener(structuredClone(sample));
+    }, 100);
+  }
+  stopTelemetry() {
+    clearInterval(this.sampleTimer);
+    this.sampleTimer = undefined;
+  }
   private listeners = new Set<(s: ControlSnapshot) => void>();
   private visibility = new Set<(v: boolean) => void>();
   constructor(name: FixtureName = "disconnected") {
@@ -798,17 +909,6 @@ export class FixtureTransport implements Transport {
         delete this.current.preferencesWarning;
       }
     }
-    this.current.telemetry.destinations = this.current.destinations.map(
-      (d) => ({
-        destinationId: d.destinationId,
-        sessionId: d.sessionId,
-        levelDbfs: d.connection.phase === "connected" && !d.muted ? -24 : null,
-        queuedFrames: d.connection.phase === "connected" ? 480 : 0,
-        droppedFrames: 0,
-        underrunFrames: 0,
-        gatewayPingMs: null,
-      }),
-    );
     this.emit({
       inputs: this.current.inputs,
       destinations: this.current.destinations,

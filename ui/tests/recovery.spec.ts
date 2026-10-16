@@ -400,3 +400,140 @@ test("new card failures announce identity once without interrupting initial rest
       .evaluate((element, original) => element === original, content),
   ).toBe(true);
 });
+
+test("missing restored applications offer Select again only after discovery completes", async ({
+  page,
+}) => {
+  await open(page);
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.emit({
+      inputs: t.current.inputs.map((v) => ({ ...v, phase: "stopped" })),
+      sources: [],
+      sourceDiscovery: { phase: "loading" },
+    });
+  });
+  const card = page.locator(".source-card");
+  await expect(card.getByRole("button", { name: /^Capture / })).toBeVisible();
+  await page.evaluate(() =>
+    window.uiHarness.transport.emit({ sourceDiscovery: { phase: "ready" } }),
+  );
+  const select = card.getByRole("button", { name: /^Select .* again$/ });
+  await expect(select).toBeVisible();
+  await expect(select.locator(".lucide-circle")).toHaveCount(0);
+});
+
+test("compact progress, jump labels, and inactive badges use only observed actionable states", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 455, height: 455 });
+  await open(page, "outputs");
+  await page.evaluate(() => {
+    const t = window.uiHarness.transport;
+    t.emit({
+      destinations: t.current.destinations.map((v) =>
+        v.kind === "discord"
+          ? { ...v, connection: { phase: "connecting", stage: "join" } }
+          : v,
+      ),
+    });
+  });
+  const discord = page.locator('.dest-card[data-kind="discord"]');
+  await expect(discord.locator(".stage-steps li")).toHaveText(["Room"]);
+  await expect(page.locator(".dst-slot .chip").first()).toHaveAccessibleName(
+    /Joining$/,
+  );
+  await expect(discord.locator(".badge")).toBeDisabled();
+  await expect(discord.locator(".identity")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
+});
+
+for (const [width, height] of [
+  [440, 640],
+  [455, 455],
+  [420, 420],
+  [760, 440],
+  [1000, 640],
+] as const) {
+  for (const meterStyle of ["simple", "history"] as const) {
+    test(`real native faults remain reachable at ${width}x${height} in ${meterStyle}`, async ({
+      page,
+    }, testInfo) => {
+      await page.setViewportSize({ width, height });
+      await open(page, "outputs");
+      await page.evaluate((meterStyle) => {
+        const t = window.uiHarness.transport;
+        t.emit({
+          settings: { ...t.current.settings, meterStyle },
+          inputs: t.current.inputs.map((v) => ({
+            ...v,
+            phase: "fault",
+            fault: {
+              code: "invalid-selection",
+              message:
+                "The selected application exited. Refresh sources and select its new instance.",
+            },
+          })),
+          destinations: t.current.destinations.map((v) =>
+            v.kind === "discord"
+              ? {
+                  ...v,
+                  connection: {
+                    phase: "cleanup-incomplete",
+                    message:
+                      "Local outputs stopped; Discord departure was not confirmed. Reconnect checks current membership before joining.",
+                  },
+                }
+              : v,
+          ),
+        });
+      }, meterStyle);
+      const source = page.locator(".source-card");
+      const note = source.getByRole("note");
+      await expect(note).toContainText("selected application exited");
+      const fits = await page.evaluate(() => ({
+        width: document.documentElement.scrollWidth,
+        height: document.documentElement.scrollHeight,
+        fader: Math.min(
+          ...Array.from(
+            document.querySelectorAll(".cf-input"),
+            (v) => v.getBoundingClientRect().width,
+          ),
+        ),
+      }));
+      expect(fits.width).toBe(width);
+      expect(fits.height).toBe(height);
+      expect(fits.fader).toBeGreaterThanOrEqual(80);
+      if (height !== 420) {
+        const visible = await note.evaluate((element) => {
+          const r = element.getBoundingClientRect();
+          const list = element.closest(".list")?.getBoundingClientRect();
+          return !!list && r.top >= list.top && r.bottom <= list.bottom + 1;
+        });
+        expect(visible).toBe(true);
+      }
+      await page.screenshot({
+        path: testInfo.outputPath(
+          `faults-${width}x${height}-${meterStyle}.png`,
+        ),
+      });
+      await note.scrollIntoViewIfNeeded();
+      await expect(
+        source.getByRole("button", { name: /^Select .* again$/ }),
+      ).toBeVisible();
+      const cleanup = page.locator('.dest-card[data-kind="discord"]');
+      await cleanup.getByRole("note").scrollIntoViewIfNeeded();
+      const rect = await cleanup.getByRole("note").boundingBox();
+      // Scroll positions can round to a fractional CSS pixel.
+      expect(rect && rect.y + rect.height).toBeLessThanOrEqual(height + 1);
+      await cleanup.getByRole("button", { name: /^Disconnect / }).click();
+      expect(
+        await page.evaluate(
+          () => window.uiHarness.transport.commands.at(-1)?.type,
+        ),
+      ).toBe("disconnect-destination");
+    });
+  }
+}

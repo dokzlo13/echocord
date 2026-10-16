@@ -16,11 +16,11 @@ async function mount() {
   if (import.meta.env.DEV && import.meta.env.MODE === "fixture") {
     const { FixtureTransport, fixtureNames } = await import("./fixtures");
     const name = new URLSearchParams(location.search).get("fixture");
-    adapter = new ControlAdapter(
-      new FixtureTransport(
-        fixtureNames.find((x) => x === name) ?? "disconnected",
-      ),
+    const transport = new FixtureTransport(
+      fixtureNames.find((x) => x === name) ?? "disconnected",
     );
+    transport.startTelemetry();
+    adapter = new ControlAdapter(transport);
   }
   createRoot(root).render(
     <StrictMode>

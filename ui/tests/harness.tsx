@@ -14,6 +14,7 @@ const name = new URLSearchParams(location.search).get("fixture");
 const transport = new FixtureTransport(
   fixtureNames.find((x) => x === name) ?? "connected",
 );
+transport.startTelemetry();
 const adapter = new ControlAdapter(transport);
 export interface Harness {
   transport: FixtureTransport;

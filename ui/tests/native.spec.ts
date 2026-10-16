@@ -148,7 +148,13 @@ test("release binds exact Tauri names and telemetry event without faking accepte
         window as unknown as { echocordTestHost: Host }
       ).echocordTestHost.telemetry({
         ...t,
-        destinations: t.destinations.map((d) => ({ ...d, levelDbfs: -6 })),
+        clockMs: t.clockMs + 1,
+        mixObservedAtMs: t.clockMs + 1,
+        destinations: t.destinations.map((d) => ({
+          ...d,
+          observedAtMs: t.clockMs + 1,
+          levelDbfs: -6,
+        })),
         outputLevelDbfs: -6,
       }),
     live.telemetry,

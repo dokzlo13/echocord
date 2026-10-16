@@ -30,4 +30,4 @@ The On Air layout uses compact actionable cards, independent list scrolling, ful
 
 ## Status
 
-Version 0.1.0 is the initial public hobby-project release. It is AI-generated and AI-maintained software, provided as is without guarantees. Local meters are not listener-delivery proof. Broad native accessibility/scaling, physical recovery, measured listener latency, sustained resource use and long-session reliability remain validation work. Discord participant-audio input, Stage channels, multiple bot identities, a virtual driver and non-Windows audio support are outside current scope.
+Version 0.2.0 adds 44.1/96 kHz recording conversion, explicit preferences migration/save warnings and direct executable downloads with offline licenses. It is AI-generated and AI-maintained software, provided as is without guarantees. Local meters are not listener-delivery proof. Broad native accessibility/scaling, physical recovery, measured listener latency, sustained resource use and long-session reliability remain validation work. Discord participant-audio input, Stage channels, multiple bot identities, a virtual driver and non-Windows audio support are outside current scope.

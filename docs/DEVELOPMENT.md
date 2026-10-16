@@ -64,7 +64,7 @@ Run `python scripts/dev.py --help` for the complete command list; substitute `py
 | `python scripts/dev.py setup --browser` | Prepare verified dependencies and test browser |
 | `python scripts/dev.py check` | Portable checks plus Windows compilation checks |
 | `python scripts/dev.py check --portable` | Core/UI checks without Windows compilation |
-| `python scripts/dev.py build` | Build the Windows release executable |
+| `python scripts/dev.py build` | Build the Windows release executable with embedded licenses and a packaging receipt |
 | `python scripts/dev.py app-test` | Run application unit tests on native Windows |
 | `npm --prefix ui run dev` | Start the isolated fixture UI preview |
 | `python scripts/dev.py version` | Verify versions agree across release metadata |
@@ -81,7 +81,7 @@ Commit Cargo/npm lockfiles and use locked installs. The small `libopus_sys` comp
 
 Rust control types generate `ui/src/generated.ts`; regenerate through the export-bindings command when changing the contract, then run the drift check. Frontend fixture data must remain separate from the production native adapter. Audio samples never pass through frontend IPC.
 
-Release builds remap source paths and avoid distributing personal machine paths. Packaging requires the third-party notices and exact covered source archive; see [RELEASING.md](RELEASING.md). Build outputs, dependency caches, browser artifacts, and local runtime profiles are not source files.
+Release builds remap source paths and avoid distributing personal machine paths. The application build generates full notices and corresponding sources, embeds an offline license catalog, and records a receipt binding the executable to that inventory and the lockfiles. Packaging rejects a stale or missing receipt; see [RELEASING.md](RELEASING.md). Plain frontend previews use a clearly labeled license placeholder. Build outputs, dependency caches, browser artifacts, and local runtime profiles are not source files.
 
 ## Runtime configuration and tests
 

@@ -30,4 +30,57 @@ Quantitative latency, sustained resource usage, broad recovery and multi-hour st
 
 ## Release gate
 
-CI must pass on the tagged source, versions must match, and the Windows archive must contain the checked executable, runtime instructions, full notices and corresponding-source information. Verify archive contents and checksums. Scan public source/history and release binaries for secrets or personal build paths before publication. See [RELEASING.md](RELEASING.md).
+CI must pass on the tagged source and versions must match. The checked Windows executable embeds complete notices and corresponding-source information; the release page provides runtime instructions. Verify the executable's build receipt, the exact corresponding-source archive and `SHA256SUMS`. Scan public source/history and release binaries for secrets or personal build paths before publication. Inspect **the final release executable's** offline Settings → Licenses catalog, including the original notice bytes; application unit tests rebuild frontend preview assets and do not replace this check. See [RELEASING.md](RELEASING.md).
+
+## Reproducible audio evidence
+
+The recording converter's portable fixtures cover 44.1/96 kHz × mono/stereo,
+exact 48 kHz bypass, independent left/right tones, irregular callback sizes,
+anti-alias rejection, non-finite input, reset/mute/discontinuity, bounded
+queues and zero allocations during processing/reset. The real mix-bus tests
+simulate producer jitter, stalls, independent readers and ±100/500 ppm clock
+skew over 60 virtual seconds. These are deterministic model tests, not a
+claim of glitch-free physical audio.
+
+Run the conversion-only throughput fixture explicitly when comparing changes:
+
+```sh
+cargo test --locked --release -p echocord-core benchmark_eight_recording_converters -- --ignored --nocapture
+```
+
+It opens no device, uses no credentials and emits no sound. Record platform,
+build mode and elapsed processing time; do not describe it as total app CPU,
+power consumption or measured listener latency. Windows format-selection unit
+tests use synthetic CPAL descriptors without accessing endpoints.
+
+## Coordinated Windows acceptance sheet
+
+Use a specific executable hash and a new disposable `--data-dir`, with no
+personal settings or token. Before capture/playback/network tests, agree on
+the exact owned sources, endpoints, dedicated bot/server/room and listeners.
+Do not change system default routes or record private speech. Start with a
+synthetic -18 dBFS 440 Hz tone, an independent 880 Hz tone, then an alternating
+left/right pattern. Keep playback levels low; avoid feedback loops.
+
+| Scenario | Required observation |
+| --- | --- |
+| Empty-profile launch | UI/IPC/tray work; no sources capture and all outputs remain idle. Offline license list and documents load from the EXE. |
+| Recording formats | For each available 44.1/48/96 kHz mono/stereo endpoint, note negotiated format, channel order, correct pitch and bounds. Mark unavailable hardware cases untested. |
+| Selected application | Only the selected process tree contributes; restart requires explicit reselection; unrelated synthetic producer is excluded. |
+| Two sources | Independent gain/mute/stop, no stale signal after rapid mute/unmute; overload indication agrees with synthetic mix. |
+| Independent outputs | Stopping/failing one selected playback device or Discord destination preserves peers. |
+| Discord listener | A coordinated separate listener hears the correct signal in the intended room; local meters alone do not pass this case. |
+| Recovery | Cancel during opening/join, unplug/replug, permission revocation, network loss and sleep/resume have bounded, truthful outcomes without a different source/room. |
+| Persistence | Read-only/blocked fixture settings path preserves live controls, shows save warning, and retry saves after access is restored. Old schemas migrate; future file bytes stay intact. |
+| Resource sessions | Record 30 minutes under ordinary/CPU-load conditions; separately run a four-hour soak. Compare RSS, handles, underruns/drops and audible glitches at start/end. |
+| Shutdown | Quit ends owned workers and audio; close-to-tray behaves as configured. |
+
+Record build hash, Windows build, CPU, selected format/type (omit private device
+IDs), source/output counts, duration, verification boundary and pass/fail/
+untested for each row. A click train can support separately measured local or
+listener delay; name the measurement endpoints and report median/p95/p99 only
+when actually measured. Do not expose credentials, server identifiers, user
+paths or private audio in public reports. One PC provides one environment's
+evidence; missing hardware is an explicit gap, not a simulated hardware pass.
+
+The scope and deferred investigations are recorded in [the 0.2 decisions](EPOCH-0.2.md).

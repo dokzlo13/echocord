@@ -28,7 +28,7 @@ Four destinations may be configured in total, including at most three playback d
 
 ## Capture and mixing
 
-Application capture selects an exact process identity and its process tree. A restarted process requires selection again; executable-name matching, PID reuse, default microphones and broad desktop fallback are not acceptable substitutes. Recording endpoints are selected explicitly and currently require 48 kHz mono/stereo support.
+Application capture selects an exact process identity and its process tree. A restarted process requires selection again; executable-name matching, PID reuse, default microphones and broad desktop fallback are not acceptable substitutes. Recording endpoints are selected explicitly and support 44.1/48/96 kHz mono/stereo PCM. The 48 kHz path is direct; other supported rates use a preallocated sinc converter. Native discontinuities and mute generations fence retained conversion history and queued samples.
 
 Source gain and mix-only mute are independent. Source meters observe post-gain audio before source mute, so muted activity remains visible; original application playback is unaffected by the mix-only mute. Sources sum into a bounded native mix with clipping/overload indication. Destination gain/mute applies to each reader independently. There is no implicit monitor, routing matrix, recording-file feature, or normalization/DSP chain.
 
@@ -41,6 +41,8 @@ Ordinary source/output failures are contained. A gateway reset stops its Discord
 ## Persistence and credentials
 
 Preferences store explicit identities, gain/mute and ordinary settings under a versioned schema. Restore setup reopens recording inputs; applications wait for Capture against their exact saved identity. Every output restores idle. Unknown future preference versions are preserved rather than overwritten.
+
+The loader checks the version envelope before schema deserialization, applies ordered migrations, validates the final bounded state and normalizes runtime fields. Loading does not write files. Additive settings have defaults; semantic schema changes require a new migration and historical-fixture coverage. Live mutation succeeds independently of saving: a failed write publishes `preferencesWarning`, while `RetryPreferences` saves the current setup without replaying a control action. Only successful persistence clears that warning.
 
 The bot token is encrypted with Windows current-user DPAPI. It stays backend-owned and is omitted from snapshots and diagnostics. Token validation or saving never joins voice. The UI token field is ephemeral; replacement is restricted while relevant Discord lifetimes remain active.
 

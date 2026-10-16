@@ -28,15 +28,15 @@ Echocord captures audio from selected applications or recording devices, mixes i
 
 ## Download and run
 
-1. Download **`echocord-<version>-windows-x64.zip`** from [Releases](https://github.com/dokzlo13/echocord/releases/latest).
-2. Extract the whole archive to a writable folder and run `echocord.exe`.
+1. Download **`echocord.exe`** from [Releases](https://github.com/dokzlo13/echocord/releases/latest).
+2. Save it to a folder of your choice and run it.
 3. Add a source, then follow [Discord bot setup](#discord-bot-setup) to send audio to a voice room.
 
 **Supported runtime: Windows 11 x64.** Linux and WSL can build the Windows app and run development checks; a Linux or macOS audio application is not currently shipped.
 
 The app needs the [Microsoft Visual C++ v14 Redistributable (x64)](https://aka.ms/vc14/vc_redist.x64.exe) and [Microsoft Edge WebView2 Evergreen Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/). These may already be installed. If startup reports a missing `VCRUNTIME` DLL or WebView2, install the corresponding Microsoft runtime and try again. No Rust, Node, Python, audio driver, or development tools are needed to use the downloaded app.
 
-Early builds are unsigned and may trigger Windows SmartScreen. Download from this repository's Releases page; `SHA256SUMS` is provided with each release. The third-party source archive is for license compliance and source inspection, and is not needed to run the app.
+Early builds are unsigned and may trigger Windows SmartScreen. Download from this repository's Releases page; `SHA256SUMS` is provided with each release. Full licenses are included offline under **Settings → Licenses**. The separate third-party source archive is for license compliance and source inspection, and is not needed to run the app.
 
 <a id="discord-bot-setup"></a>
 
@@ -67,13 +67,15 @@ Discord's [OAuth2 documentation](https://docs.discord.com/developers/topics/oaut
 
 **Sources** are what you capture. Choose **Add source**, then an application or a recording input. Adding a source starts capture immediately. Use **Capture/Stop**, **Mute**, and the dB fader independently on each card. With multiple cards, matching numbered buttons jump to each source or destination.
 
-Application capture includes the selected process and its child processes; a browser can include other tabs or windows. Keep a voice call in a separate application when necessary. Source mute removes that source from Echocord's mix; it does **not** mute the application's original speaker playback. Recording inputs currently need 48 kHz mono or stereo support.
+Application capture includes the selected process and its child processes; a browser can include other tabs or windows. Keep a voice call in a separate application when necessary. Source mute removes that source from Echocord's mix; it does **not** mute the application's original speaker playback. Recording inputs support 44.1, 48 and 96 kHz mono/stereo PCM; Echocord converts supported inputs to its 48 kHz stereo mix automatically.
 
 **Destinations** are where the shared mix goes. A Discord card has **Connect/Cancel/Disconnect**; a playback-device card has **Play/Stop**. Each has its own volume and mute. Adding or restoring a destination leaves it stopped until you start it. Switching a Discord room briefly reconnects that destination.
 
 Avoid sending a playback destination back into a recording input you are capturing: that can create feedback. Playing both an application's original output and the captured mix on the same speakers can produce doubled sound. Echocord does not change Windows' default devices or the original application's audio route.
 
 **Saved setup and closing:** recording inputs can resume capture when Restore setup is enabled; restored applications wait for explicit Capture, and every output stays idle. Closing the window keeps the app running in the tray by default. Use **Quit** in the tray to exit, or turn off **Keep running in tray** in Settings.
+
+Settings from older releases migrate automatically in memory and are saved in the current format after a successful change. Newer-version files are preserved. If saving fails, live controls remain applied and Echocord shows a persistent notice with a save retry; those changes are not promised after restarting.
 
 ## Troubleshooting
 
@@ -115,4 +117,4 @@ Use `python3` instead of `python` on Linux/WSL. The build produces `target/x86_6
 
 Echocord is an **AI-generated and AI-maintained hobby project**. It is early software, provided **as is**, with **no guarantees of any kind**. Reliability, compatibility, security, and long-session performance are not guaranteed. Review changes and test your own setup before relying on it.
 
-Original Echocord code is licensed under [MIT](LICENSE). Dependencies, fonts, icons, and other third-party material retain their own licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md) and the notices/source archives included with each release. Echocord is independent of Discord and is not an official Discord product.
+Original Echocord code is licensed under [MIT](LICENSE). Dependencies, fonts, icons, and other third-party material retain their own licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md), the offline app notices and the source archive included with each release. Echocord is independent of Discord and is not an official Discord product.

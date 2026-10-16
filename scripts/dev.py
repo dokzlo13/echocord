@@ -48,6 +48,7 @@ def run(*args, capture=False, env=None):
 
 def prepare():
     run(sys.executable, ROOT / "scripts/prepare-opus.py")
+    run(sys.executable, ROOT / "scripts/prepare-cpal.py")
 
 
 def version(tag=None):
@@ -513,6 +514,25 @@ def validated_notices(release_version, source_archive):
         for package in inventory["packages"]:
             if not package["notices"]:
                 raise ValueError("dependency has no indexed notices")
+            if patch := package.get("patch"):
+                relative = PurePosixPath(patch["path"])
+                if (
+                    relative.is_absolute()
+                    or ".." in relative.parts
+                    or not relative.parts
+                    or relative.parts[0] != "patches"
+                    or "\\" in patch["path"]
+                    or ":" in patch["path"]
+                ):
+                    raise ValueError("unsafe dependency patch path")
+                path = ROOT / relative
+                if (
+                    not path.is_file()
+                    or path.is_symlink()
+                    or not path.resolve().is_relative_to(ROOT.resolve())
+                    or hashlib.sha256(path.read_bytes()).hexdigest() != patch["sha256"]
+                ):
+                    raise ValueError("dependency patch changed since notice generation")
             entries = package["notices"] + (
                 [package["attribution"]] if "attribution" in package else []
             )

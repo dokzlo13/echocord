@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build release notices and exact MPL sources from checksum-locked packages.
 
-Requires Python 3.11+, the pinned Rust toolchain, and the prepared Opus patch.
+Requires Python 3.11+, the pinned Rust toolchain, and the prepared dependency patches.
 Archives are inspected in memory, never extracted. No credentials are accessed.
 """
 from __future__ import annotations
@@ -202,6 +202,7 @@ def rust_packages(fetcher: Fetcher, notices: Notices, config: dict) -> tuple[lis
         filename = f"{name}-{version}.crate"
         url = f"https://static.crates.io/crates/{name}/{filename}"
         manifest = Path(package["manifest_path"])
+        local_patch = None
         if package["source"] == "registry+https://github.com/rust-lang/crates.io-index":
             digest = checksums[(name, version)]
             # Cargo registry/src/<registry>/<package>/Cargo.toml -> registry/cache/<registry>/<archive>.
@@ -210,6 +211,11 @@ def rust_packages(fetcher: Fetcher, notices: Notices, config: dict) -> tuple[lis
         elif name == "libopus_sys" and version == "0.3.3" and package["source"] is None:
             digest = "b81c32f233fb2507347a93f97b9919493be9db7ec2249ce2c3ed0c89ad8edf60"
             candidates = (ROOT / ".cache" / filename,)
+            local_patch = "patches/libopus_sys-0.3.3-cross.patch"
+        elif name == "cpal" and version == "0.18.2" and package["source"] is None:
+            digest = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
+            candidates = (ROOT / ".cache" / filename,)
+            local_patch = "patches/cpal-0.18.2-silent.patch"
         else:
             raise ValueError(f"Unreviewed non-registry dependency: {key}")
         data = fetcher.get(url, digest, candidates=candidates)
@@ -226,8 +232,10 @@ def rust_packages(fetcher: Fetcher, notices: Notices, config: dict) -> tuple[lis
                 "source_url": url, "source_sha256": digest, "notices": entries, "attribution": attribution}
         if reason:
             item["supplement_reason"] = reason
-        if name == "libopus_sys":
-            item["patch"] = {"path": "patches/libopus_sys-0.3.3-cross.patch", "sha256": sha256((ROOT / "patches/libopus_sys-0.3.3-cross.patch").read_bytes())}
+        if local_patch:
+            if manifest.parent.resolve() != (ROOT / ".cache" / f"{name}-{version}").resolve():
+                raise ValueError(f"Patched dependency is outside its verified cache: {key}")
+            item["patch"] = {"path": local_patch, "sha256": sha256((ROOT / local_patch).read_bytes())}
         if "MPL-2.0" in license_expression:
             mpl_sources["crates/" + filename] = data
         result.append(item)

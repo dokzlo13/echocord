@@ -12,3 +12,4 @@ repository = "https://github.com/dokzlo13/echocord"
 
 [patch.crates-io]
 libopus_sys = { path = ".cache/libopus_sys-0.3.3" }
+cpal = { path = ".cache/cpal-0.18.2" }

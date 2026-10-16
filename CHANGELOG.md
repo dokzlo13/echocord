@@ -19,6 +19,8 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 - Prevent restored card identifiers near the numeric limit from overflowing or colliding with configured/retiring cards.
 - Preserve files from newer settings schemas before attempting current-schema loading; default missing additive settings without resetting existing choices.
 - Preserve stereo alignment and discard stale filter history across mute/discontinuity changes.
+- Treat Windows recording packets marked silent as silence, ignoring their payload, through a narrowly patched and verified audio dependency.
+- Reject oversized serialized preferences before replacing the previous valid file; live changes remain applied and visibly unsaved.
 
 ### Distribution
 

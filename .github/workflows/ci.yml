@@ -35,6 +35,7 @@ jobs:
         run: |
           rustup show active-toolchain
           python scripts/prepare-opus.py
+          python scripts/prepare-cpal.py
           npm --prefix ui ci --no-audit --no-fund
           npm --prefix ui exec -- playwright install --with-deps chromium
       - name: Check core and UI

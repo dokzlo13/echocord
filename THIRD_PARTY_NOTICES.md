@@ -10,16 +10,17 @@ The generated index and JSON inventory retain the original generator paths as pr
 
 The MPL-2.0 portions remain under the Mozilla Public License 2.0. Their exact, unchanged published source packages are provided as **echocord-<version>-third-party-sources.zip**, beside the Windows download on the [same GitHub release](https://github.com/dokzlo13/echocord/releases). That archive contains a manifest, checksum-verified `.crate` source archives and the MPL license. `.crate` files are ordinary gzip-compressed tar archives. Each package's original source notices remain intact. The generated inventory also links to each exact source archive on crates.io. No MPL-covered source is modified by Echocord.
 
-The small MIT/BSD Opus build patch is published in `patches/` in the matching Echocord source tag. Opus retains its BSD license and upstream patent-license references. The Rust WebView2 bindings are MIT; the statically linked Microsoft WebView2 SDK loader has its own BSD license and accompanying notices. The separately installed Microsoft WebView2 Runtime and Visual C++ Redistributable are not included in Echocord's executable and retain Microsoft's terms.
+The small MIT/BSD Opus build patch and Apache-2.0 CPAL silent-capture correction are published in `patches/` in the matching Echocord source tag. The inventory records their exact patch hashes alongside the original upstream archive hashes. Opus retains its BSD license and upstream patent-license references. The Rust WebView2 bindings are MIT; the statically linked Microsoft WebView2 SDK loader has its own BSD license and accompanying notices. The separately installed Microsoft WebView2 Runtime and Visual C++ Redistributable are not included in Echocord's executable and retain Microsoft's terms.
 
 Sofia Sans and Sofia Sans Condensed retain the SIL Open Font License 1.1. Lucide's complete notice also includes the MIT attribution for icons derived from Feather. Imported development skills retain their adjacent upstream licenses and notices; additional bundled-tool attribution is in `.agents/NOTICES/`. These development skills are not embedded in the application.
 
 ## Reproducing the release materials
 
-After preparing the locked dependency patch, run:
+After preparing the locked dependency patches, run:
 
 ```sh
 python scripts/prepare-opus.py
+python scripts/prepare-cpal.py
 python scripts/package-third-party.py
 ```
 

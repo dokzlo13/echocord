@@ -26,6 +26,15 @@ recording-format support and the changed download format.
 
 ## Recording conversion
 
+The next advisory pass reproduced an upstream CPAL silence-handling defect
+before publication: Windows packets carrying `AUDCLNT_BUFFERFLAGS_SILENT`
+still forwarded their payload. This was promoted into the 0.2 release gate.
+A narrow checksum-verified dependency patch substitutes correctly represented
+silence without reading the flagged payload. Synthetic packet-provider tests
+exercise the actual patched function; no physical-device trigger frequency is
+claimed. See [the acknowledged upstream issue](https://github.com/RustAudio/cpal/issues/1376)
+and [Microsoft's packet-flag contract](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/ne-audioclient-_audclnt_bufferflags).
+
 The engine and output bus stay at 48 kHz stereo. Negotiate only explicitly
 selected recording endpoints and known PCM sample formats. Prefer 48 kHz,
 then 44.1 kHz, then 96 kHz; accept mono/stereo only. Unsupported endpoints
@@ -80,6 +89,10 @@ New semantic changes must increment the schema constant, add one transition,
 and test all historical fixtures, idempotence, invalid limits/identities,
 forward-version preservation and failed writes. Restored applications await
 explicit capture and all outputs restore idle.
+
+The serialized byte count is also checked before writing: valid individual
+field lengths can exceed the file budget after JSON escaping. Such a live
+setup remains visibly unsaved while the previous valid file is preserved.
 
 ## Download design
 

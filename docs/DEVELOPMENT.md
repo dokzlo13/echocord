@@ -73,11 +73,11 @@ Run `python scripts/dev.py --help` for the complete command list; substitute `py
 
 Do not run frontend builds and app builds concurrently in the same checkout: both update `ui/dist`. Parallel workers should use isolated checkouts/targets and distinct preview ports. The Makefile and shell wrappers are conveniences around the same build entry point.
 
-On Linux/WSL, for UI/core work without a Windows cross-build toolchain, install Rustup, Node, Python and a native C linker, run `python scripts/prepare-opus.py`, `npm --prefix ui ci`, and `python scripts/dev.py browser-install`, then `check --portable`. Native Windows core tests still require MSVC even with `--portable`. On Linux, Playwright may also need distribution browser libraries; use its documented `install --with-deps chromium` setup on a suitable development machine.
+On Linux/WSL, for UI/core work without a Windows cross-build toolchain, install Rustup, Node, Python and a native C linker, run `python scripts/prepare-opus.py`, `python scripts/prepare-cpal.py`, `npm --prefix ui ci`, and `python scripts/dev.py browser-install`, then `check --portable`. Native Windows core tests still require MSVC even with `--portable`. On Linux, Playwright may also need distribution browser libraries; use its documented `install --with-deps chromium` setup on a suitable development machine.
 
 ## Dependencies and generated files
 
-Commit Cargo/npm lockfiles and use locked installs. The small `libopus_sys` compatibility patch is materialized and checksum-verified by `scripts/prepare-opus.py`; do not edit a global Cargo registry cache. The patcher is Python-only, so Unix `patch` is not a Windows prerequisite. [Patch notes](../patches/README.md) explain the upstream changes and removal condition.
+Commit Cargo/npm lockfiles and use locked installs. `scripts/prepare-opus.py` verifies/materializes the `libopus_sys` cross-build patch; `scripts/prepare-cpal.py` does the same for the Windows silent-capture correction. Bootstrap/check/build prepares both. Never edit a global Cargo registry cache. Patching is Python-only, so Unix `patch` is not a Windows prerequisite. [Patch notes](../patches/README.md) explain scope and removal conditions.
 
 Rust control types generate `ui/src/generated.ts`; regenerate through the export-bindings command when changing the contract, then run the drift check. Frontend fixture data must remain separate from the production native adapter. Audio samples never pass through frontend IPC.
 

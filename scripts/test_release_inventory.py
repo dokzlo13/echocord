@@ -123,6 +123,28 @@ class ReleaseInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "unsafe notice path"):
             self.verify()
 
+    def test_changed_dependency_patch_is_rejected(self):
+        patches = self.root / "patches"
+        patches.mkdir()
+        patch = patches / "fixture.patch"
+        patch.write_bytes(b"reviewed dependency patch")
+        self.inventory["packages"][0]["patch"] = {
+            "path": "patches/fixture.patch", "sha256": self.digest(patch)
+        }
+        self.save_inventory()
+        self.verify()
+        patch.write_bytes(b"changed dependency patch")
+        with self.assertRaisesRegex(SystemExit, "dependency patch changed"):
+            self.verify()
+
+    def test_dependency_patch_traversal_is_rejected(self):
+        self.inventory["packages"][0]["patch"] = {
+            "path": "patches/../../outside.patch", "sha256": "unused"
+        }
+        self.save_inventory()
+        with self.assertRaisesRegex(SystemExit, "unsafe dependency patch"):
+            self.verify()
+
 
 if __name__ == "__main__":
     unittest.main()

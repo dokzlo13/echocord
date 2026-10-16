@@ -3,6 +3,8 @@
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 pub const CAPACITY: usize = 1920;
+const MAX_AGE_MS: u64 = 40;
+const VERSION: u64 = 2;
 const MAGIC: u64 = 0x4543484f4d495831;
 #[repr(C, align(8))]
 struct Slot {
@@ -16,6 +18,7 @@ pub struct Bus {
     capacity: AtomicU64,
     cursor: AtomicU64,
     heartbeat_ms: AtomicU64,
+    continuity_floor: AtomicU64,
     slots: [Slot; CAPACITY],
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,6 +37,7 @@ impl Bus {
             capacity: AtomicU64::new(0),
             cursor: AtomicU64::new(0),
             heartbeat_ms: AtomicU64::new(0),
+            continuity_floor: AtomicU64::new(0),
             slots: std::array::from_fn(|_| Slot {
                 sequence: AtomicU64::new(0),
                 stereo: AtomicU64::new(0),
@@ -44,13 +48,15 @@ impl Bus {
     }
     pub fn initialize(&self) {
         self.cursor.store(0, SeqCst);
-        self.version.store(1, SeqCst);
+        self.heartbeat_ms.store(0, SeqCst);
+        self.continuity_floor.store(0, SeqCst);
+        self.version.store(VERSION, SeqCst);
         self.capacity.store(CAPACITY as u64, SeqCst);
         self.magic.store(MAGIC, SeqCst);
     }
     pub fn valid(&self) -> bool {
         self.magic.load(SeqCst) == MAGIC
-            && self.version.load(SeqCst) == 1
+            && self.version.load(SeqCst) == VERSION
             && self.capacity.load(SeqCst) == CAPACITY as u64
     }
     pub fn cursor(&self) -> u64 {
@@ -58,6 +64,12 @@ impl Bus {
     }
     pub fn write(&self, frames: &[[f32; 2]], now_ms: u64) {
         let mut cursor = self.cursor();
+        if now_ms.saturating_sub(self.heartbeat_ms.load(SeqCst)) > MAX_AGE_MS {
+            // Publish this fence before renewing the heartbeat. A reader that
+            // observes the renewed producer must exclude every older frame,
+            // including when both processes were suspended through the gap.
+            self.continuity_floor.store(cursor, SeqCst);
+        }
         for frame in frames {
             let slot = &self.slots[cursor as usize % CAPACITY];
             slot.sequence
@@ -82,19 +94,39 @@ impl Bus {
         frames: &mut [[f32; 2]],
         now_ms: u64,
     ) -> ReadStats {
+        self.read_observed(cursor, frames, now_ms, |_| {})
+    }
+
+    fn read_observed(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        now_ms: u64,
+        mut observe: impl FnMut(ReadBoundary),
+    ) -> ReadStats {
         frames.fill([0.0; 2]);
+        let original_cursor = *cursor;
         let latest = self.cursor();
+        observe(ReadBoundary::Cursor);
+        let heartbeat = self.heartbeat_ms.load(SeqCst);
+        observe(ReadBoundary::Heartbeat);
         let mut stats = ReadStats::default();
-        if !self.valid() || now_ms.saturating_sub(self.heartbeat_ms.load(SeqCst)) > 40 {
+        if !self.valid() || now_ms.saturating_sub(heartbeat) > MAX_AGE_MS {
             stats.dropped_frames = latest.saturating_sub(*cursor).min(u32::MAX as u64) as u32;
             stats.underrun_frames = frames.len().min(u32::MAX as usize) as u32;
             *cursor = latest;
             return stats;
         }
-        let oldest = latest.saturating_sub(CAPACITY as u64);
+        // SeqCst: renewed heartbeat -> preceding floor store -> this load.
+        // A newer floor than our cursor snapshot conservatively yields silence.
+        let floor = self.continuity_floor.load(SeqCst);
+        observe(ReadBoundary::Floor);
+        let oldest = latest
+            .saturating_sub(CAPACITY as u64)
+            .max(floor.min(latest));
         stats.dropped_frames = oldest.saturating_sub(*cursor).min(u32::MAX as u64) as u32;
         *cursor = (*cursor).max(oldest);
-        for frame in frames {
+        for frame in frames.iter_mut() {
             if *cursor >= latest {
                 stats.underrun_frames = stats.underrun_frames.saturating_add(1);
                 continue;
@@ -115,9 +147,38 @@ impl Bus {
             }
             *cursor += 1;
         }
+        observe(ReadBoundary::Copied);
+        let final_floor = self.continuity_floor.load(SeqCst);
+        if final_floor != floor {
+            // A reader can itself be suspended while copying. Do not return a
+            // block assembled across a producer discontinuity. No retries or
+            // synthetic cursor gaps: discard only the actual unread prefix.
+            frames.fill([0.0; 2]);
+            *cursor = (*cursor).max(final_floor);
+            return ReadStats {
+                dropped_frames: final_floor
+                    .saturating_sub(original_cursor)
+                    .min(u32::MAX as u64) as u32,
+                underrun_frames: frames.len().min(u32::MAX as usize) as u32,
+                queued_frames: self.cursor().saturating_sub(*cursor).min(CAPACITY as u64) as u32,
+            };
+        }
         stats.queued_frames = latest.saturating_sub(*cursor).min(CAPACITY as u64) as u32;
         stats
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadBoundary {
+    Cursor,
+    Heartbeat,
+    Floor,
+    Copied,
+}
+
+#[cfg(any(windows, test))]
+fn counter_millis(counter: u64, frequency: u64) -> u64 {
+    (u128::from(counter) * 1000 / u128::from(frequency)).min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(windows)]
@@ -136,7 +197,7 @@ mod native {
                 CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
                 PAGE_READWRITE, UnmapViewOfFile,
             },
-            SystemInformation::GetTickCount64,
+            Performance::{QueryPerformanceCounter, QueryPerformanceFrequency},
             Threading::GetCurrentProcess,
         },
     };
@@ -185,6 +246,8 @@ mod native {
     unsafe impl Send for Mapping {}
     impl Mapping {
         pub fn inherited(raw: usize) -> io::Result<Self> {
+            // Warm the immutable clock frequency before any audio callback.
+            let _ = clock_frequency();
             let handle = unsafe { OwnedHandle::from_raw_handle(raw as _) };
             let view = unsafe {
                 MapViewOfFile(
@@ -214,8 +277,25 @@ mod native {
             }
         }
     }
+    fn clock_frequency() -> u64 {
+        static FREQUENCY: AtomicU64 = AtomicU64::new(0);
+        let cached = FREQUENCY.load(SeqCst);
+        if cached != 0 {
+            return cached;
+        }
+        let mut frequency = 0;
+        // Windows 11 guarantees QPC support and a fixed boot-wide frequency.
+        assert!(unsafe { QueryPerformanceFrequency(&mut frequency) } != 0 && frequency > 0);
+        FREQUENCY.store(frequency as u64, SeqCst);
+        frequency as u64
+    }
     pub fn now_ms() -> u64 {
-        unsafe { GetTickCount64() }
+        let frequency = clock_frequency();
+        let mut counter = 0;
+        assert!(unsafe { QueryPerformanceCounter(&mut counter) } != 0 && counter >= 0);
+        // QPC has a common origin across processes. GetTickCount64's 10–16 ms
+        // quantization is unsuitable for the bus's 40 ms freshness boundary.
+        counter_millis(counter as u64, frequency)
     }
     pub fn capture(id: &str) -> Result<crate::audio::CaptureSession, crate::model::AppError> {
         let failure = || {
@@ -251,19 +331,7 @@ pub use native::*;
 mod tests {
     use super::*;
     fn bus() -> Box<Bus> {
-        let bus = Box::new(Bus {
-            magic: AtomicU64::new(0),
-            version: AtomicU64::new(0),
-            capacity: AtomicU64::new(0),
-            cursor: AtomicU64::new(0),
-            heartbeat_ms: AtomicU64::new(0),
-            slots: std::array::from_fn(|_| Slot {
-                sequence: AtomicU64::new(0),
-                stereo: AtomicU64::new(0),
-            }),
-        });
-        bus.initialize();
-        bus
+        Bus::test_bus()
     }
     #[test]
     fn wrap_overwrite_stereo_and_stale_worker_are_bounded() {
@@ -289,6 +357,109 @@ mod tests {
         bus.write(&[[0.1, -0.2]; 240], 3);
         bus.read(&mut cursor, &mut frames, 3);
         assert_eq!(frames, [[0.1, -0.2]; 240]);
+    }
+
+    #[test]
+    fn simultaneous_reader_and_writer_pause_discards_old_audio_once() {
+        let bus = bus();
+        bus.write(&[[0.75, -0.25]; 960], 0);
+        bus.write(&[[0.125, -0.5]; 240], 1000);
+        let mut cursor = 0;
+        let mut frames = [[9.0; 2]; 480];
+        let stats = bus.read_counted(&mut cursor, &mut frames, 1001);
+        assert_eq!(frames[..240], [[0.125, -0.5]; 240]);
+        assert_eq!(frames[240..], [[0.0; 2]; 240]);
+        assert_eq!(
+            stats,
+            ReadStats {
+                dropped_frames: 960,
+                underrun_frames: 240,
+                queued_frames: 0
+            }
+        );
+        assert_eq!(cursor, 1200);
+        assert_eq!(
+            bus.read_counted(&mut cursor, &mut frames, 1002)
+                .dropped_frames,
+            0
+        );
+        bus.write(&[[0.25, -0.125]; 240], 2000);
+        let stats = bus.read_counted(&mut cursor, &mut frames[..240], 2000);
+        assert_eq!(frames[..240], [[0.25, -0.125]; 240]);
+        assert_eq!(stats.dropped_frames, 0);
+    }
+
+    #[test]
+    fn continuity_gap_boundary_preserves_forty_ms_and_fences_forty_one() {
+        for gap in [40, 41] {
+            let bus = bus();
+            bus.write(&[[0.75, -0.25]; 240], 100);
+            bus.write(&[[0.125, -0.5]; 240], 100 + gap);
+            let mut cursor = 0;
+            let mut frames = [[0.0; 2]; 240];
+            let stats = bus.read_counted(&mut cursor, &mut frames, 100 + gap);
+            if gap == 40 {
+                assert_eq!(frames, [[0.75, -0.25]; 240]);
+                assert_eq!(stats.dropped_frames, 0);
+            } else {
+                assert_eq!(frames, [[0.125, -0.5]; 240]);
+                assert_eq!(stats.dropped_frames, 240);
+            }
+        }
+    }
+
+    #[test]
+    fn each_reader_discards_only_its_own_unread_pre_pause_prefix() {
+        let bus = bus();
+        bus.write(&[[0.75, -0.25]; CAPACITY * 2], 0);
+        bus.write(&[[0.125, -0.5]; 240], 1000);
+        for mut cursor in [0, 240, 1920, 3840] {
+            let expected_drop = 3840 - cursor;
+            let mut frames = [[0.0; 2]; 240];
+            let stats = bus.read_counted(&mut cursor, &mut frames, 1000);
+            assert_eq!(frames, [[0.125, -0.5]; 240]);
+            assert_eq!(u64::from(stats.dropped_frames), expected_drop);
+            assert_eq!(cursor, 4080);
+        }
+    }
+
+    #[test]
+    fn a_resume_at_each_read_boundary_yields_silence_then_fresh_audio() {
+        for boundary in [
+            ReadBoundary::Cursor,
+            ReadBoundary::Heartbeat,
+            ReadBoundary::Floor,
+            ReadBoundary::Copied,
+        ] {
+            let bus = bus();
+            bus.write(&[[0.75, -0.25]; 960], 0);
+            let mut cursor = 0;
+            let mut frames = [[9.0; 2]; 240];
+            let stats = bus.read_observed(&mut cursor, &mut frames, 1, |point| {
+                if point == boundary {
+                    bus.write(&[[0.125, -0.5]; 240], 1000);
+                }
+            });
+            assert_eq!(frames, [[0.0; 2]; 240]);
+            assert_eq!(stats.dropped_frames, 960);
+            assert_eq!(cursor, 960);
+            let stats = bus.read_counted(&mut cursor, &mut frames, 1001);
+            assert_eq!(frames, [[0.125, -0.5]; 240]);
+            assert_eq!(stats.dropped_frames, 0);
+        }
+    }
+
+    #[test]
+    fn previous_bus_layout_is_rejected_and_counter_conversion_is_precise() {
+        let bus = bus();
+        bus.version.store(1, SeqCst);
+        assert!(!bus.valid());
+        assert_eq!(counter_millis(9_999, 10_000_000), 0);
+        assert_eq!(counter_millis(10_000, 10_000_000), 1);
+        assert_eq!(counter_millis(409_999, 10_000_000), 40);
+        assert_eq!(counter_millis(410_000, 10_000_000), 41);
+        assert_eq!(counter_millis(3_579_545, 3_579_545), 1000);
+        assert_eq!(counter_millis(u64::MAX, 1), u64::MAX);
     }
 
     #[derive(Debug, Default, PartialEq, Eq)]

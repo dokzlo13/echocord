@@ -148,12 +148,40 @@ impl Bus {
         frames: &mut [[f32; 2]],
         now_ms: u64,
     ) -> CorrectionRead {
-        self.read_correction_clocked(cursor, frames, now_ms, completion_clock(now_ms), |_| {})
+        self.read_correction_clocked(
+            cursor,
+            frames,
+            None,
+            now_ms,
+            completion_clock(now_ms),
+            |_| {},
+        )
+    }
+    pub(crate) fn read_correction_with_origins(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        origins_ns: &mut [u64],
+        now_ms: u64,
+    ) -> CorrectionRead {
+        if origins_ns.len() != frames.len() {
+            frames.fill([0.0; 2]);
+            return CorrectionRead::default();
+        }
+        self.read_correction_clocked(
+            cursor,
+            frames,
+            Some(origins_ns),
+            now_ms,
+            completion_clock(now_ms),
+            |_| {},
+        )
     }
     fn read_correction_clocked(
         &self,
         cursor: &mut u64,
         frames: &mut [[f32; 2]],
+        mut origins_ns: Option<&mut [u64]>,
         now_ms: u64,
         completed: impl FnOnce() -> u64,
         mut observe: impl FnMut(ReadBoundary),
@@ -184,7 +212,7 @@ impl Bus {
         }
         let mut valid = true;
         let mut oldest_ms = u64::MAX;
-        for frame in frames.iter_mut() {
+        for (index, frame) in frames.iter_mut().enumerate() {
             let slot = &self.slots[*cursor as usize % CAPACITY];
             let expected = cursor.wrapping_mul(2).wrapping_add(2);
             let first = slot.sequence.load(SeqCst);
@@ -204,6 +232,9 @@ impl Bus {
             } else {
                 *frame = [left, right];
                 oldest_ms = oldest_ms.min(exposure);
+                if let Some(origins) = origins_ns.as_deref_mut() {
+                    origins[index] = exposure.saturating_mul(1_000_000);
+                }
             }
             *cursor += 1;
         }
@@ -619,6 +650,7 @@ mod tests {
             let result = bus.read_correction_clocked(
                 &mut cursor,
                 &mut output,
+                None,
                 1,
                 || 1000,
                 |boundary| {

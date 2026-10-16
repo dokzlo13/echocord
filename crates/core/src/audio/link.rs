@@ -199,6 +199,47 @@ pub(crate) enum Plan {
     Unsupported,
 }
 
+/// Uniform origins are valid only when every input frame genuinely shares
+/// that exposure (for example one timestamped capture-converter block). Bus
+/// reads normally span several writes and must supply their per-frame slice.
+#[derive(Clone, Copy)]
+pub(crate) enum InputOrigins<'a> {
+    Uniform(Option<u64>),
+    Frames(&'a [u64]),
+}
+impl From<Option<u64>> for InputOrigins<'_> {
+    fn from(origin: Option<u64>) -> Self {
+        Self::Uniform(origin)
+    }
+}
+impl<'a> From<&'a [u64]> for InputOrigins<'a> {
+    fn from(origins: &'a [u64]) -> Self {
+        Self::Frames(origins)
+    }
+}
+impl InputOrigins<'_> {
+    fn valid(self, frames: usize, now: u64) -> bool {
+        match self {
+            Self::Uniform(origin) => origin.map_or(frames == 0, |value| value <= now),
+            Self::Frames(origins) => {
+                origins.len() == frames && origins.iter().all(|origin| *origin <= now)
+            }
+        }
+    }
+    fn oldest(self) -> Option<u64> {
+        match self {
+            Self::Uniform(value) => value,
+            Self::Frames(values) => values.iter().copied().min(),
+        }
+    }
+    fn at(self, index: usize) -> Option<u64> {
+        match self {
+            Self::Uniform(value) => value,
+            Self::Frames(values) => values.get(index).copied(),
+        }
+    }
+}
+
 const HISTORY_FRAMES: usize = 260; // conservative two complete 128-tap windows + phase neighbours
 
 #[derive(Clone)]
@@ -218,15 +259,17 @@ impl HistoryLease {
     fn oldest(&self) -> Option<u64> {
         self.origins.iter().flatten().copied().min()
     }
-    fn append(&mut self, frames: usize, origin: Option<u64>) {
+    fn append(&mut self, frames: usize, origins: InputOrigins<'_>) {
         if frames >= HISTORY_FRAMES {
-            self.origins.fill(origin);
+            for (index, stored) in self.origins.iter_mut().enumerate() {
+                *stored = origins.at(frames - HISTORY_FRAMES + index);
+            }
             self.next = 0;
-            return;
-        }
-        for _ in 0..frames {
-            self.origins[self.next] = origin;
-            self.next = (self.next + 1) % HISTORY_FRAMES;
+        } else {
+            for index in 0..frames {
+                self.origins[self.next] = origins.at(index);
+                self.next = (self.next + 1) % HISTORY_FRAMES;
+            }
         }
     }
 }
@@ -411,14 +454,24 @@ impl Link {
     /// The lease includes retained sinc input, not merely the newly copied
     /// block. Completion is sampled again so a suspended DSP call cannot renew
     /// old content. The caller still checks its source generation at handoff.
-    pub(crate) fn process_timed(
+    pub(crate) fn process_timed<'a>(
         &mut self,
         frames: &[[f32; 2]],
-        input_origin: Option<u64>,
+        input_origins: impl Into<InputOrigins<'a>>,
         started_ns: u64,
         completed_ns: impl FnOnce() -> u64,
     ) -> Result<Processed<'_>, &'static str> {
-        let oldest = self.history.oldest().into_iter().chain(input_origin).min();
+        let origins = input_origins.into();
+        if !origins.valid(frames.len(), started_ns) {
+            self.reset(true);
+            return Err("Clock correction input has no valid lease");
+        }
+        let oldest = self
+            .history
+            .oldest()
+            .into_iter()
+            .chain(origins.oldest())
+            .min();
         let Some(oldest) = oldest else {
             return Err("Clock correction has no input lease");
         };
@@ -435,7 +488,7 @@ impl Link {
             self.reset(true);
             return Err("Clock correction processing expired");
         }
-        self.history.append(frames.len(), input_origin);
+        self.history.append(frames.len(), origins);
         let produced = self.resampler.output_frames_next();
         Ok(Processed {
             frames: &self.interleaved[..produced],
@@ -522,6 +575,89 @@ mod tests {
             )
             .unwrap();
         assert!(output.frames.iter().all(|frame| *frame == [0.0; 2]));
+    }
+
+    #[test]
+    fn every_new_input_origin_is_required_and_cannot_hide_behind_older_history() {
+        for invalid in [None, Some(11)] {
+            let mut link = Link::new(Direction::Capture, 240).unwrap();
+            let Plan::Pull { input_frames } = link.plan(1920, 240, 480, None, 0) else {
+                panic!()
+            };
+            link.process_timed(&vec![[0.25; 2]; input_frames], Some(0), 0, || 0)
+                .unwrap();
+            let Plan::Pull { input_frames } = link.plan(link.target(), 240, 480, None, 10) else {
+                panic!()
+            };
+            assert!(
+                link.process_timed(&vec![[0.0; 2]; input_frames], invalid, 10, || 10)
+                    .is_err()
+            );
+            assert!(!link.primed());
+            assert_eq!(link.applied_ppm(), None);
+        }
+        let mut link = Link::new(Direction::Capture, 240).unwrap();
+        let Plan::Pull { input_frames } = link.plan(1920, 240, 480, None, 10) else {
+            panic!()
+        };
+        let mut origins = vec![0; input_frames];
+        origins[input_frames - 1] = 11;
+        assert!(
+            link.process_timed(&vec![[0.0; 2]; input_frames], origins.as_slice(), 10, || 10)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn thirty_ms_real_bus_callbacks_preserve_exact_tail_leases_without_false_expiration() {
+        let bus = crate::mix_bus::Bus::test_bus();
+        let mut link = Link::new(Direction::Playback, CAPACITY).unwrap();
+        let mut cursor = bus.cursor();
+        let mut input = vec![[0.0; 2]; CAPACITY];
+        let mut origins = vec![0u64; CAPACITY];
+        let mut calls = 0;
+        let allocations = allocations_during(|| {
+            for tick in 1..=1200 {
+                let ms = tick * 5;
+                bus.write(&[[0.125, -0.25]; 240], ms);
+                if !tick.is_multiple_of(6) {
+                    continue;
+                }
+                let window = bus.correction_window(cursor, ms);
+                match link.plan(window.available, 1440, 240, Some(1.0), ms * 1_000_000) {
+                    Plan::Prime => assert!(tick <= 12),
+                    Plan::Pull { input_frames } => {
+                        let read = bus.read_correction_with_origins(
+                            &mut cursor,
+                            &mut input[..input_frames],
+                            &mut origins[..input_frames],
+                            ms,
+                        );
+                        assert_eq!(read.valid_frames, input_frames);
+                        assert_eq!(read.dropped_frames, 0);
+                        let output = link
+                            .process_timed(
+                                &input[..input_frames],
+                                &origins[..input_frames],
+                                ms * 1_000_000,
+                                || ms * 1_000_000,
+                            )
+                            .unwrap();
+                        assert_eq!(output.frames.len(), 1440);
+                        assert!(ms * 1_000_000 - output.oldest_ns <= FRESH_NS);
+                        assert!(bus.correction_lease_valid(
+                            read.continuity,
+                            output.oldest_ns / 1_000_000,
+                            ms
+                        ));
+                        calls += 1;
+                    }
+                    plan => panic!("Unexpected plan: {plan:?}"),
+                }
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(calls >= 199);
     }
 
     #[test]

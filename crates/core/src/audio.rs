@@ -10,7 +10,7 @@ use crate::model::{AppError, Capture, CapturePhase, RecordingSource};
 #[path = "application.rs"]
 pub mod application;
 #[cfg(any(windows, test))]
-mod recording_format;
+pub(crate) mod recording_format;
 use rtrb::Consumer;
 #[cfg(any(windows, test))]
 use rtrb::{Producer, RingBuffer};

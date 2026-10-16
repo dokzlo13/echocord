@@ -1,5 +1,5 @@
 //! Persistent tokenless capture worker and common 48 kHz stereo mix.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use crate::model::*;
 
 pub fn linear(db: Option<f32>) -> f32 {
@@ -35,6 +35,51 @@ pub fn clamp_mix(mix: &mut [[f32; 2]]) {
         for sample in frame {
             *sample = sample.clamp(-1.0, 1.0);
         }
+    }
+}
+
+/// Retain identifiers and meter hold state between 5 ms blocks. Owned telemetry
+/// is cloned only for the 100 ms publication boundary.
+#[cfg(any(windows, test))]
+struct SourceMeters {
+    latest: InputTelemetry,
+    held: Option<(f32, bool)>,
+}
+#[cfg(any(windows, test))]
+impl SourceMeters {
+    fn new(strip_id: String) -> Self {
+        Self {
+            latest: InputTelemetry {
+                strip_id,
+                level_dbfs: None,
+                pre_clip: false,
+                dropped_frames: 0,
+                underrun_frames: 0,
+                queued_frames: 0,
+            },
+            held: None,
+        }
+    }
+    fn observe(&mut self, level: f32, pre_clip: bool, dropped: u32, underrun: u32, queued: u32) {
+        let held = self.held.get_or_insert((-96.0, false));
+        held.0 = held.0.max(level);
+        held.1 |= pre_clip;
+        self.latest.level_dbfs = Some(held.0);
+        self.latest.pre_clip = held.1;
+        self.latest.dropped_frames = dropped;
+        self.latest.underrun_frames = underrun;
+        self.latest.queued_frames = queued;
+    }
+    fn reset_window(&mut self) {
+        self.held = None;
+    }
+    fn unavailable(&mut self) {
+        self.held = None;
+        self.latest.level_dbfs = None;
+        self.latest.pre_clip = false;
+        self.latest.dropped_frames = 0;
+        self.latest.underrun_frames = 0;
+        self.latest.queued_frames = 0;
     }
 }
 
@@ -310,6 +355,7 @@ mod native {
         cancel: Arc<AtomicBool>,
         source: String,
         deadline: Option<Instant>,
+        meters: SourceMeters,
     }
     enum Completed {
         Open(String, Result<CaptureSession, AppError>),
@@ -322,6 +368,185 @@ mod native {
             let _ = done.send(Completed::Stopped(id, stopped));
         });
     }
+    fn open_pending_sources(
+        slots: &mut BTreeMap<String, Slot>,
+        done: &mpsc::SyncSender<Completed>,
+    ) {
+        if !slots.values().any(|slot| {
+            !slot.operation
+                && slot.session.is_none()
+                && slot.desired.as_ref().is_some_and(|input| {
+                    matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                })
+        }) {
+            return;
+        }
+        let mut occupied: Vec<_> = slots
+            .iter()
+            .filter(|(_, slot)| slot.operation || slot.session.is_some())
+            .map(|(id, slot)| (id.clone(), slot.source.clone()))
+            .collect();
+        for (id, slot) in slots.iter_mut() {
+            if slot.operation
+                || slot.session.is_some()
+                || !slot
+                    .desired
+                    .as_ref()
+                    .is_some_and(|i| matches!(i.phase, InputPhase::Opening | InputPhase::Capturing))
+            {
+                continue;
+            }
+            let blocked = slot.desired.as_ref().is_some_and(|input| {
+                occupied.iter().any(|(other, source)| {
+                    other != id
+                        && (source == &input.source_id
+                            || (audio::application::is_application_id(source)
+                                && audio::application::is_application_id(&input.source_id)
+                                && audio::application::roots_overlap(source, &input.source_id)
+                                    .unwrap_or(true)))
+                })
+            });
+            if blocked {
+                continue;
+            }
+            if !slot.operation
+                && slot.session.is_none()
+                && let Some(input) = &mut slot.desired
+                && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+            {
+                slot.source = input.source_id.clone();
+                slot.cancel = Arc::new(AtomicBool::new(false));
+                slot.operation = true;
+                slot.deadline = Some(Instant::now() + Duration::from_secs(5));
+                input.phase = InputPhase::Opening;
+                occupied.push((id.clone(), slot.source.clone()));
+                let source = slot.source.clone();
+                let id = id.clone();
+                let cancel = slot.cancel.clone();
+                let done = done.clone();
+                std::thread::spawn(move || {
+                    let result = audio::start_capture_with_cancel(&source, &|| {
+                        cancel.load(Ordering::Acquire)
+                    });
+                    let _ = done.send(Completed::Open(id, result));
+                });
+            }
+        }
+    }
+
+    fn mix_sources(
+        slots: &mut BTreeMap<String, Slot>,
+        done: &mpsc::SyncSender<Completed>,
+    ) -> ([[f32; 2]; 240], bool) {
+        let mut mix = [[0.0; 2]; 240];
+        for (id, slot) in slots {
+            let Some(input) = &mut slot.desired else {
+                continue;
+            };
+            let Some(session) = &mut slot.session else {
+                slot.meters.unavailable();
+                continue;
+            };
+            let capture = session.control.snapshot();
+            if matches!(
+                capture.phase,
+                CapturePhase::Error | CapturePhase::Missing | CapturePhase::Stopped
+            ) {
+                input.phase = InputPhase::Fault;
+                input.fault = Some(AppError::new(
+                    ErrorCode::CaptureFailed,
+                    capture
+                        .message
+                        .unwrap_or_else(|| "Capture stopped. Select the source again.".into()),
+                ));
+                let session = slot.session.take().expect("present");
+                slot.operation = true;
+                slot.deadline = Some(Instant::now() + Duration::from_millis(750));
+                slot.cancel.store(true, Ordering::Release);
+                retire(id.clone(), session, done.clone());
+                slot.meters.unavailable();
+                continue;
+            }
+            let mut frames = [[0.0; 2]; 240];
+            session.input.drain_frames(&mut frames);
+            let level = sum_source(&mut mix, &frames, input.gain_db, input.muted);
+            slot.meters.observe(
+                level,
+                session.control.take_pre_clip(),
+                capture.dropped_frames,
+                capture.underrun_frames,
+                capture.queued_frames,
+            );
+        }
+        let pre_clip = mix.iter().flatten().any(|sample| sample.abs() >= 1.0);
+        clamp_mix(&mut mix);
+        (mix, pre_clip)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn eight_owned_synthetic_captures_mix_without_steady_allocations() {
+        use crate::audio::recording_format::tests::allocations_during;
+        struct StopAll(Vec<audio::CaptureControl>);
+        impl Drop for StopAll {
+            fn drop(&mut self) {
+                for control in &self.0 {
+                    let _ = control.stop();
+                }
+            }
+        }
+        let mut controls = StopAll(Vec::new());
+        let mut slots = BTreeMap::new();
+        for index in 0..MAX_INPUTS {
+            // These are owned Rust generators feeding private rings. They open
+            // no endpoint and produce no physical or network output.
+            let session = audio::bus_capture(|frames| frames.fill([0.125, -0.25]));
+            controls.0.push(session.control.clone());
+            let id = format!("fixture-{index}");
+            let input = InputStrip {
+                strip_id: id.clone(),
+                source_id: id.clone(),
+                kind: SourceKind::Recording,
+                display_name: id.clone(),
+                detail: None,
+                phase: InputPhase::Capturing,
+                fault: None,
+                gain_db: Some(-6.0),
+                muted: index.is_multiple_of(2),
+                colour_slot: index as u8,
+                restored: false,
+            };
+            slots.insert(
+                id.clone(),
+                Slot {
+                    desired: Some(input),
+                    session: Some(session),
+                    operation: false,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    source: id.clone(),
+                    deadline: None,
+                    meters: SourceMeters::new(id),
+                },
+            );
+        }
+        let (done, _completed) = mpsc::sync_channel(16);
+        let bus = mix_bus::Bus::test_bus();
+        let allocations = allocations_during(|| {
+            for tick in 0..1000 {
+                open_pending_sources(&mut slots, &done);
+                let (mix, _) = mix_sources(&mut slots, &done);
+                bus.write(&mix, tick * 5);
+            }
+        });
+        assert_eq!(allocations, 0);
+        assert!(
+            slots
+                .values()
+                .all(|slot| slot.meters.latest.level_dbfs.is_some())
+        );
+        println!("steady mix: 8 owned synthetic sources, 1000 ticks, {allocations} allocations");
+    }
+
     pub fn run_worker(raw: usize) -> Result<(), AppError> {
         let mapping = Mapping::inherited(raw).map_err(|_| failure())?;
         mapping.bus().initialize();
@@ -372,7 +597,6 @@ mod native {
         let mut waiting = BTreeMap::<String, InputStrip>::new();
         let mut revision = 0;
         let mut mix_pre_clip = false;
-        let mut held = BTreeMap::<String, (f32, bool)>::new();
         let mut next = Instant::now();
         let mut publish = next;
         while !stop.load(Ordering::Acquire) {
@@ -384,9 +608,13 @@ mod native {
                 // Exit immediately; the parent observes exit through its owned job.
                 std::process::exit(1);
             }
+            let mut lifecycle_changed = false;
             while let Ok((new_revision, inputs)) = latest.try_recv() {
+                lifecycle_changed = true;
                 revision = new_revision;
-                held.clear();
+                for slot in slots.values_mut() {
+                    slot.meters.reset_window();
+                }
                 waiting.retain(|id, _| inputs.iter().any(|i| &i.strip_id == id));
                 if inputs.len() > MAX_INPUTS || inputs.iter().any(|i| !valid_gain(i.gain_db)) {
                     std::process::exit(1);
@@ -417,6 +645,7 @@ mod native {
                         slots.insert(
                             input.strip_id.clone(),
                             Slot {
+                                meters: SourceMeters::new(input.strip_id.clone()),
                                 source: input.source_id.clone(),
                                 deadline: None,
                                 desired: Some(input),
@@ -429,6 +658,7 @@ mod native {
                 }
             }
             while let Ok(result) = completed.try_recv() {
+                lifecycle_changed = true;
                 match result {
                     Completed::Stopped(id, clean) => {
                         if !clean {
@@ -475,131 +705,31 @@ mod native {
                     }
                 }
             }
-            slots.retain(|_, slot| {
-                slot.desired.is_some() || slot.operation || slot.session.is_some()
-            });
-            while slots.len() < MAX_INPUTS {
-                let Some((id, input)) = waiting.pop_first() else {
-                    break;
-                };
-                slots.insert(
-                    id,
-                    Slot {
-                        source: input.source_id.clone(),
-                        deadline: None,
-                        desired: Some(input),
-                        session: None,
-                        operation: false,
-                        cancel: Arc::new(AtomicBool::new(false)),
-                    },
-                );
-            }
-            let mut occupied: Vec<_> = slots
-                .iter()
-                .filter(|(_, slot)| slot.operation || slot.session.is_some())
-                .map(|(id, slot)| (id.clone(), slot.source.clone()))
-                .collect();
-            for (id, slot) in &mut slots {
-                if slot.operation
-                    || slot.session.is_some()
-                    || !slot.desired.as_ref().is_some_and(|i| {
-                        matches!(i.phase, InputPhase::Opening | InputPhase::Capturing)
-                    })
-                {
-                    continue;
-                }
-                let blocked = slot.desired.as_ref().is_some_and(|input| {
-                    occupied.iter().any(|(other, source)| {
-                        other != id
-                            && (source == &input.source_id
-                                || (audio::application::is_application_id(source)
-                                    && audio::application::is_application_id(&input.source_id)
-                                    && audio::application::roots_overlap(source, &input.source_id)
-                                        .unwrap_or(true)))
-                    })
+            if lifecycle_changed {
+                slots.retain(|_, slot| {
+                    slot.desired.is_some() || slot.operation || slot.session.is_some()
                 });
-                if blocked {
-                    continue;
+                while slots.len() < MAX_INPUTS {
+                    let Some((id, input)) = waiting.pop_first() else {
+                        break;
+                    };
+                    slots.insert(
+                        id,
+                        Slot {
+                            meters: SourceMeters::new(input.strip_id.clone()),
+                            source: input.source_id.clone(),
+                            deadline: None,
+                            desired: Some(input),
+                            session: None,
+                            operation: false,
+                            cancel: Arc::new(AtomicBool::new(false)),
+                        },
+                    );
                 }
-                if !slot.operation
-                    && slot.session.is_none()
-                    && let Some(input) = &mut slot.desired
-                    && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
-                {
-                    slot.source = input.source_id.clone();
-                    slot.cancel = Arc::new(AtomicBool::new(false));
-                    slot.operation = true;
-                    slot.deadline = Some(Instant::now() + Duration::from_secs(5));
-                    input.phase = InputPhase::Opening;
-                    occupied.push((id.clone(), slot.source.clone()));
-                    let source = slot.source.clone();
-                    let id = id.clone();
-                    let cancel = slot.cancel.clone();
-                    let done = done.clone();
-                    std::thread::spawn(move || {
-                        let result = audio::start_capture_with_cancel(&source, &|| {
-                            cancel.load(Ordering::Acquire)
-                        });
-                        let _ = done.send(Completed::Open(id, result));
-                    });
-                }
+                open_pending_sources(&mut slots, &done);
             }
-            let mut mix = [[0.0; 2]; 240];
-            let mut telemetry = Vec::with_capacity(slots.len());
-            for (id, slot) in &mut slots {
-                let Some(input) = &mut slot.desired else {
-                    continue;
-                };
-                let mut observation = InputTelemetry {
-                    strip_id: id.clone(),
-                    level_dbfs: None,
-                    pre_clip: false,
-                    dropped_frames: 0,
-                    underrun_frames: 0,
-                    queued_frames: 0,
-                };
-                if let Some(session) = &mut slot.session {
-                    let capture = session.control.snapshot();
-                    if matches!(
-                        capture.phase,
-                        CapturePhase::Error | CapturePhase::Missing | CapturePhase::Stopped
-                    ) {
-                        input.phase = InputPhase::Fault;
-                        input.fault = Some(AppError::new(
-                            ErrorCode::CaptureFailed,
-                            capture.message.unwrap_or_else(|| {
-                                "Capture stopped. Select the source again.".into()
-                            }),
-                        ));
-                        let session = slot.session.take().expect("present");
-                        slot.operation = true;
-                        slot.deadline = Some(Instant::now() + Duration::from_millis(750));
-                        slot.cancel.store(true, Ordering::Release);
-                        retire(id.clone(), session, done.clone());
-                    } else {
-                        let mut frames = [[0.0; 2]; 240];
-                        session.input.drain_frames(&mut frames);
-                        observation.level_dbfs =
-                            Some(sum_source(&mut mix, &frames, input.gain_db, input.muted));
-                        observation.pre_clip = session.control.take_pre_clip();
-                        observation.dropped_frames = capture.dropped_frames;
-                        observation.underrun_frames = capture.underrun_frames;
-                        observation.queued_frames = capture.queued_frames;
-                    }
-                }
-                if let Some(level) = observation.level_dbfs {
-                    let accumulated = held.entry(id.clone()).or_insert((-96.0, false));
-                    accumulated.0 = accumulated.0.max(level);
-                    accumulated.1 |= observation.pre_clip;
-                    observation.level_dbfs = Some(accumulated.0);
-                    observation.pre_clip = accumulated.1;
-                } else {
-                    held.remove(id);
-                }
-                telemetry.push(observation);
-            }
-            mix_pre_clip |= mix.iter().flatten().any(|sample| sample.abs() >= 1.0);
-            clamp_mix(&mut mix);
+            let (mix, clipped) = mix_sources(&mut slots, &done);
+            mix_pre_clip |= clipped;
             mapping.bus().write(&mix, mix_bus::now_ms());
             if Instant::now() >= publish {
                 publish = Instant::now() + Duration::from_millis(100);
@@ -607,9 +737,15 @@ mod native {
                     mix_pre_clip,
                     revision,
                     inputs: slots.values().filter_map(|s| s.desired.clone()).collect(),
-                    telemetry,
+                    telemetry: slots
+                        .values()
+                        .filter(|slot| slot.desired.is_some())
+                        .map(|slot| slot.meters.latest.clone())
+                        .collect(),
                 });
-                held.clear();
+                for slot in slots.values_mut() {
+                    slot.meters.reset_window();
+                }
                 mix_pre_clip = false;
             }
             next += Duration::from_millis(5);
@@ -653,5 +789,63 @@ mod tests {
         assert!((linear(Some(-59.5)) - 0.00105925).abs() < 0.000001);
         assert_eq!(linear(None), 0.0);
         assert!(!valid_gain(Some(f32::NAN)));
+    }
+
+    #[test]
+    fn retained_source_meters_preserve_window_hold_and_latest_counts() {
+        let mut meters = SourceMeters::new("fixture".into());
+        meters.observe(-12.0, true, 10, 20, 240);
+        meters.observe(-30.0, false, 11, 22, 480);
+        assert_eq!(meters.latest.level_dbfs, Some(-12.0));
+        assert!(meters.latest.pre_clip);
+        assert_eq!(
+            (
+                meters.latest.dropped_frames,
+                meters.latest.underrun_frames,
+                meters.latest.queued_frames
+            ),
+            (11, 22, 480)
+        );
+        meters.reset_window();
+        meters.observe(-48.0, false, 12, 24, 120);
+        assert_eq!(meters.latest.level_dbfs, Some(-48.0));
+        assert!(!meters.latest.pre_clip);
+        meters.unavailable();
+        assert_eq!(meters.latest.level_dbfs, None);
+        assert_eq!(meters.latest.queued_frames, 0);
+        assert_eq!(meters.latest.strip_id, "fixture");
+        meters.observe(-60.0, false, 0, 0, 240);
+        assert_eq!(meters.latest.level_dbfs, Some(-60.0));
+    }
+
+    #[test]
+    fn steady_meter_updates_allocate_only_at_publication() {
+        use crate::audio::recording_format::tests::allocations_during;
+        let mut meters: Vec<_> = (0..MAX_INPUTS)
+            .map(|index| SourceMeters::new(format!("fixture-{index}")))
+            .collect();
+        let steady = allocations_during(|| {
+            for tick in 0..1000 {
+                for source in &mut meters {
+                    source.observe(-24.0, false, tick, 0, 240);
+                    if tick % 20 == 0 {
+                        source.reset_window();
+                    }
+                }
+            }
+        });
+        assert_eq!(steady, 0);
+        let publication = allocations_during(|| {
+            std::hint::black_box(
+                meters
+                    .iter()
+                    .map(|source| source.latest.clone())
+                    .collect::<Vec<_>>(),
+            );
+        });
+        assert!(publication > MAX_INPUTS);
+        println!(
+            "source telemetry: 1000 ticks, {steady} allocations; one publication, {publication} allocations"
+        );
     }
 }

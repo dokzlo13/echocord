@@ -106,7 +106,7 @@ impl RecordingResampler {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         alloc::{GlobalAlloc, Layout, System},
@@ -146,7 +146,7 @@ mod tests {
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-    fn allocations_during(action: impl FnOnce()) -> usize {
+    pub(crate) fn allocations_during(action: impl FnOnce()) -> usize {
         struct Reset;
         impl Drop for Reset {
             fn drop(&mut self) {

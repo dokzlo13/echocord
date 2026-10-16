@@ -50,4 +50,6 @@ Bot setup puts the token field first, focuses it and supports Enter to submit. A
 
 Bot details show real profile/shared-gateway facts, discovered room counts and reservation status. Room discovery is not proof of access; permissions are checked when connecting. Do not display hardcoded Connect/Speak grants or unexplained OK badges. Settings shows the package-derived app version and only wired controls.
 
+Failed preference writes keep live controls applied. A persistent bottom strip says Changes not saved, offers Details and Retry save, and spans both columns without moving card tops. Settings pins the full reason and retry in its footer. The warning clears only after saving succeeds; polite status announcements distinguish saving from rejected controls. Settings also links to the offline license viewer: filter document titles, deliberately select a document, and read/copy its plain text. Filtering and retrying preserve the open document; Escape returns to Settings and restores focus to Licenses.
+
 Test relevant states, keyboard behavior and the five documented sizes in [TESTING.md](docs/TESTING.md). Browser screenshots do not establish native accessibility, display scaling or physical audio behavior.

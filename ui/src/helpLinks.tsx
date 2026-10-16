@@ -5,6 +5,7 @@ import { useState } from "react";
 const HELP_LINKS = {
   portal: "https://discord.com/developers/applications",
   guide: "https://github.com/dokzlo13/echocord#discord-bot-setup",
+  sources: `https://github.com/dokzlo13/echocord/releases/tag/v${import.meta.env.APP_VERSION}`,
 } as const;
 
 export function HelpLink({

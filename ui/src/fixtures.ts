@@ -75,7 +75,7 @@ export function fixtureSnapshot(
       kind: "recording",
       name: "Unsupported input",
       detail:
-        "44.1 kHz input is unsupported. Switch this input to 48 kHz in Windows sound settings.",
+        "This input has no supported 44.1, 48 or 96 kHz mono/stereo PCM format.",
       available: false,
     },
   ];
@@ -419,6 +419,7 @@ export class FixtureTransport implements Transport {
   commands: ControlCommand[] = [];
   reject: unknown = null;
   rejectSave = false;
+  failPreferences = false;
   holdConnect = false;
   holdDisconnect = false;
   minimized = 0;
@@ -765,6 +766,8 @@ export class FixtureTransport implements Transport {
       case "set-settings":
         this.current.settings = c.settings;
         break;
+      case "retry-preferences":
+        break;
       case "refresh-sources":
         this.current.sourceDiscovery = { phase: "ready" };
         break;
@@ -774,6 +777,25 @@ export class FixtureTransport implements Transport {
       case "recheck-configuration":
         this.current.bot = { ...this.current.bot, status: "ready" };
         break;
+    }
+    if (
+      [
+        "set-settings",
+        "set-source-gain",
+        "set-source-muted",
+        "set-destination-volume",
+        "set-destination-muted",
+        "retry-preferences",
+      ].includes(c.type)
+    ) {
+      if (this.failPreferences) {
+        this.current.preferencesWarning = {
+          code: "configuration",
+          message: "Preferences could not be saved.",
+        };
+      } else {
+        delete this.current.preferencesWarning;
+      }
     }
     this.current.telemetry.destinations = this.current.destinations.map(
       (d) => ({

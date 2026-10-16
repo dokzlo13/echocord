@@ -11,6 +11,7 @@ import { DestCard, Empty, SlotHead, SourceCard } from "./cards";
 import { GATEWAY_STATUS } from "./copy";
 import type { Connection, ControlSnapshot } from "./generated";
 import { Mark } from "./icons";
+import { Licenses } from "./Licenses";
 import {
   catalogSource,
   type DestCard as Destination,
@@ -18,6 +19,7 @@ import {
   type SourceCard as Source,
   serverView,
 } from "./model";
+import { SaveStatus } from "./SaveStatus";
 import {
   BotAvatar,
   BotInfo,
@@ -155,6 +157,39 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
     return () => ro.disconnect();
   }, []);
   const snapshot = view.snapshot;
+  const warning = snapshot?.preferencesWarning;
+  const saving = view.pending.includes(
+    JSON.stringify({ type: "retry-preferences" }),
+  );
+  const previousWarning = useRef(false);
+  const [saveAnnouncement, setSaveAnnouncement] = useState("");
+  useEffect(() => {
+    if (warning)
+      setSaveAnnouncement(
+        "Changes apply now, but are not saved for next time.",
+      );
+    else if (previousWarning.current) {
+      setSaveAnnouncement("Changes saved.");
+      requestAnimationFrame(() => {
+        if (document.activeElement !== document.body) return;
+        const target =
+          document.querySelector<HTMLElement>(".sheet-head button") ??
+          document.querySelector<HTMLElement>(".src-slot .btn-add");
+        target?.focus();
+      });
+    }
+    previousWarning.current = Boolean(warning);
+  }, [warning]);
+  const retrySave = async () => {
+    setSaveAnnouncement("");
+    await adapter.dispatch({ type: "retry-preferences" });
+    requestAnimationFrame(() => {
+      const remaining = adapter.getSnapshot().snapshot?.preferencesWarning;
+      setSaveAnnouncement(
+        remaining ? `Still not saved. ${remaining.message}` : "Changes saved.",
+      );
+    });
+  };
   const failedCommand = view.commandErrorCommand;
   const operationError = (uid: string) =>
     failedCommand &&
@@ -299,7 +334,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       : undefined;
   return (
     <TelemetryProvider value={adapter.telemetry}>
-      <div ref={win} className="window" data-layout="stack" data-native>
+      <div
+        ref={win}
+        className="window"
+        data-layout="stack"
+        data-native
+        data-unsaved={Boolean(warning)}
+      >
+        <span className="sr-only" role="status">
+          {saveAnnouncement}
+        </span>
         <header
           className="titlebar"
           role="toolbar"
@@ -605,6 +649,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             )}
           </section>
         </main>
+        {warning && (
+          <div className="save-strip" inert={sheet ? true : undefined}>
+            <SaveStatus
+              warning={warning}
+              busy={saving}
+              retry={() => void retrySave()}
+              details={() => open({ kind: "settings", focusSave: true })}
+            />
+          </div>
+        )}
         {sheet?.kind === "source" && snapshot && (
           <SourcePicker
             sources={sources}
@@ -700,12 +754,18 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             bot={bot}
             botName={botName}
             settings={snapshot.settings}
+            saveWarning={warning}
+            saving={saving}
+            onRetrySave={() => void retrySave()}
             error={view.commandError?.message ?? null}
             onSettings={(s) => void adapter.setSettings(s)}
             meterMode={mode}
             onMeterMode={(meterStyle) =>
               void adapter.setSettings({ ...snapshot.settings, meterStyle })
             }
+            onLicenses={() => setSheet({ kind: "licenses" })}
+            focusLicenses={Boolean(sheet.focusLicenses)}
+            focusSave={Boolean(sheet.focusSave)}
             onBot={() =>
               setSheet(bot === "ready" ? { kind: "bot-info" } : { kind: "bot" })
             }
@@ -713,6 +773,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           />
         )}
         {netDest && <ConnectionSheet dest={netDest} onClose={close} />}
+        {sheet?.kind === "licenses" && (
+          <Licenses
+            onClose={() => setSheet({ kind: "settings", focusLicenses: true })}
+          />
+        )}
         {sheet?.kind === "bot-info" && snapshot && (
           <BotInfo
             servers={servers}

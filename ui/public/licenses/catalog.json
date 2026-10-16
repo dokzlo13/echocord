@@ -1,0 +1,7 @@
+{
+  "version": "development",
+  "sourceUrl": "https://github.com/dokzlo13/echocord/releases",
+  "documents": [
+    { "title": "Development preview", "path": "/licenses/preview.txt" }
+  ]
+}

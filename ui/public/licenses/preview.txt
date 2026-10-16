@@ -1,0 +1,3 @@
+This development preview does not contain the release license bundle.
+
+The documented application build embeds Echocord's MIT license, full dependency notices, attribution and corresponding-source information. They are available offline from Settings → Licenses in the released executable.

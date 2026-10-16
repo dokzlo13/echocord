@@ -203,3 +203,147 @@ body {
 .window .src-slot:has(.empty) {
   min-height: auto;
 }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.settings-about {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.text-link {
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  padding: 6px;
+}
+.text-link:hover {
+  color: var(--ink);
+}
+.sheet-body:has(> .license-browser) {
+  overflow: hidden;
+}
+.license-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+.license-intro {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.license-count {
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.license-search input,
+.license-choice select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--inset);
+  color: var(--ink);
+  font: inherit;
+}
+.license-search input::placeholder {
+  color: var(--ink-3);
+}
+.license-text {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 12px;
+  background: var(--inset);
+  border: 1px solid var(--line);
+  border-radius: var(--r-ctl);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font:
+    12px / 1.5 Consolas,
+    "Cascadia Mono",
+    ui-monospace,
+    monospace;
+  tab-size: 4;
+  color: var(--ink);
+  resize: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.window[data-unsaved="true"] {
+  grid-template-rows: 36px minmax(0, 1fr) auto;
+}
+.window[data-unsaved="true"] .surface {
+  padding-bottom: 10px;
+}
+.save-strip {
+  margin: 0 16px 12px;
+  min-width: 0;
+}
+.save-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--fault-line);
+  border-radius: var(--r-ctl);
+  background: var(--fault-bg);
+  color: var(--ink);
+}
+.save-notice > svg {
+  flex: none;
+  color: var(--fault);
+  margin-top: 2px;
+}
+.save-copy {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+.save-copy strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+}
+.save-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--ink-2);
+}
+.save-retry {
+  flex: none;
+  min-width: 92px;
+}
+.save-notice[data-compact="true"] {
+  align-items: center;
+  min-height: 36px;
+  padding: 3px 3px 3px 10px;
+}
+.save-notice[data-compact="true"] strong {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheet-foot:has(> .save-notice) {
+  background: var(--bg);
+  border-top: 0;
+  padding-top: 10px;
+}

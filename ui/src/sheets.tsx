@@ -15,6 +15,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { NetChart, OnAirTime, StatTiles } from "./cards";
 import { GATEWAY_STATUS, STATUS, statusKey } from "./copy";
 import type {
+  AppError,
   AppSettings,
   BotProfile,
   Discovery,
@@ -32,9 +33,10 @@ import type {
   Server,
   SourceCard,
 } from "./model";
+import { SaveStatus } from "./SaveStatus";
 import { paint, useTelemetryStore } from "./telemetry";
 
-function Sheet({
+export function Sheet({
   title,
   onClose,
   footer,
@@ -65,7 +67,7 @@ function Sheet({
       if (e.key !== "Tab") return;
       const items = Array.from(
         root.querySelectorAll<HTMLElement>(
-          'button:not(:disabled),input:not(:disabled),a[href],summary,[tabindex="0"]',
+          'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],summary,[tabindex="0"]',
         ),
       ).filter(
         (el) =>
@@ -1103,6 +1105,12 @@ export function Settings({
   onBot,
   meterMode,
   onMeterMode,
+  onLicenses,
+  focusLicenses,
+  focusSave,
+  saveWarning,
+  saving,
+  onRetrySave,
   onClose,
 }: {
   bot: BotState;
@@ -1113,10 +1121,31 @@ export function Settings({
   onBot: () => void;
   meterMode: MeterMode;
   onMeterMode: (m: MeterMode) => void;
+  onLicenses: () => void;
+  focusLicenses: boolean;
+  focusSave: boolean;
+  saveWarning: AppError | undefined;
+  saving: boolean;
+  onRetrySave: () => void;
   onClose: () => void;
 }) {
   return (
-    <Sheet title="Settings" onClose={onClose}>
+    <Sheet
+      title="Settings"
+      onClose={onClose}
+      initialFocus={
+        focusLicenses
+          ? ".license-open"
+          : focusSave && saveWarning
+            ? ".save-retry"
+            : undefined
+      }
+      footer={
+        saveWarning && (
+          <SaveStatus warning={saveWarning} busy={saving} retry={onRetrySave} />
+        )
+      }
+    >
       {error && (
         <p className="field-error" role="alert">
           {error}
@@ -1210,7 +1239,16 @@ export function Settings({
           <ChevronRight size={18} aria-hidden />
         </button>
       </section>
-      <p className="about tabular">Echocord {import.meta.env.APP_VERSION}</p>
+      <div className="about settings-about">
+        <span className="tabular">Echocord {import.meta.env.APP_VERSION}</span>
+        <button
+          className="text-link license-open"
+          type="button"
+          onClick={onLicenses}
+        >
+          Licenses
+        </button>
+      </div>
     </Sheet>
   );
 }

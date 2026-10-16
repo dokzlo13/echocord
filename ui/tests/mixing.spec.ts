@@ -310,7 +310,7 @@ test("source picker shows existing and unsupported inputs without invented activ
   ).toHaveAttribute("aria-disabled", "true");
   await expect(
     page.getByRole("option", { name: /Unsupported input/ }),
-  ).toContainText("48 kHz");
+  ).toContainText("44.1, 48 or 96 kHz");
   await expect(page.locator(".activity")).toHaveCount(0);
 });
 

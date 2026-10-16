@@ -68,6 +68,10 @@ fn setup_link_url(link: &str) -> Option<&'static str> {
     match link {
         "portal" => Some("https://discord.com/developers/applications"),
         "guide" => Some("https://github.com/dokzlo13/echocord#discord-bot-setup"),
+        "sources" => Some(concat!(
+            "https://github.com/dokzlo13/echocord/releases/tag/v",
+            env!("CARGO_PKG_VERSION")
+        )),
         _ => None,
     }
 }

@@ -324,7 +324,7 @@ mod tests {
                 }
             }
             println!(
-                "8 stereo converters, {rate} Hz, 10 synthetic seconds: {:.3} CPU-wall seconds, {samples} output samples",
+                "8 stereo converters, {rate} Hz, 10 synthetic seconds: {:.3} elapsed seconds, {samples} output samples",
                 started.elapsed().as_secs_f64()
             );
         }

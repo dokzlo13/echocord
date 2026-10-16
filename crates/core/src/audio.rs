@@ -703,6 +703,8 @@ struct RecordingWriter {
     resampler: Option<recording_format::RecordingResampler>,
     channels: u16,
     fence: (u64, u64),
+    pending_right: bool,
+    discard_right: bool,
 }
 
 #[cfg(any(windows, test))]
@@ -725,10 +727,12 @@ impl RecordingWriter {
             resampler,
             channels,
             fence,
+            pending_right: false,
+            discard_right: false,
         })
     }
 
-    fn write<T: Copy>(&mut self, data: &[T], convert: impl Fn(T) -> f32) {
+    fn write<T: Copy>(&mut self, mut data: &[T], convert: impl Fn(T) -> f32) {
         let shared = &self.writer.shared;
         if !matches!(shared.status.load(Ordering::Acquire), RUNNING | OPENING) {
             return;
@@ -738,11 +742,30 @@ impl RecordingWriter {
             shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
         );
         if fence != self.fence {
+            // Mute does not change the native stream's sample position. If an
+            // odd callback left half a stereo frame, discard its matching right
+            // sample too. A native discontinuity starts a fresh whole frame.
+            if fence.0 != self.fence.0 {
+                self.pending_right = false;
+                self.discard_right = false;
+            } else {
+                self.discard_right = self.pending_right;
+            }
             if let Some(resampler) = &mut self.resampler {
                 resampler.reset();
             }
             self.writer.partial_left = None;
             self.fence = fence;
+        }
+        if self.discard_right && !data.is_empty() {
+            data = &data[1..];
+            self.pending_right = false;
+            self.discard_right = false;
+        }
+        // Track the complete delivered slice, even if a concurrent generation
+        // change makes the fenced writer reject its remaining samples.
+        if self.channels == 2 && data.len() % 2 != 0 {
+            self.pending_right = !self.pending_right;
         }
         if let Some(resampler) = &mut self.resampler {
             let writer = &mut self.writer;
@@ -1220,6 +1243,49 @@ mod tests {
                 assert_eq!(actual, [[0.0; 2]; 240]);
                 assert_eq!(session.control.snapshot().underrun_frames, 0);
                 assert!(session.control.snapshot().dropped_frames > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn mute_between_fragmented_callbacks_preserves_stereo_alignment() {
+        use std::cell::Cell;
+        for rate in [44_100, 48_000, 96_000] {
+            for during_callback in [false, true] {
+                let (writer, mut session, _) = setup();
+                let mut recording = RecordingWriter::new(writer, rate, 2).unwrap();
+                let remaining = Cell::new(7u32);
+                recording.write(&[0.75; 1025], |sample| {
+                    if during_callback {
+                        let next = remaining.get().saturating_sub(1);
+                        remaining.set(next);
+                        if next == 0 {
+                            remaining.set(u32::MAX);
+                            session.control.set_output(100, true);
+                            session.control.set_output(100, false);
+                        }
+                    }
+                    sample
+                });
+                if !during_callback {
+                    session.control.set_output(100, true);
+                    session.control.set_output(100, false);
+                }
+                // Empty callbacks and another mute cycle must not lose the
+                // pending right-sample discard after history has been reset.
+                recording.write::<f32>(&[], |s| s);
+                session.control.set_output(100, true);
+                session.control.set_output(100, false);
+                let mut source = vec![-0.875];
+                source.extend((0..1024).flat_map(|_| [0.25, -0.5]));
+                recording.write(&source, |s| s);
+                let mut actual = [[0.0; 2]; 240];
+                session.input.drain_frames(&mut actual);
+                for frame in &actual[230..] {
+                    assert!((frame[0] - 0.25).abs() < 0.001, "rate {rate}: {frame:?}");
+                    assert!((frame[1] + 0.5).abs() < 0.001, "rate {rate}: {frame:?}");
+                }
+                assert_eq!(session.control.snapshot().underrun_frames, 0);
             }
         }
     }

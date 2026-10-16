@@ -94,14 +94,26 @@ impl Bus {
         frames: &mut [[f32; 2]],
         now_ms: u64,
     ) -> ReadStats {
-        self.read_observed(cursor, frames, now_ms, |_| {})
+        self.read_clocked(cursor, frames, now_ms, completion_clock(now_ms), |_| {})
     }
 
+    #[cfg(test)]
     fn read_observed(
         &self,
         cursor: &mut u64,
         frames: &mut [[f32; 2]],
         now_ms: u64,
+        observe: impl FnMut(ReadBoundary),
+    ) -> ReadStats {
+        self.read_clocked(cursor, frames, now_ms, || now_ms, observe)
+    }
+
+    fn read_clocked(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        now_ms: u64,
+        completed_ms: impl FnOnce() -> u64,
         mut observe: impl FnMut(ReadBoundary),
     ) -> ReadStats {
         frames.fill([0.0; 2]);
@@ -149,14 +161,24 @@ impl Bus {
         }
         observe(ReadBoundary::Copied);
         let final_floor = self.continuity_floor.load(SeqCst);
-        if final_floor != floor {
+        let completed_ms = completed_ms();
+        let expired = completed_ms.saturating_sub(now_ms) > MAX_AGE_MS
+            || completed_ms.saturating_sub(heartbeat) > MAX_AGE_MS;
+        if final_floor != floor || expired {
             // A reader can itself be suspended while copying. Do not return a
-            // block assembled across a producer discontinuity. No retries or
-            // synthetic cursor gaps: discard only the actual unread prefix.
+            // block assembled across a producer discontinuity or a long reader
+            // pause, even if the producer has not resumed to publish a floor.
+            // This final clock check cannot guard a pause after it, including
+            // between returning the buffer and the device accepting it.
             frames.fill([0.0; 2]);
             *cursor = (*cursor).max(final_floor);
+            if expired {
+                // Discard only data observed at entry; a fresh producer suffix
+                // remains available to the next read. Never invent cursor gaps.
+                *cursor = (*cursor).max(latest);
+            }
             return ReadStats {
-                dropped_frames: final_floor
+                dropped_frames: (*cursor)
                     .saturating_sub(original_cursor)
                     .min(u32::MAX as u64) as u32,
                 underrun_frames: frames.len().min(u32::MAX as usize) as u32,
@@ -165,6 +187,22 @@ impl Bus {
         }
         stats.queued_frames = latest.saturating_sub(*cursor).min(CAPACITY as u64) as u32;
         stats
+    }
+}
+
+fn completion_clock(started_ms: u64) -> impl FnOnce() -> u64 {
+    move || {
+        #[cfg(all(windows, not(test)))]
+        {
+            let _ = started_ms;
+            native::now_ms()
+        }
+        // Portable/native unit fixtures supply a virtual timestamp. They inject
+        // an advancing completion clock directly when testing read suspension.
+        #[cfg(any(not(windows), test))]
+        {
+            started_ms
+        }
     }
 }
 
@@ -309,6 +347,24 @@ mod native {
         assert!(milliseconds >= counter_millis(before as u64, frequency));
         assert!(milliseconds <= counter_millis(after as u64, frequency));
         assert_eq!(clock_frequency(), frequency);
+    }
+    #[cfg(test)]
+    #[test]
+    fn native_completion_clock_rejects_a_paused_read_without_opening_devices() {
+        let bus = Bus::test_bus();
+        let started = now_ms();
+        bus.write(&[[0.75, -0.25]; 240], started);
+        let mut cursor = 0;
+        let mut frames = [[0.0; 2]; 240];
+        let stats = bus.read_clocked(&mut cursor, &mut frames, started, now_ms, |point| {
+            if point == ReadBoundary::Copied {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        assert_eq!(frames, [[0.0; 2]; 240]);
+        assert_eq!(cursor, 240);
+        assert_eq!(stats.dropped_frames, 240);
+        assert_eq!(stats.underrun_frames, 240);
     }
     pub fn capture(id: &str) -> Result<crate::audio::CaptureSession, crate::model::AppError> {
         let failure = || {
@@ -459,6 +515,89 @@ mod tests {
             let stats = bus.read_counted(&mut cursor, &mut frames, 1001);
             assert_eq!(frames, [[0.125, -0.5]; 240]);
             assert_eq!(stats.dropped_frames, 0);
+        }
+    }
+    #[test]
+    fn reader_first_resume_discards_a_copied_block_before_the_writer_can_publish_a_floor() {
+        use std::cell::Cell;
+        for boundary in [
+            ReadBoundary::Cursor,
+            ReadBoundary::Heartbeat,
+            ReadBoundary::Floor,
+            ReadBoundary::Copied,
+        ] {
+            let bus = bus();
+            bus.write(&[[0.75, -0.25]; 960], 0);
+            let clock = Cell::new(1);
+            let mut cursor = 0;
+            let mut frames = [[9.0; 2]; 240];
+            let stats = bus.read_clocked(
+                &mut cursor,
+                &mut frames,
+                1,
+                || clock.get(),
+                |point| {
+                    if point == boundary {
+                        clock.set(1000);
+                    }
+                },
+            );
+            assert_eq!(frames, [[0.0; 2]; 240]);
+            assert_eq!(cursor, 960);
+            assert_eq!(stats.dropped_frames, 960);
+            assert_eq!(stats.underrun_frames, 240);
+            assert_eq!(bus.continuity_floor.load(SeqCst), 0);
+            bus.write(&[[0.25, -0.125]; 240], 1001);
+            bus.read_counted(&mut cursor, &mut frames, 1001);
+            assert_eq!(frames, [[0.25, -0.125]; 240]);
+        }
+    }
+    #[test]
+    fn a_reader_pause_is_detected_when_the_writer_keeps_running_without_discontinuity() {
+        use std::cell::Cell;
+        let bus = bus();
+        bus.write(&[[0.75, -0.25]; 960], 0);
+        let clock = Cell::new(1);
+        let mut cursor = 0;
+        let mut frames = [[9.0; 2]; 240];
+        let stats = bus.read_clocked(
+            &mut cursor,
+            &mut frames,
+            1,
+            || clock.get(),
+            |point| {
+                if point == ReadBoundary::Copied {
+                    for tick in 1..=200 {
+                        bus.write(&[[0.25, -0.125]; 240], tick * 5);
+                    }
+                    clock.set(1000);
+                }
+            },
+        );
+        assert_eq!(frames, [[0.0; 2]; 240]);
+        assert_eq!(bus.continuity_floor.load(SeqCst), 0);
+        assert_eq!(cursor, 960);
+        assert_eq!(stats.dropped_frames, 960);
+        assert!(cursor <= bus.cursor());
+        bus.read_counted(&mut cursor, &mut frames, 1001);
+        assert_eq!(frames, [[0.25, -0.125]; 240]);
+    }
+    #[test]
+    fn completion_freshness_boundary_keeps_forty_ms_but_rejects_forty_one() {
+        for elapsed in [40, 41] {
+            let bus = bus();
+            bus.write(&[[0.75, -0.25]; 240], 100);
+            let mut cursor = 0;
+            let mut frames = [[0.0; 2]; 240];
+            let stats = bus.read_clocked(&mut cursor, &mut frames, 100, || 100 + elapsed, |_| {});
+            if elapsed == 40 {
+                assert_eq!(frames, [[0.75, -0.25]; 240]);
+                assert_eq!(stats.dropped_frames, 0);
+            } else {
+                assert_eq!(frames, [[0.0; 2]; 240]);
+                assert_eq!(stats.dropped_frames, 240);
+            }
+            assert_eq!(cursor, 240);
         }
     }
 

@@ -62,6 +62,16 @@ class CacheContextTests(unittest.TestCase):
         self.assertEqual(after, before)
         self.assertNotIn("synthetic-sensitive-marker", json.dumps(after))
 
+    def test_explicit_cargo_home_does_not_require_a_user_home(self):
+        expected = self.context()
+        with mock.patch.object(Path, "home", side_effect=RuntimeError("No home")):
+            self.assertEqual(self.context(), expected)
+
+    def test_unavailable_home_disables_only_caching_when_no_cargo_home_is_given(self):
+        env = {key: value for key, value in self.env.items() if key != "CARGO_HOME"}
+        with mock.patch.object(Path, "home", side_effect=RuntimeError("No home")):
+            self.assertEqual(self.context(env), {"usable": "false"})
+
     def test_native_environment_changes_cannot_restore_previous_compiled_outputs(self):
         before = self.context()
         for name, value in {

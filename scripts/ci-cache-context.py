@@ -75,12 +75,18 @@ def cache_context(root, environment, tracked):
         name for name in tracked
         if name in DEPENDENCY_FILES or PurePosixPath(name).name == "Cargo.toml"
     }
+    try:
+        cargo_home = (
+            Path(env["CARGO_HOME"]) if env.get("CARGO_HOME") else Path.home() / ".cargo"
+        )
+    except RuntimeError:
+        return {"usable": "false"}
     native = {
         "image": [env["IMAGEOS"], env["IMAGEVERSION"]],
         "target": TARGET,
         "workspace": str(root.resolve()),
         "runnerWorkspace": env["GITHUB_WORKSPACE"],
-        "cargoHome": str(Path(env.get("CARGO_HOME", Path.home() / ".cargo")).resolve()),
+        "cargoHome": str(cargo_home.resolve()),
         "buildEnv": {name: value for name, value in env.items() if native_input(name)},
         "policy": file_digest(root, policy),
     }

@@ -5,11 +5,26 @@ import type {
   InputStrip,
   InputTelemetry,
   MixTelemetry,
+  TimingObservation,
+  TimingPhase,
+  TimingResetReason,
 } from "./generated";
 
 export const AUDIO_FRESH_MS = 1000;
 export const GATEWAY_FRESH_MS = 2500;
+export const LIMITER_WINDOW_MS = 10_000;
 const RECENT_MS = 60_000;
+/** Native u32 counters saturate here; a saturated counter can no longer show new events. */
+export const U32_MAX = 4_294_967_295;
+/**
+ * The correction controller is bounded to ±0.001 of nominal rate; ppm derived from the
+ * applied ratio in floating point can land a hair outside that bound.
+ */
+const MAX_ADJUSTMENT_PPM = 1000.001;
+/** Ten seconds of 48 kHz frames bounds any sane stage capacity. */
+const MAX_STAGE_FRAMES = 480_000;
+/** Opaque lifetime/mode tuple: printable ASCII, compared only for equality. */
+const EPOCH_FORMAT = /^[\x20-\x7e]{1,128}$/;
 export const fraction = (db: number | null) =>
   db === null ? 0 : Math.max(0, Math.min(1, (db + 60) / 60));
 
@@ -97,19 +112,28 @@ class RecentCounters {
   private previous: { drops: number; gaps: number; time: number } | null = null;
   private ready = false;
   private incompleteUntil = -Infinity;
+  /** A counter at its native maximum can no longer report increases. */
+  dropsSaturated = false;
+  gapsSaturated = false;
   reset() {
     this.times.fill(-Infinity);
     this.previous = null;
     this.ready = false;
     this.incompleteUntil = -Infinity;
+    this.dropsSaturated = this.gapsSaturated = false;
   }
   observe(drops: number, gaps: number, time: number) {
     if (
-      ![drops, gaps].every((value) => Number.isSafeInteger(value) && value >= 0)
+      ![drops, gaps].every(
+        (value) =>
+          Number.isSafeInteger(value) && value >= 0 && value <= U32_MAX,
+      )
     ) {
       this.reset();
       return;
     }
+    if (drops === U32_MAX) this.dropsSaturated = true;
+    if (gaps === U32_MAX) this.gapsSaturated = true;
     const previous = this.previous;
     if (
       previous &&
@@ -145,8 +169,205 @@ class RecentCounters {
         gaps += this.gaps[index] ?? 0;
       }
     }
-    return { drops, gaps };
+    return {
+      drops: this.dropsSaturated ? null : drops,
+      gaps: this.gapsSaturated ? null : gaps,
+    };
   }
+}
+
+/** Recent correction events from observed increases within one epoch. */
+export type RecentTiming =
+  | { restarts: number; gapMs: number; droppedMs: number }
+  | "limit";
+/**
+ * Native publishes at most ten observations a second, so a persistent problem yields 600
+ * events per 60 s window; 1024 slots keep that window complete. Faster reporting overflows
+ * and is shown as incomplete rather than as a smaller total.
+ */
+const RECENT_EVENTS = 1024;
+class RecentTimingWindow {
+  private readonly times = new Float64Array(RECENT_EVENTS).fill(-Infinity);
+  private readonly restarts = new Float64Array(RECENT_EVENTS);
+  private readonly gaps = new Float64Array(RECENT_EVENTS);
+  private readonly drops = new Float64Array(RECENT_EVENTS);
+  private next = 0;
+  private previous: {
+    restarts: number;
+    gaps: number;
+    drops: number;
+    time: number;
+  } | null = null;
+  private ready = false;
+  private saturated = false;
+  private incompleteUntil = -Infinity;
+  reset() {
+    this.times.fill(-Infinity);
+    this.previous = null;
+    this.ready = false;
+    this.saturated = false;
+    this.incompleteUntil = -Infinity;
+  }
+  observe(value: TimingObservation, time: number) {
+    const current = {
+      restarts: value.resyncCount,
+      gaps: value.gapOutputFrames,
+      drops: value.droppedInputFrames,
+      time,
+    };
+    // Native clamps u64 counters to the safe-integer limit; increases past it are invisible.
+    if (
+      [current.restarts, current.gaps, current.drops].some(
+        (count) => count === Number.MAX_SAFE_INTEGER,
+      )
+    )
+      this.saturated = true;
+    const previous = this.previous;
+    if (
+      previous &&
+      (current.restarts < previous.restarts ||
+        current.gaps < previous.gaps ||
+        current.drops < previous.drops ||
+        time - previous.time > AUDIO_FRESH_MS)
+    ) {
+      const saturated = this.saturated;
+      this.reset();
+      this.saturated =
+        saturated &&
+        [current.restarts, current.gaps, current.drops].some(
+          (count) => count === Number.MAX_SAFE_INTEGER,
+        );
+    } else if (previous) {
+      this.ready = true;
+      const restarts = current.restarts - previous.restarts;
+      const gaps = current.gaps - previous.gaps;
+      const drops = current.drops - previous.drops;
+      if (restarts || gaps || drops) {
+        this.incompleteUntil = Math.max(
+          this.incompleteUntil,
+          (this.times[this.next] ?? -Infinity) + RECENT_MS,
+        );
+        this.times[this.next] = time;
+        this.restarts[this.next] = restarts;
+        this.gaps[this.next] = gaps;
+        this.drops[this.next] = drops;
+        this.next = (this.next + 1) % this.times.length;
+      }
+    }
+    this.previous = current;
+  }
+  read(now: number): RecentTiming | null {
+    if (this.saturated) return "limit";
+    if (!this.ready || now < this.incompleteUntil) return null;
+    let restarts = 0;
+    let gaps = 0;
+    let drops = 0;
+    for (let index = 0; index < this.times.length; index++)
+      if ((this.times[index] ?? -Infinity) > now - RECENT_MS) {
+        restarts += this.restarts[index] ?? 0;
+        gaps += this.gaps[index] ?? 0;
+        drops += this.drops[index] ?? 0;
+      }
+    return { restarts, gapMs: gaps / 48, droppedMs: drops / 48 };
+  }
+}
+
+/** State facts and audio facts carry separate origins; neither renews the other. */
+interface TimingState {
+  epoch: string;
+  stateValue: TimingObservation | null;
+  audioValue: TimingObservation | null;
+  state: Observation;
+  audio: Observation;
+  reset: Observation;
+  recent: RecentTimingWindow;
+}
+export type SyncState = "running" | "priming" | "restarting" | "off" | "stale";
+export interface TimingView {
+  state: SyncState;
+  adjustmentPpm: number | null;
+  queuedMs: number | null;
+  targetMs: number | null;
+  recent: RecentTiming | null;
+  lastReset: { reason: TimingResetReason; ageMs: number } | null;
+  ageMs: number | null;
+}
+export interface LimiterView {
+  state: "none" | "stale" | "idle" | "reducing";
+  maxDb: number | null;
+}
+const PHASES: ReadonlySet<TimingPhase> = new Set(["off", "priming", "running"]);
+const REASONS: ReadonlySet<TimingResetReason> = new Set([
+  "discontinuity",
+  "stalled-input",
+  "paused-output",
+  "starved",
+  "overrun",
+]);
+const count = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const frames = (value: unknown, max: number) =>
+  value === null || (count(value) && (value as number) <= max);
+const stamp = (value: unknown) =>
+  value === null || (typeof value === "number" && Number.isFinite(value));
+export const validEpoch = (value: unknown) =>
+  typeof value === "string" && EPOCH_FORMAT.test(value) && value.trim() !== "";
+/** Rejects malformed observations instead of displaying any part of them. */
+export function validTiming(value: TimingObservation) {
+  const capacity = value.capacityFrames;
+  const ppm = value.appliedAdjustmentPpm;
+  return (
+    validEpoch(value.epoch) &&
+    PHASES.has(value.phase) &&
+    count(capacity) &&
+    capacity > 0 &&
+    capacity <= MAX_STAGE_FRAMES &&
+    frames(value.queuedFrames, capacity) &&
+    frames(value.targetFrames, capacity) &&
+    (ppm === null ||
+      (typeof ppm === "number" &&
+        Number.isFinite(ppm) &&
+        Math.abs(ppm) <= MAX_ADJUSTMENT_PPM)) &&
+    (value.phase !== "off" || ppm === null) &&
+    count(value.gapOutputFrames) &&
+    count(value.droppedInputFrames) &&
+    count(value.resyncCount) &&
+    (value.lastResetReason === null || REASONS.has(value.lastResetReason)) &&
+    (value.lastResetReason === null) === (value.lastResetAtMs === null) &&
+    stamp(value.lastResetAtMs) &&
+    stamp(value.stateObservedAtMs) &&
+    stamp(value.audioObservedAtMs)
+  );
+}
+/** Origins at or before the fence belong to a retired stage and can never be accepted. */
+function fenced(fence: number) {
+  const observation = new Observation();
+  observation.stamp = fence;
+  return observation;
+}
+const newTiming = (epoch: string, fence: number): TimingState => ({
+  epoch,
+  stateValue: null,
+  audioValue: null,
+  state: fenced(fence),
+  audio: fenced(fence),
+  reset: new Observation(),
+  recent: new RecentTimingWindow(),
+});
+interface TimingHolder {
+  timing: TimingState | null;
+  /** Latest origin seen for this identity before its stage was retired. */
+  timingFence: number;
+}
+const latestOrigin = (holder: TimingHolder) =>
+  Math.max(
+    holder.timingFence,
+    holder.timing?.state.stamp ?? -1,
+    holder.timing?.audio.stamp ?? -1,
+  );
+function retireTiming(holder: TimingHolder) {
+  holder.timingFence = latestOrigin(holder);
+  holder.timing = null;
 }
 
 export interface Network {
@@ -156,6 +377,8 @@ export interface Network {
   underruns: number | null;
   recentDrops: number | null;
   recentUnderruns: number | null;
+  dropsSaturated: boolean;
+  underrunsSaturated: boolean;
   ageMs: number | null;
   stale: boolean;
   pingStale: boolean;
@@ -169,6 +392,8 @@ const emptyNetwork = (): Network => ({
   underruns: null,
   recentDrops: null,
   recentUnderruns: null,
+  dropsSaturated: false,
+  underrunsSaturated: false,
   ageMs: null,
   stale: true,
   pingStale: false,
@@ -181,6 +406,8 @@ interface InputState {
   value: InputTelemetry | null;
   observed: Observation;
   lastLevel: number;
+  timing: TimingState | null;
+  timingFence: number;
 }
 interface DestinationState {
   active: boolean;
@@ -195,6 +422,8 @@ interface DestinationState {
   lastLevel: number;
   lastBuffer: number;
   lastPing: number;
+  timing: TimingState | null;
+  timingFence: number;
 }
 export class TelemetryStore {
   visible = true;
@@ -207,6 +436,10 @@ export class TelemetryStore {
   private peaks = new Map<string, { db: number; until: number }>();
   private unknown = emptyNetwork();
   private visibleListeners = new Set<() => void>();
+  private stageList: readonly string[] = [];
+  private stageListeners = new Set<() => void>();
+  private limiterRing = new Ring(160);
+  private limiterLatest: number | null = null;
   constructor(private now: () => number = () => performance.now()) {}
   setInputs(inputs: InputStrip[]) {
     const valid = new Set(inputs.map((input) => input.stripId));
@@ -223,14 +456,21 @@ export class TelemetryStore {
           value: null,
           observed,
           lastLevel: -Infinity,
+          timing: null,
+          // A repeated envelope must not attach the previous identity's stage.
+          timingFence: previous
+            ? Math.max(latestOrigin(previous), previous.observed.stamp)
+            : -1,
         });
       }
       const state = this.inputs.get(input.stripId);
       if (state) {
+        // Source mute is mix-only and keeps its timing; only leaving capture ends the stage.
         state.active = input.phase === "capturing";
         if (!state.active) {
           state.observed.valid = false;
           state.value = null;
+          retireTiming(state);
           this.peaks.delete(`src:${input.stripId}`);
         }
       }
@@ -241,6 +481,7 @@ export class TelemetryStore {
         this.histories.delete(`src:${id}`);
         this.peaks.delete(`src:${id}`);
       }
+    this.publishStages();
   }
   setDestinations(destinations: DestinationStrip[]) {
     const valid = new Set(
@@ -271,6 +512,10 @@ export class TelemetryStore {
           lastLevel: -Infinity,
           lastBuffer: -Infinity,
           lastPing: -Infinity,
+          timing: null,
+          timingFence: current
+            ? Math.max(latestOrigin(current), current.observed.stamp)
+            : -1,
         });
       }
       const state = this.outputs.get(destination.destinationId);
@@ -282,6 +527,7 @@ export class TelemetryStore {
           state.observed.valid = false;
           state.value = null;
           state.counters.reset();
+          retireTiming(state);
           this.peaks.delete(`dst:${destination.destinationId}`);
           state.gateway.valid = false;
         }
@@ -293,6 +539,7 @@ export class TelemetryStore {
         this.histories.delete(`dst:${id}`);
         this.peaks.delete(`dst:${id}`);
       }
+    this.publishStages();
   }
   resetHistory = () => {
     this.histories.clear();
@@ -303,7 +550,15 @@ export class TelemetryStore {
       output.network.buffer2m = new Ring(240);
       output.lastLevel = output.lastBuffer = output.lastPing = -Infinity;
       output.counters.reset();
+      output.timing?.recent.reset();
     }
+    for (const input of this.inputs.values()) input.timing?.recent.reset();
+    this.resetLimiter();
+  };
+  /** Forgets reductions from an earlier limiter mode; call when the setting changes. */
+  resetLimiter = () => {
+    this.limiterRing = new Ring(160);
+    this.limiterLatest = null;
   };
   setVisible(visible: boolean) {
     if (this.visible === visible) return;
@@ -355,24 +610,48 @@ export class TelemetryStore {
     const now = this.now();
     const visible =
       this.visible && !(typeof document !== "undefined" && document.hidden);
-    if (this.mix.update(value.mixObservedAtMs, value.clockMs, now))
+    if (this.mix.update(value.mixObservedAtMs, value.clockMs, now)) {
       this.mixClip = value.mixPreClip;
+      const reduction = value.limiterReductionDb;
+      const next =
+        typeof reduction === "number" &&
+        Number.isFinite(reduction) &&
+        reduction >= 0 &&
+        reduction <= 96
+          ? reduction
+          : null;
+      // A new processing period must not show reductions from before it began.
+      if (next !== null && this.limiterLatest === null)
+        this.limiterRing = new Ring(160);
+      this.limiterLatest = next;
+      if (next !== null)
+        this.limiterRing.push(next, now - (this.mix.age(now) ?? 0));
+    }
     const inputIds = new Set(value.inputs.map((v) => v.stripId));
     const outputIds = new Set(value.destinations.map((v) => v.destinationId));
     for (const [id, input] of this.inputs)
       if (newerEnvelope && !inputIds.has(id)) {
         input.observed.valid = false;
+        retireTiming(input);
         this.peaks.delete(`src:${id}`);
       }
     for (const [id, output] of this.outputs)
       if (newerEnvelope && !outputIds.has(id)) {
         output.observed.valid = output.gateway.valid = false;
         output.counters.reset();
+        retireTiming(output);
         this.peaks.delete(`dst:${id}`);
       }
     for (const measurement of value.inputs) {
       const input = this.inputs.get(measurement.stripId);
       if (!input) continue;
+      this.ingestTiming(
+        input,
+        input.active ? measurement.timing : undefined,
+        value.clockMs,
+        now,
+        newerEnvelope,
+      );
       const changed = input.observed.update(
         measurement.observedAtMs,
         value.clockMs,
@@ -395,7 +674,19 @@ export class TelemetryStore {
     }
     for (const measurement of value.destinations) {
       const output = this.outputs.get(measurement.destinationId);
-      if (!output || measurement.sessionId !== output.sessionId) continue;
+      if (!output) continue;
+      if (measurement.sessionId !== output.sessionId) {
+        // Another session's record says nothing current about this session's stage.
+        if (newerEnvelope) retireTiming(output);
+        continue;
+      }
+      this.ingestTiming(
+        output,
+        output.active ? measurement.timing : undefined,
+        value.clockMs,
+        now,
+        newerEnvelope,
+      );
       const changed = output.observed.update(
         measurement.observedAtMs,
         value.clockMs,
@@ -450,7 +741,160 @@ export class TelemetryStore {
         }
       }
     }
+    this.publishStages();
   }
+  /**
+   * Absent timing means no correction stage exists here; it is never shown as Off.
+   * Fields are accepted only together with their own origin, so a fresh state
+   * origin cannot renew stale audio facts and an older origin cannot replace newer facts.
+   */
+  private ingestTiming(
+    holder: TimingHolder,
+    timing: TimingObservation | undefined,
+    clock: number,
+    now: number,
+    newerEnvelope: boolean,
+  ) {
+    if (!timing) {
+      if (newerEnvelope) retireTiming(holder);
+      return;
+    }
+    const fence = latestOrigin(holder);
+    // Future origins are invalid and must never become a fence themselves.
+    const origin = (value: unknown) =>
+      typeof value === "number" && Number.isFinite(value) && value <= clock
+        ? value
+        : -1;
+    const newest = Math.max(
+      origin(timing.stateObservedAtMs),
+      origin(timing.audioObservedAtMs),
+    );
+    const epoch = validEpoch(timing.epoch) ? timing.epoch : "";
+    const current = holder.timing?.epoch === epoch ? holder.timing : null;
+    // A record no newer than everything already seen belongs to a retired stage or lifetime.
+    if (!current && newest <= fence) return;
+    if (!epoch || !validTiming(timing)) {
+      // Newer malformed data is listed as No recent data and cannot be revived by a
+      // repeat; an older malformed record cannot blank a valid current stage.
+      if (newest > fence) holder.timing = newTiming(epoch, newest);
+      return;
+    }
+    const state = current ?? newTiming(epoch, fence);
+    holder.timing = state;
+    const accepted = (observation: Observation, origin: number | null) => {
+      observation.update(origin, clock, now);
+      return (
+        origin !== null && observation.valid && observation.stamp === origin
+      );
+    };
+    if (accepted(state.state, timing.stateObservedAtMs)) {
+      state.stateValue = timing;
+      if (timing.lastResetAtMs === null) state.reset = new Observation();
+      else state.reset.update(timing.lastResetAtMs, clock, now);
+    }
+    const previousAudio = state.audio.stamp;
+    if (accepted(state.audio, timing.audioObservedAtMs)) {
+      state.audioValue = timing;
+      if (
+        state.audio.stamp !== previousAudio &&
+        state.audio.fresh(now, AUDIO_FRESH_MS)
+      )
+        state.recent.observe(timing, now - (state.audio.age(now) ?? 0));
+    }
+  }
+  private publishStages() {
+    const next: string[] = [];
+    for (const [id, input] of this.inputs)
+      if (input.timing) next.push(`src:${id}`);
+    for (const [id, output] of this.outputs)
+      if (output.timing) next.push(`dst:${id}`);
+    if (
+      next.length === this.stageList.length &&
+      next.every((key, index) => key === this.stageList[index])
+    )
+      return;
+    this.stageList = next;
+    for (const listener of this.stageListeners) listener();
+  }
+  /** Changes only when a correction stage appears or disappears. */
+  subscribeStages = (listener: () => void) => {
+    this.stageListeners.add(listener);
+    return () => this.stageListeners.delete(listener);
+  };
+  stages = () => this.stageList;
+  timing = (key: string): TimingView | null => {
+    const holder = key.startsWith("src:")
+      ? this.inputs.get(key.slice(4))
+      : key.startsWith("dst:")
+        ? this.outputs.get(key.slice(4))
+        : undefined;
+    const state = holder?.timing;
+    if (!state) return null;
+    const now = this.now();
+    const facts = state.stateValue;
+    const audio = state.audioValue;
+    const stateFresh = !!facts && state.state.fresh(now, AUDIO_FRESH_MS);
+    const audioFresh =
+      stateFresh && !!audio && state.audio.fresh(now, AUDIO_FRESH_MS);
+    const phase = facts?.phase;
+    const sync: SyncState = !stateFresh
+      ? "stale"
+      : phase === "off"
+        ? "off"
+        : phase === "running"
+          ? "running"
+          : facts?.lastResetReason
+            ? "restarting"
+            : "priming";
+    const correcting = sync !== "stale" && sync !== "off";
+    return {
+      state: sync,
+      adjustmentPpm:
+        audioFresh && correcting ? (audio?.appliedAdjustmentPpm ?? null) : null,
+      queuedMs:
+        audioFresh && audio?.queuedFrames != null
+          ? audio.queuedFrames / 48
+          : null,
+      targetMs:
+        correcting && facts?.targetFrames != null
+          ? facts.targetFrames / 48
+          : null,
+      recent: audioFresh ? state.recent.read(now) : null,
+      lastReset:
+        stateFresh &&
+        facts?.lastResetReason &&
+        state.reset.valid &&
+        state.reset.stamp === facts.lastResetAtMs
+          ? {
+              reason: facts.lastResetReason,
+              ageMs: state.reset.age(now) ?? 0,
+            }
+          : null,
+      // Age describes what the row shows: the state while it is stale, otherwise the
+      // audio facts. Only accepted facts have an origin; a fenced placeholder has none.
+      ageMs: !facts
+        ? null
+        : stateFresh && audio
+          ? state.audio.age(now)
+          : state.state.age(now),
+    };
+  };
+  limiter = (): LimiterView => {
+    const now = this.now();
+    if (this.limiterLatest === null) return { state: "none", maxDb: null };
+    if (!this.mix.fresh(now, AUDIO_FRESH_MS))
+      return { state: "stale", maxDb: null };
+    let max = 0;
+    for (let age = 0; age < this.limiterRing.buf.length; age++) {
+      const time = this.limiterRing.timeAt(age);
+      if (!Number.isFinite(time) || now - time > LIMITER_WINDOW_MS) continue;
+      const reduction = this.limiterRing.at(age);
+      if (Number.isFinite(reduction)) max = Math.max(max, reduction);
+    }
+    return max >= 0.1
+      ? { state: "reducing", maxDb: max }
+      : { state: "idle", maxDb: 0 };
+  };
   history = (key: string) => this.histories.get(key);
   read = (key: string) => {
     const source = key.startsWith("src:")
@@ -500,6 +944,12 @@ export class TelemetryStore {
       underruns: output.value?.underrunFrames ?? null,
       recentDrops: recent?.drops ?? null,
       recentUnderruns: recent?.gaps ?? null,
+      dropsSaturated:
+        output.counters.dropsSaturated ||
+        output.value?.droppedFrames === U32_MAX,
+      underrunsSaturated:
+        output.counters.gapsSaturated ||
+        output.value?.underrunFrames === U32_MAX,
       ageMs: output.observed.age(now),
       stale: !fresh,
     });
@@ -514,6 +964,8 @@ export class TelemetryStore {
     this.histories.clear();
     this.peaks.clear();
     this.unknown = emptyNetwork();
+    this.resetLimiter();
+    this.publishStages();
   }
 }
 const Context = createContext<TelemetryStore | null>(null);

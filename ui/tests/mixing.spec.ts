@@ -373,7 +373,13 @@ test("settings use native persisted commands for meters restore and tray", async
   expect(sent.filter((c) => c.type === "set-settings")).toHaveLength(3);
   expect(sent.at(-1)).toEqual({
     type: "set-settings",
-    settings: { meterStyle: "history", restoreSetup: false, keepInTray: false },
+    settings: {
+      meterStyle: "history",
+      restoreSetup: false,
+      keepInTray: false,
+      driftCorrection: true,
+      mixLimiter: false,
+    },
   });
   await page.keyboard.press("Escape");
   await expect(page.locator(".source-card .cf")).toHaveAttribute(
@@ -673,7 +679,7 @@ test("native summed overload remains visible after destination attenuation", asy
     .toBe("");
   await expect(page.locator(".dest-card .meter-clip")).toHaveAttribute(
     "title",
-    "Mix clipped before destination volume",
+    "The combined sound is too loud. Lower a source.",
   );
   await expect
     .poll(() =>

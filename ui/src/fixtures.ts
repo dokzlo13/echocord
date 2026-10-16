@@ -3,8 +3,11 @@ import type { Transport } from "./adapter";
 import type {
   ControlCommand,
   ControlSnapshot,
+  DestinationTelemetry,
+  InputTelemetry,
   MixTelemetry,
   ServerReservation,
+  TimingObservation,
 } from "./generated";
 
 function selectedReservations(
@@ -44,6 +47,10 @@ export const fixtureNames = [
   "outputs",
   "rooms",
   "rooms-restored",
+  "audio-processing",
+  "audio-processing-off",
+  "audio-processing-stale",
+  "audio-processing-empty",
 ] as const;
 export type FixtureName = (typeof fixtureNames)[number];
 export function fixtureSnapshot(
@@ -226,6 +233,7 @@ export function fixtureSnapshot(
     droppedFrames: 0,
     underrunFrames: 0,
     gatewayPingMs: null,
+    limiterReductionDb: null,
   };
   const snapshot: ControlSnapshot = {
     preferencesSaving: false,
@@ -291,7 +299,13 @@ export function fixtureSnapshot(
               muted: name === "muted",
             },
           ],
-    settings: { meterStyle: "simple", restoreSetup: true, keepInTray: true },
+    settings: {
+      meterStyle: "simple",
+      restoreSetup: true,
+      keepInTray: true,
+      driftCorrection: true,
+      mixLimiter: false,
+    },
     telemetry,
     selection: {
       sourceId: inputs[0]?.sourceId ?? null,
@@ -422,11 +436,128 @@ export function fixtureSnapshot(
       gatewayPingMs: d.kind === "discord" ? 38 : null,
     }));
   }
+  if (name.startsWith("audio-processing")) audioProcessing(snapshot, name);
   snapshot.serverReservations = selectedReservations(snapshot.destinations);
   if (name === "rooms") snapshot.gateway.phase = "connected";
   snapshot.telemetry = freshTelemetry(snapshot.telemetry);
   return snapshot;
 }
+/** Owned scenario: three capturing sources, one Discord room and two playback devices. */
+function audioProcessing(snapshot: ControlSnapshot, name: FixtureName) {
+  const idle = name === "audio-processing-empty";
+  const strips = [
+    ["strip:1", "app:player:1", "Preview player", "application", -3],
+    ["strip:2", "app:browser:2", "Preview browser", "application", 0],
+    ["strip:3", "rec:cable", "Preview recording input", "recording", -6],
+  ] as const;
+  snapshot.inputs = strips.map(
+    ([stripId, sourceId, displayName, kind, gainDb], colourSlot) => ({
+      stripId,
+      sourceId,
+      kind,
+      displayName,
+      detail:
+        snapshot.sources.find((source) => source.id === sourceId)?.detail ??
+        null,
+      phase: idle ? "stopped" : "capturing",
+      gainDb,
+      muted: false,
+      colourSlot,
+      restored: false,
+      fault: null,
+    }),
+  );
+  const connection = idle
+    ? ({ phase: "disconnected" } as const)
+    : ({ phase: "connected" } as const);
+  snapshot.connection = connection;
+  snapshot.gateway.phase = idle ? "disconnected" : "connected";
+  const output = (
+    destinationId: string,
+    deviceId: string,
+    displayName: string,
+    live: boolean,
+    volumeDb: number,
+  ): ControlSnapshot["destinations"][number] => ({
+    destinationId,
+    kind: "playback",
+    deviceId,
+    displayName,
+    sessionId: 1,
+    serverId: "",
+    channelId: "",
+    connection: live ? connection : { phase: "disconnected" },
+    volumeDb,
+    muted: false,
+  });
+  snapshot.destinations = [
+    {
+      destinationId: "dest:1",
+      kind: "discord",
+      deviceId: null,
+      displayName: null,
+      sessionId: 1,
+      serverId: "guild:1",
+      channelId: "room:1",
+      connection,
+      volumeDb: -6,
+      muted: false,
+    },
+    output("local:1", "play:headphones", "Preview headphones", true, 0),
+    output("local:2", "play:speakers", "Preview speakers", false, -12),
+  ];
+  snapshot.settings = {
+    ...snapshot.settings,
+    driftCorrection: name !== "audio-processing-off",
+    mixLimiter: name === "audio-processing-off",
+  };
+  snapshot.telemetry.inputs = snapshot.inputs.map((input) => ({
+    stripId: input.stripId,
+    observedAtMs: null,
+    levelDbfs: input.phase === "capturing" ? -18 : null,
+    preClip: false,
+    queuedFrames: 0,
+    droppedFrames: 0,
+    underrunFrames: 0,
+  }));
+  snapshot.telemetry.destinations = snapshot.destinations.map((d) => ({
+    destinationId: d.destinationId,
+    observedAtMs: null,
+    gatewayObservedAtMs: null,
+    sessionId: d.sessionId,
+    levelDbfs: d.connection.phase === "connected" ? -20 : null,
+    queuedFrames: d.connection.phase === "connected" ? 720 : 0,
+    droppedFrames: 0,
+    underrunFrames: 0,
+    gatewayPingMs:
+      d.kind === "discord" && d.connection.phase === "connected" ? 38 : null,
+  }));
+  snapshot.telemetry.outputLevelDbfs = idle ? null : -20;
+}
+
+/** Illustrative per-stage values for the owned scenario only; never product measurements. */
+const SIMULATED_STAGE: Record<string, { ppm: number; target: number }> = {
+  "src:strip:1": { ppm: 12.4, target: 720 },
+  "src:strip:2": { ppm: -3.1, target: 720 },
+  "src:strip:3": { ppm: 41.7, target: 960 },
+  "dst:local:1": { ppm: 8.3, target: 720 },
+  "dst:local:2": { ppm: -18.6, target: 720 },
+};
+interface SimulatedStage {
+  epoch: string;
+  mode: string;
+  startedAt: number;
+  measured: boolean;
+  ppm: number;
+  queued: number;
+  restarts: number;
+  gaps: number;
+  lastResetAt: number | null;
+  primingUntil: number;
+  nextRestart: number;
+  frozen: TimingObservation | null;
+}
+
 /** Explicit synthetic observations. Control-only emits intentionally retain sample origins. */
 export function freshTelemetry(
   value: MixTelemetry,
@@ -461,6 +592,105 @@ export class FixtureTransport implements Transport {
   dragged = 0;
   private nextDestination = 0;
   private sampleTimer: ReturnType<typeof setInterval> | undefined;
+  private simulateStages = false;
+  private staleStage: string | null = null;
+  private stages = new Map<string, SimulatedStage>();
+  private lifetimes = 0;
+  /**
+   * Owned audio-processing scenarios only. A new epoch starts when a stage begins, when
+   * correction is toggled and when a destination mute resets the playback stage; a source
+   * mute and the limiter toggle keep the stage. The recording input restarts every 25 s.
+   */
+  private simulateTiming(
+    key: string,
+    active: boolean,
+    reset: string,
+    now: number,
+  ): TimingObservation | undefined {
+    if (!active) {
+      this.stages.delete(key);
+      return undefined;
+    }
+    const enabled = this.current.settings.driftCorrection;
+    const mode = `${enabled ? "on" : "off"}:${reset}`;
+    const base = SIMULATED_STAGE[key] ?? { ppm: 5, target: 720 };
+    let stage = this.stages.get(key);
+    if (!stage || stage.mode !== mode) {
+      stage = {
+        epoch: `fixture:${++this.lifetimes}:${mode}`,
+        mode,
+        startedAt: now,
+        measured: false,
+        ppm: stage?.ppm ?? 0,
+        queued: 0,
+        restarts: 0,
+        gaps: 0,
+        lastResetAt: null,
+        primingUntil: now + 1400,
+        nextRestart:
+          key === "src:strip:3" ? now + 9000 : Number.POSITIVE_INFINITY,
+        frozen: null,
+      };
+      this.stages.set(key, stage);
+    }
+    if (stage.frozen) return stage.frozen;
+    const common = {
+      epoch: stage.epoch,
+      capacityFrames: 4096,
+      droppedInputFrames: 0,
+      gapOutputFrames: stage.gaps,
+      resyncCount: stage.restarts,
+      lastResetReason:
+        stage.lastResetAt === null ? null : ("stalled-input" as const),
+      lastResetAtMs: stage.lastResetAt,
+      stateObservedAtMs: now,
+      audioObservedAtMs: now,
+    };
+    let observation: TimingObservation;
+    if (!enabled) {
+      observation = {
+        ...common,
+        phase: "off",
+        appliedAdjustmentPpm: null,
+        // Uncorrected queues wander; illustrative only.
+        queuedFrames: Math.round(
+          base.target + 360 * Math.sin((now - stage.startedAt) / 9000),
+        ),
+        targetFrames: null,
+      };
+    } else {
+      if (now >= stage.nextRestart) {
+        stage.restarts++;
+        stage.gaps += 480;
+        stage.lastResetAt = now;
+        stage.primingUntil = now + 900;
+        stage.queued = 0;
+        stage.nextRestart = now + 25_000;
+      }
+      const priming = now < stage.primingUntil;
+      if (priming)
+        stage.queued = Math.min(base.target, stage.queued + base.target / 12);
+      else {
+        stage.measured = true;
+        stage.queued = base.target + Math.round(30 * Math.sin(now / 1700));
+        stage.ppm += (base.ppm - stage.ppm) * 0.08;
+      }
+      observation = {
+        ...common,
+        lastResetReason:
+          stage.lastResetAt === null ? null : ("stalled-input" as const),
+        phase: priming ? "priming" : "running",
+        appliedAdjustmentPpm: stage.measured
+          ? stage.ppm + 0.2 * Math.sin(now / 2300)
+          : null,
+        queuedFrames: Math.round(stage.queued),
+        targetFrames: base.target,
+      };
+    }
+    if (key === this.staleStage && now - stage.startedAt > 2500)
+      stage.frozen = observation;
+    return observation;
+  }
   private telemetryListeners = new Set<(value: MixTelemetry) => void>();
   listenTelemetry = async (listener: (value: MixTelemetry) => void) => {
     this.telemetryListeners.add(listener);
@@ -480,7 +710,7 @@ export class FixtureTransport implements Transport {
     this.sampleTimer = setInterval(() => {
       const prior = this.current.telemetry;
       const now = performance.now();
-      const inputs = this.current.inputs.map((input) => {
+      const inputs: InputTelemetry[] = this.current.inputs.map((input) => {
         const previous = prior.inputs.find((v) => v.stripId === input.stripId);
         return {
           stripId: input.stripId,
@@ -493,32 +723,81 @@ export class FixtureTransport implements Transport {
           underrunFrames: previous?.underrunFrames ?? 0,
         };
       });
-      const destinations = this.current.destinations.map((destination) => {
-        const previous = prior.destinations.find(
-          (v) =>
-            v.destinationId === destination.destinationId &&
-            v.sessionId === destination.sessionId,
-        );
-        const active =
-          destination.connection.phase === "connected" ||
-          destination.connection.phase === "recovering";
-        return {
-          destinationId: destination.destinationId,
-          sessionId: destination.sessionId,
-          observedAtMs: null,
-          gatewayObservedAtMs: previous?.gatewayObservedAtMs ?? null,
-          levelDbfs: active
-            ? destination.muted
-              ? -96
-              : (previous?.levelDbfs ?? -24)
-            : null,
-          queuedFrames: active ? (previous?.queuedFrames ?? 480) : 0,
-          droppedFrames: previous?.droppedFrames ?? 0,
-          underrunFrames: previous?.underrunFrames ?? 0,
-          gatewayPingMs: previous?.gatewayPingMs ?? null,
-        };
-      });
-      const sample = freshTelemetry({ ...prior, inputs, destinations }, now);
+      const destinations: DestinationTelemetry[] =
+        this.current.destinations.map((destination) => {
+          const previous = prior.destinations.find(
+            (v) =>
+              v.destinationId === destination.destinationId &&
+              v.sessionId === destination.sessionId,
+          );
+          const active =
+            destination.connection.phase === "connected" ||
+            destination.connection.phase === "recovering";
+          return {
+            destinationId: destination.destinationId,
+            sessionId: destination.sessionId,
+            observedAtMs: null,
+            gatewayObservedAtMs: previous?.gatewayObservedAtMs ?? null,
+            levelDbfs: active
+              ? destination.muted
+                ? -96
+                : (previous?.levelDbfs ?? -24)
+              : null,
+            queuedFrames: active ? (previous?.queuedFrames ?? 480) : 0,
+            droppedFrames: previous?.droppedFrames ?? 0,
+            underrunFrames: previous?.underrunFrames ?? 0,
+            gatewayPingMs: previous?.gatewayPingMs ?? null,
+          };
+        });
+      let mixPreClip = prior.mixPreClip;
+      let limiterReductionDb: number | null = null;
+      if (this.simulateStages) {
+        for (const [index, input] of inputs.entries()) {
+          const strip = this.current.inputs.find(
+            (s) => s.stripId === input.stripId,
+          );
+          const timing = this.simulateTiming(
+            `src:${input.stripId}`,
+            strip?.phase === "capturing",
+            "",
+            now,
+          );
+          if (timing) inputs[index] = { ...input, timing };
+        }
+        for (const [index, output] of destinations.entries()) {
+          const strip = this.current.destinations.find(
+            (d) => d.destinationId === output.destinationId,
+          );
+          const timing = this.simulateTiming(
+            `dst:${output.destinationId}`,
+            strip?.kind === "playback" &&
+              strip.connection.phase === "connected",
+            strip?.muted ? "muted" : "",
+            now,
+          );
+          // The playback tile and the timing stage read the same backend queue.
+          if (timing)
+            destinations[index] = {
+              ...output,
+              queuedFrames: timing.queuedFrames ?? output.queuedFrames,
+              timing,
+            };
+        }
+        // Illustrative overload every 12 s; the indicator reads the sum before limiting.
+        const loud =
+          this.current.inputs.some((s) => s.phase === "capturing") &&
+          now % 12_000 > 3000 &&
+          now % 12_000 < 4600;
+        mixPreClip = loud;
+        if (this.current.settings.mixLimiter)
+          limiterReductionDb = loud
+            ? 1.4 + Math.abs(Math.sin(now / 300)) * 0.9
+            : 0;
+      }
+      const sample = freshTelemetry(
+        { ...prior, inputs, destinations, mixPreClip, limiterReductionDb },
+        now,
+      );
       sample.destinations = sample.destinations.map((v) => {
         const previous = prior.destinations.find(
           (p) =>
@@ -542,6 +821,8 @@ export class FixtureTransport implements Transport {
   private visibility = new Set<(v: boolean) => void>();
   constructor(name: FixtureName = "disconnected") {
     this.current = fixtureSnapshot(name);
+    this.simulateStages = name.startsWith("audio-processing");
+    this.staleStage = name === "audio-processing-stale" ? "src:strip:2" : null;
   }
   listen = async (f: (s: ControlSnapshot) => void) => {
     this.listeners.add(f);

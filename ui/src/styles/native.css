@@ -346,6 +346,27 @@ body {
   border-top: 0;
   padding-top: 10px;
 }
+/* Focus scrolling keeps the 2px ring and offset clear of the sheet header and footer. */
+.sheet-body :is(input, button, summary, a) {
+  scroll-margin-block: 12px;
+}
+/* A rejected Settings change sits in the stable footer, above any save warning. */
+.sheet-foot:has(> .settings-error) {
+  flex-direction: column;
+  align-items: stretch;
+}
+.settings-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--fault);
+  font-size: 13px;
+}
+.settings-error svg {
+  flex: none;
+  margin-top: 1px;
+}
 
 /* Faults retain the ordinary controls and add their recovery message below. */
 .source-card.row:has(.fault-row) {
@@ -497,4 +518,192 @@ body {
   .window:has(.dst-slot[data-many] .slip) .src-slot .empty > .btn {
     flex: none;
   }
+}
+
+/* ---------- audio processing ---------- */
+/* Settings › Advanced › Audio processing: a disclosure inside one panel. */
+.set-advanced {
+  border-radius: var(--r-card);
+  background: var(--panel);
+}
+.set-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: var(--r-card);
+  list-style: none;
+  cursor: pointer;
+}
+.set-summary::-webkit-details-marker {
+  display: none;
+}
+.set-summary:hover {
+  background: var(--panel-hi);
+}
+.set-advanced[open] > .set-summary {
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+}
+/* A disclosure points down/up; right-pointing chevrons mean navigation in Settings. */
+.set-chevron {
+  flex: none;
+  color: var(--ink-3);
+  transform: rotate(90deg);
+  transition: transform 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.set-advanced[open] .set-chevron {
+  transform: rotate(-90deg);
+}
+.set-advanced-body {
+  display: grid;
+  border-top: 1px solid var(--line);
+}
+.set-advanced-body > * + * {
+  border-top: 1px solid var(--line);
+}
+.set-advanced-body .switch-row,
+.set-advanced-body > .set-link {
+  border-radius: 0;
+  background: transparent;
+}
+.set-advanced-body > .set-link:hover {
+  background: var(--panel-hi);
+}
+.switch-block > .switch-row:has(+ .set-live:not([hidden])) {
+  padding-bottom: 6px;
+}
+.set-live {
+  margin: 0;
+  padding: 0 64px 12px 12px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+}
+.set-live[data-state="reducing"] {
+  color: var(--standby);
+}
+.set-footnote {
+  margin: 0;
+  padding: 10px 12px 12px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+
+/* Sync details: read-only correction stages and limiter status. */
+.sync-intro {
+  max-width: 72ch;
+}
+.sync-summary {
+  padding: 10px 12px;
+  border-radius: var(--r-card);
+  background: var(--panel);
+}
+.sync-summary dd {
+  white-space: normal;
+}
+@container win (min-width: 700px) {
+  .sync-summary {
+    grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 2fr);
+  }
+}
+.sync-banner {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.sync-empty {
+  margin: 0;
+  padding: 16px 12px;
+  border-radius: var(--r-card);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 13px;
+}
+.sync-columns {
+  display: grid;
+  gap: 14px;
+}
+@container win (min-width: 700px) {
+  .sync-columns:has(> .sync-section + .sync-section) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
+}
+.sync-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.sync-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sync-row {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: var(--r-card);
+  background: var(--panel);
+}
+.sync-row-head {
+  --icon: 30px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.sync-name {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  font: inherit;
+}
+.sync-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-label);
+  font-size: var(--name-size);
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.sync-tag[data-sync="running"] {
+  color: var(--ok);
+}
+.sync-tag[data-sync="priming"],
+.sync-tag[data-sync="resyncing"] {
+  color: var(--standby);
+}
+.sync-tag[data-sync="off"],
+.sync-tag[data-sync="stale"] {
+  color: var(--ink-3);
+}
+.sync-facts {
+  gap: 5px 14px;
+  font-size: 12.5px;
+}
+/* A row with no current facts collapses to its heading. */
+.sync-facts:not(:has(> dd:not([hidden]))) {
+  display: none;
+}
+.sync-facts dd {
+  white-space: normal;
+}
+.sync-facts dd[data-warn] {
+  color: var(--fault);
+}
+.sync-notes {
+  display: grid;
+  gap: 4px;
 }

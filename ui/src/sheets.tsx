@@ -9,11 +9,26 @@ import {
   LoaderCircle,
   RotateCw,
   Search,
+  TriangleAlert,
   Volume2,
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { NetChart, OnAirTime, StatTiles } from "./cards";
-import { destinationStatusLabel, GATEWAY_STATUS, statusKey } from "./copy";
+import {
+  AUDIO_PROCESSING,
+  audioProcessingSummary,
+  COUNT_LIMIT,
+  destinationStatusLabel,
+  GATEWAY_STATUS,
+  statusKey,
+} from "./copy";
 import type {
   AppError,
   AppSettings,
@@ -34,6 +49,7 @@ import type {
   SourceCard,
 } from "./model";
 import { SaveStatus } from "./SaveStatus";
+import { LimiterLine, PlaybackSyncFacts, SyncLinkSummary } from "./syncView";
 import { paint, useTelemetryStore } from "./telemetry";
 
 export function Sheet({
@@ -1197,6 +1213,8 @@ export function Settings({
   onLicenses,
   focusLicenses,
   focusSave,
+  onSyncDetails,
+  focusSyncDetails,
   saveWarning,
   saving,
   onRetrySave,
@@ -1213,11 +1231,23 @@ export function Settings({
   onLicenses: () => void;
   focusLicenses: boolean;
   focusSave: boolean;
+  onSyncDetails: () => void;
+  focusSyncDetails: boolean;
   saveWarning: AppError | undefined;
   saving: boolean;
   onRetrySave: () => void;
   onClose: () => void;
 }) {
+  // A taller footer shrinks the scrolling body; keep the focused control visible.
+  useEffect(() => {
+    if (!error && !saveWarning) return;
+    const frame = requestAnimationFrame(() => {
+      const focused = document.activeElement;
+      if (focused instanceof HTMLElement && focused.closest(".sheet-body"))
+        focused.scrollIntoView({ block: "nearest" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [error, saveWarning]);
   return (
     <Sheet
       title="Settings"
@@ -1225,21 +1255,33 @@ export function Settings({
       initialFocus={
         focusLicenses
           ? ".license-open"
-          : focusSave && saveWarning
-            ? ".save-retry"
-            : undefined
+          : focusSyncDetails
+            ? ".sync-open"
+            : focusSave && saveWarning
+              ? ".save-retry"
+              : undefined
       }
       footer={
-        saveWarning && (
-          <SaveStatus warning={saveWarning} busy={saving} retry={onRetrySave} />
+        (error || saveWarning) && (
+          <>
+            {/* The stable footer keeps a rejected change visible wherever the control was. */}
+            {error && (
+              <p className="settings-error" role="alert">
+                <TriangleAlert size={16} aria-hidden />
+                <span>Setting change failed. {error}</span>
+              </p>
+            )}
+            {saveWarning && (
+              <SaveStatus
+                warning={saveWarning}
+                busy={saving}
+                retry={onRetrySave}
+              />
+            )}
+          </>
         )
       }
     >
-      {error && (
-        <p className="field-error" role="alert">
-          {error}
-        </p>
-      )}
       <section className="set-group">
         <h3 className="set-title">Meters</h3>
         <div className="set-row">
@@ -1328,6 +1370,12 @@ export function Settings({
           <ChevronRight size={18} aria-hidden />
         </button>
       </section>
+      <AudioProcessing
+        settings={settings}
+        onSettings={onSettings}
+        onSyncDetails={onSyncDetails}
+        initiallyOpen={focusSyncDetails}
+      />
       <div className="about settings-about">
         <span className="tabular">Echocord {import.meta.env.APP_VERSION}</span>
         <button
@@ -1339,6 +1387,109 @@ export function Settings({
         </button>
       </div>
     </Sheet>
+  );
+}
+
+/** Rarely needed audio processing, collapsed under Advanced. */
+function AudioProcessing({
+  settings,
+  onSettings,
+  onSyncDetails,
+  initiallyOpen,
+}: {
+  settings: AppSettings;
+  onSettings: (s: AppSettings) => void;
+  onSyncDetails: () => void;
+  initiallyOpen: boolean;
+}) {
+  const [open, setOpen] = useState(initiallyOpen);
+  const ref = useRef<HTMLDetailsElement>(null);
+  const footnote = useId();
+  const toggle = (name: "driftCorrection" | "mixLimiter", on: boolean) =>
+    onSettings({ ...settings, [name]: on });
+  return (
+    <section className="set-group">
+      <h3 className="set-title">{AUDIO_PROCESSING.group}</h3>
+      <details
+        ref={ref}
+        className="set-advanced"
+        open={open}
+        onToggle={(e) => {
+          const next = e.currentTarget.open;
+          setOpen(next);
+          if (next)
+            requestAnimationFrame(() =>
+              ref.current?.scrollIntoView({ block: "nearest" }),
+            );
+        }}
+      >
+        <summary className="set-summary">
+          <span className="set-text">
+            <span className="set-name">{AUDIO_PROCESSING.section}</span>
+            <span className="set-sub">
+              {audioProcessingSummary(
+                settings.driftCorrection,
+                settings.mixLimiter,
+              )}
+            </span>
+          </span>
+          <ChevronRight className="set-chevron" size={18} aria-hidden />
+        </summary>
+        <div className="set-advanced-body">
+          <label className="switch-row">
+            <span className="set-text">
+              <span className="set-name">{AUDIO_PROCESSING.sync.name}</span>
+              <span className="set-sub">{AUDIO_PROCESSING.sync.sub}</span>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              className="switch"
+              checked={settings.driftCorrection}
+              aria-checked={settings.driftCorrection}
+              aria-describedby={footnote}
+              onChange={(e) =>
+                toggle("driftCorrection", e.currentTarget.checked)
+              }
+            />
+          </label>
+          <div className="switch-block">
+            <label className="switch-row">
+              <span className="set-text">
+                <span className="set-name">
+                  {AUDIO_PROCESSING.limiter.name}
+                </span>
+                <span className="set-sub">{AUDIO_PROCESSING.limiter.sub}</span>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                className="switch"
+                checked={settings.mixLimiter}
+                aria-checked={settings.mixLimiter}
+                aria-describedby={footnote}
+                onChange={(e) => toggle("mixLimiter", e.currentTarget.checked)}
+              />
+            </label>
+            <LimiterLine enabled={settings.mixLimiter} />
+          </div>
+          <button
+            type="button"
+            className="set-row set-link sync-open"
+            onClick={onSyncDetails}
+          >
+            <span className="set-text">
+              <span className="set-name">{AUDIO_PROCESSING.details}</span>
+              <SyncLinkSummary enabled={settings.driftCorrection} />
+            </span>
+            <ChevronRight size={18} aria-hidden />
+          </button>
+          <p className="set-footnote" id={footnote}>
+            {AUDIO_PROCESSING.footnote}
+          </p>
+        </div>
+      </details>
+    </section>
   );
 }
 
@@ -1529,13 +1680,21 @@ export function ConnectionSheet({
         store,
         () => {
           const n = store.net(dest.uid);
+          // A saturated native counter is a lower bound and cannot report new events.
           if (underruns.current)
-            underruns.current.textContent = `${n.underruns ?? "Unavailable"}`;
+            underruns.current.textContent =
+              n.underruns === null
+                ? "Unavailable"
+                : `${n.underruns}${n.underrunsSaturated ? " or more" : ""}`;
           if (drops.current)
-            drops.current.textContent = `${n.drops ?? "Unavailable"}`;
+            drops.current.textContent =
+              n.drops === null
+                ? "Unavailable"
+                : `${n.drops}${n.dropsSaturated ? " or more" : ""}`;
           if (recentGaps.current)
-            recentGaps.current.textContent =
-              n.recentUnderruns === null
+            recentGaps.current.textContent = n.underrunsSaturated
+              ? COUNT_LIMIT
+              : n.recentUnderruns === null
                 ? "No recent data"
                 : `${Math.ceil(n.recentUnderruns / 48)} ms`;
           if (age.current)
@@ -1583,6 +1742,7 @@ export function ConnectionSheet({
         <dd ref={drops}>Unavailable</dd>
         <dt>Underrun frames since start</dt>
         <dd ref={underruns}>Unavailable</dd>
+        {local && <PlaybackSyncFacts stageKey={`dst:${dest.uid}`} />}
         <dt>Audio</dt>
         <dd>{local ? "Native mix · 48 kHz stereo" : "Opus · 48 kHz stereo"}</dd>
       </dl>

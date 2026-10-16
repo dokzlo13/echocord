@@ -12,7 +12,13 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { destinationStatusLabel, STAGES, stageLine, statusKey } from "./copy";
+import {
+  destinationStatusLabel,
+  mixOverloadTitle,
+  STAGES,
+  stageLine,
+  statusKey,
+} from "./copy";
 import { HelpLink } from "./helpLinks";
 import { ServerTile, SourceGlyph } from "./icons";
 import type {
@@ -249,6 +255,7 @@ function ChannelFader({
   muted,
   idle,
   readout,
+  clipTitle,
 }: {
   levelKey: string;
   mode: MeterMode;
@@ -259,6 +266,7 @@ function ChannelFader({
   muted?: boolean | undefined;
   idle?: string | undefined;
   readout: React.RefObject<HTMLSpanElement | null>;
+  clipTitle?: string | undefined;
 }) {
   const [draft, setDraft] = useState<number | null | undefined>(undefined);
   const sequence = useRef(0);
@@ -296,11 +304,7 @@ function ChannelFader({
           </span>
           <span
             className="meter-clip"
-            title={
-              levelKey.startsWith("src:")
-                ? "Input clipped before gain"
-                : "Mix clipped before destination volume"
-            }
+            title={clipTitle ?? "Input clipped before gain"}
           />
           {mode === "simple" && (
             <span className="meter-scale">
@@ -1203,6 +1207,7 @@ export function DestCard({
   sourcesCapturing,
   botReady,
   botName,
+  limiterOn = false,
   h,
 }: {
   card: Dest;
@@ -1213,6 +1218,7 @@ export function DestCard({
   sourcesCapturing: number;
   botReady: boolean;
   botName: string;
+  limiterOn?: boolean | undefined;
   h: DestHandlers;
 }) {
   const server = card.server;
@@ -1586,6 +1592,7 @@ export function DestCard({
                   : "Not sending"
             }
             readout={readout}
+            clipTitle={mixOverloadTitle(limiterOn)}
           />
         </div>
       )}

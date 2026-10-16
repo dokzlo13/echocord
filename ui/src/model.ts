@@ -89,8 +89,14 @@ export type Sheet =
   | { kind: "source"; replaceUid?: string | undefined }
   | { kind: "room"; replaceUid?: string | undefined }
   | { kind: "bot"; next?: "room" }
-  | { kind: "settings"; focusLicenses?: boolean; focusSave?: boolean }
+  | {
+      kind: "settings";
+      focusLicenses?: boolean;
+      focusSave?: boolean;
+      focusSyncDetails?: boolean;
+    }
   | { kind: "licenses" }
+  | { kind: "sync-details" }
   | { kind: "bot-info" }
   | { kind: "net"; uid: string };
 export function catalogSource(s: RecordingSource): CatalogSource {

@@ -27,6 +27,7 @@ import {
   serverView,
 } from "./model";
 import { SaveStatus } from "./SaveStatus";
+import { SyncDetails } from "./SyncDetails";
 import {
   BotAvatar,
   BotInfo,
@@ -394,6 +395,10 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const bot = snapshot?.bot.status ?? "unconfigured";
   const botName = snapshot?.bot.name ?? "Discord bot";
   const mode = snapshot?.settings.meterStyle ?? "simple";
+  const limiterOn = snapshot?.settings.mixLimiter ?? false;
+  // A limiter mode change starts a new observation period for its readouts.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the mode changes.
+  useEffect(() => adapter.telemetry.resetLimiter(), [adapter, limiterOn]);
   const addDestination = () => open({ kind: "room" });
   const replacingSource =
     sheet?.kind === "source"
@@ -558,19 +563,29 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               </button>
             </div>
           )}
-          {view.commandError && !targetedError && (
-            <div className="app-error" role="alert">
-              <span>{view.commandError.message}</span>
-              <button
-                type="button"
-                className="icon-btn"
-                aria-label="Dismiss error"
-                onClick={() => adapter.dismissError()}
-              >
-                <X size={16} />
-              </button>
-            </div>
-          )}
+          {/* While Settings is open its footer presents rejected changes instead. */}
+          {view.commandError &&
+            !targetedError &&
+            !(
+              sheet?.kind === "settings" &&
+              failedCommand?.type === "set-settings"
+            ) && (
+              <div className="app-error" role="alert">
+                <span>
+                  {failedCommand?.type === "set-settings"
+                    ? `Setting change failed. ${view.commandError.message}`
+                    : view.commandError.message}
+                </span>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  aria-label="Dismiss error"
+                  onClick={() => adapter.dismissError()}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+            )}
           <section
             className="slot src-slot"
             aria-label="Sources"
@@ -701,6 +716,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     sourcesCapturing={capturing.length}
                     botReady={bot === "ready"}
                     botName={botName}
+                    limiterOn={limiterOn}
                     h={{
                       dismiss: () => adapter.dismissError(`dst:${d.uid}`),
                       change: () => open({ kind: "room", replaceUid: d.uid }),
@@ -903,6 +919,8 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             }
             onLicenses={() => setSheet({ kind: "licenses" })}
             focusLicenses={Boolean(sheet.focusLicenses)}
+            onSyncDetails={() => setSheet({ kind: "sync-details" })}
+            focusSyncDetails={Boolean(sheet.focusSyncDetails)}
             focusSave={Boolean(sheet.focusSave)}
             onBot={() =>
               setSheet(bot === "ready" ? { kind: "bot-info" } : { kind: "bot" })
@@ -911,6 +929,16 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           />
         )}
         {netDest && <ConnectionSheet dest={netDest} onClose={close} />}
+        {sheet?.kind === "sync-details" && snapshot && (
+          <SyncDetails
+            sources={sources}
+            dests={dests}
+            settings={snapshot.settings}
+            onClose={() =>
+              setSheet({ kind: "settings", focusSyncDetails: true })
+            }
+          />
+        )}
         {sheet?.kind === "licenses" && (
           <Licenses
             onClose={() => setSheet({ kind: "settings", focusLicenses: true })}

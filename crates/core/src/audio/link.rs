@@ -191,8 +191,8 @@ pub(crate) enum Plan {
     Pull {
         input_frames: usize,
     },
-    /// Caller drops only the observed prefix, counts it, and resets filter
-    /// history before another plan. A cut never joins discontinuous PCM.
+    /// Filter history is already cleared. Caller drops only this observed
+    /// prefix, counts it, and emits a recovery gap before the next plan.
     Cut {
         frames: usize,
     },
@@ -395,8 +395,29 @@ impl Link {
                 self.excess_ns = 0;
             }
             if self.excess_ns >= STALL_NS {
+                // This callback will emit a bounded recovery gap. Retaining a
+                // PRE-consumption target here would add an entire callback's
+                // production again on the next invocation and cause repeated
+                // cuts for 20/30 ms render callbacks. Keep the post-consumption
+                // reserve, compensating for the exact sinc reset lookahead.
+                let steady_input = (output_frames as f64 * self.consumption).ceil() as usize;
+                let post_target = self.target.saturating_sub(steady_input);
+                self.reset(true);
+                if self.resampler.set_chunk_size(output_frames).is_err()
+                    || self
+                        .resampler
+                        .set_resample_ratio(1.0 / self.consumption, true)
+                        .is_err()
+                {
+                    return Plan::Unsupported;
+                }
+                let reset_extra = self
+                    .resampler
+                    .input_frames_next()
+                    .saturating_sub(steady_input);
+                let retained = post_target.saturating_add(reset_extra).min(queued);
                 return Plan::Cut {
-                    frames: queued - self.target,
+                    frames: queued - retained,
                 };
             }
             self.filtered += (1.0 - (-dt / 0.1).exp()) * (queued as f64 - self.filtered);
@@ -791,6 +812,47 @@ mod tests {
                 link.plan(0, CAPACITY + 1, 240, None, 2),
                 Plan::Unsupported
             ));
+        }
+    }
+
+    #[test]
+    fn overrun_recovery_keeps_a_post_consumption_reserve_instead_of_cutting_forever() {
+        let mut link = Link::new(Direction::Playback, 1440).unwrap();
+        let mut cut = None;
+        for callback in 0..3 {
+            match link.plan(3294, 1440, 240, Some(1.0), callback * 30_000_000) {
+                Plan::Pull { input_frames } => {
+                    link.process_timed(
+                        &vec![[0.0; 2]; input_frames],
+                        Some(callback * 30_000_000),
+                        callback * 30_000_000,
+                        || callback * 30_000_000,
+                    )
+                    .unwrap();
+                }
+                Plan::Cut { frames } => {
+                    cut = Some(frames);
+                    break;
+                }
+                plan => panic!("{plan:?}"),
+            }
+        }
+        let cut = cut.expect("sustained excess must be recovered");
+        assert!(
+            cut > 3294 - 2424,
+            "merely keeping pre-consumption target causes oscillation"
+        );
+        let mut queue = 3294 - cut;
+        for callback in 3..203 {
+            queue += 1440;
+            let now = callback * 30_000_000;
+            let Plan::Pull { input_frames } = link.plan(queue, 1440, 240, Some(1.0), now) else {
+                panic!("repeated recovery at {callback}");
+            };
+            queue -= input_frames;
+            link.process_timed(&vec![[0.0; 2]; input_frames], Some(now), now, || now)
+                .unwrap();
+            assert!(queue < 1500);
         }
     }
 

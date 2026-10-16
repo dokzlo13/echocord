@@ -176,9 +176,9 @@ export function fixtureSnapshot(
   if (name === "faults" && inputs[0]) {
     inputs[0].phase = "fault";
     inputs[0].fault = {
-      code: "capture-failed",
+      code: "invalid-selection",
       message:
-        "The selected application closed. Pick its current process again.",
+        "The selected application exited. Refresh sources and select its new instance.",
     };
     connection = {
       phase: "error",
@@ -221,6 +221,7 @@ export function fixtureSnapshot(
     gatewayPingMs: null,
   };
   const snapshot: ControlSnapshot = {
+    preferencesSaving: false,
     gateway: {
       phase:
         connection.phase === "connected"

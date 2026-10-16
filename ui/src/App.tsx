@@ -8,7 +8,14 @@ import {
 } from "react";
 import type { ControlAdapter } from "./adapter";
 import { DestCard, Empty, SlotHead, SourceCard } from "./cards";
-import { GATEWAY_STATUS } from "./copy";
+import {
+  botStatusLabel,
+  destinationChipState,
+  destinationStatusLabel,
+  destinationSummaryText,
+  GATEWAY_STATUS,
+  sourceSummaryText,
+} from "./copy";
 import type { Connection, ControlSnapshot } from "./generated";
 import { Mark } from "./icons";
 import { Licenses } from "./Licenses";
@@ -38,7 +45,7 @@ function phase(c: Connection): Destination["state"] {
     case "connected":
       return "live";
     case "error":
-      return "fault";
+      return c.code === "cleanup-incomplete" ? "cleanup-incomplete" : "fault";
     default:
       return c.phase;
   }
@@ -129,6 +136,86 @@ function destination(
         : undefined,
   };
 }
+function useRecoveryAnnouncements(
+  ready: boolean,
+  sources: Source[],
+  destinations: Destination[],
+) {
+  const previous = useRef<Map<
+    string,
+    { state: string; problem: string | undefined; info: string | undefined }
+  > | null>(null);
+  const serial = useRef(0);
+  const [notice, setNotice] = useState({ serial: 0, urgent: "", polite: "" });
+  useEffect(() => {
+    if (!ready) {
+      previous.current = null;
+      return;
+    }
+    const observations = [
+      ...sources.map((card, index) => ({
+        key: `src:${card.uid}`,
+        state: card.state,
+        label: `Source${sources.length > 1 ? ` ${index + 1}` : ""}, ${card.identity.name}`,
+        problem:
+          card.operationError?.message ??
+          (card.state === "fault" ? card.fault?.title : undefined),
+        info: undefined as string | undefined,
+        success: "Capturing",
+      })),
+      ...destinations.map((card, index) => ({
+        key: `dst:${card.uid}`,
+        state: card.state,
+        label: `Destination${destinations.length > 1 ? ` ${index + 1}` : ""}, ${card.channel.name}${card.kind === "discord" ? ` on ${card.server.name}` : ""}`,
+        problem: card.operationError?.message ?? card.fault?.title,
+        info:
+          card.connection.phase === "recovering"
+            ? card.connection.message
+            : undefined,
+        success: destinationStatusLabel(card.state, card.kind),
+      })),
+    ];
+    const current = new Map(
+      observations.map((item) => [
+        item.key,
+        { state: item.state, problem: item.problem, info: item.info },
+      ]),
+    );
+    if (previous.current) {
+      const urgent = new Map<string, string[]>();
+      const polite: string[] = [];
+      for (const item of observations) {
+        const before = previous.current.get(item.key);
+        if (item.problem && item.problem !== before?.problem) {
+          urgent.set(item.problem, [
+            ...(urgent.get(item.problem) ?? []),
+            item.label,
+          ]);
+        } else if (
+          before &&
+          !item.problem &&
+          (before.state !== item.state || before.info !== item.info) &&
+          ["recovering", "disconnecting", "live", "capturing"].includes(
+            item.state,
+          )
+        ) {
+          polite.push(`${item.label}: ${item.info ?? item.success}.`);
+        }
+      }
+      if (urgent.size || polite.length)
+        setNotice({
+          serial: ++serial.current,
+          urgent: [...urgent]
+            .map(([message, labels]) => `${labels.join("; ")}: ${message}`)
+            .join(" "),
+          polite: polite.join(" "),
+        });
+    }
+    previous.current = current;
+  }, [ready, sources, destinations]);
+  return notice;
+}
+
 export function App({ adapter }: { adapter: ControlAdapter }) {
   const view = useSyncExternalStore(
     adapter.subscribe,
@@ -159,18 +246,31 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   const snapshot = view.snapshot;
   const warning = snapshot?.preferencesWarning;
   const hasSaveWarning = Boolean(warning);
-  const saving = view.pending.includes(
-    JSON.stringify({ type: "retry-preferences" }),
-  );
+  const saving =
+    Boolean(snapshot?.preferencesSaving) ||
+    view.pending.includes(JSON.stringify({ type: "retry-preferences" }));
   const previousWarning = useRef(false);
+  const previousSaving = useRef(false);
+  const saveRequested = useRef(false);
   const [saveAnnouncement, setSaveAnnouncement] = useState("");
   useEffect(() => {
-    if (hasSaveWarning)
+    if (
+      saving &&
+      (hasSaveWarning || previousWarning.current || saveRequested.current)
+    )
+      setSaveAnnouncement("Saving changes.");
+    else if (hasSaveWarning)
       setSaveAnnouncement(
-        "Changes apply now, but are not saved for next time.",
+        previousSaving.current || saveRequested.current
+          ? `Still not saved. ${warning?.message ?? "Try again."}`
+          : "Changes apply now, but are not saved for next time.",
       );
-    else if (previousWarning.current) {
+    else if (
+      previousWarning.current ||
+      (previousSaving.current && saveRequested.current)
+    ) {
       setSaveAnnouncement("Changes saved.");
+      saveRequested.current = false;
       requestAnimationFrame(() => {
         if (document.activeElement !== document.body) return;
         const target =
@@ -180,24 +280,26 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       });
     }
     previousWarning.current = hasSaveWarning;
-  }, [hasSaveWarning]);
+    previousSaving.current = saving;
+  }, [hasSaveWarning, saving, warning?.message]);
   const retrySave = async () => {
+    saveRequested.current = true;
     setSaveAnnouncement("");
     await adapter.dispatch({ type: "retry-preferences" });
     requestAnimationFrame(() => {
-      const remaining = adapter.getSnapshot().snapshot?.preferencesWarning;
+      const state = adapter.getSnapshot().snapshot;
+      const remaining = state?.preferencesWarning;
       setSaveAnnouncement(
-        remaining ? `Still not saved. ${remaining.message}` : "Changes saved.",
+        state?.preferencesSaving
+          ? "Saving changes."
+          : remaining
+            ? `Still not saved. ${remaining.message}`
+            : "Changes saved.",
       );
     });
   };
   const failedCommand = view.commandErrorCommand;
-  const operationError = (uid: string) =>
-    failedCommand &&
-    (("stripId" in failedCommand && failedCommand.stripId === uid) ||
-      ("destinationId" in failedCommand && failedCommand.destinationId === uid))
-      ? view.commandError?.message
-      : undefined;
+  const operationError = (target: string) => view.targetErrors[target]?.error;
   const targetedError =
     !!failedCommand &&
     (("stripId" in failedCommand &&
@@ -232,9 +334,14 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       muted: c.muted,
       gainDb: c.gainDb,
       restored: c.restored,
-      operationError: operationError(c.stripId),
+      operationError: operationError(`src:${c.stripId}`),
+      operationCommand: view.targetErrors[`src:${c.stripId}`]?.command.type,
       fault: c.fault
-        ? { title: c.fault.message, actionLabel: "Pick again" }
+        ? {
+            code: c.fault.code,
+            title: c.fault.message,
+            actionLabel: "Select again",
+          }
         : undefined,
     })) ?? [];
   const destinationIds = new Set(
@@ -259,7 +366,9 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           confirm === d.destinationId,
           liveTimes.current.get(d.destinationId)?.since,
         ),
-        operationError: operationError(d.destinationId),
+        operationError: operationError(`dst:${d.destinationId}`),
+        operationCommand:
+          view.targetErrors[`dst:${d.destinationId}`]?.command.type,
       };
     }) ?? [];
   const open = (next: Sheet) => {
@@ -281,19 +390,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   };
   const send = adapter.dispatch;
   const capturing = sources.filter((s) => s.state === "capturing");
-  const on = capturing.filter((s) => !s.muted).length;
-  const muted = capturing.filter((s) => s.muted).length;
-  const stopped = sources.length - capturing.length;
-  const sourceSummary = [
-    [on, "on"],
-    [muted, "muted"],
-    [stopped, "off"],
-  ]
-    .filter(([count]) => count)
-    .map(([count, state]) =>
-      sources.length === 1 ? state : `${count} ${state}`,
-    )
-    .join(" · ");
+  const sourceSummary = sourceSummaryText(sources);
   const bot = snapshot?.bot.status ?? "unconfigured";
   const botName = snapshot?.bot.name ?? "Discord bot";
   const mode = snapshot?.settings.meterStyle ?? "simple";
@@ -321,18 +418,12 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
         "cleanup-incomplete",
       ].includes(snapshot.gateway.phase) ||
         snapshot.serverReservations.some((r) => r.phase !== "selected")));
-  const playing = dests.filter(
-    (d) => d.kind === "playback" && d.state === "live",
-  ).length;
-  const onAir = dests.filter(
-    (d) => d.kind === "discord" && d.state === "live",
-  ).length;
-  const destinationSummary =
-    dests.length > 1
-      ? [onAir && `${onAir} on air`, playing && `${playing} playing`]
-          .filter(Boolean)
-          .join(" · ") || "All stopped"
-      : undefined;
+  const destinationSummary = destinationSummaryText(dests);
+  const recoveryNotice = useRecoveryAnnouncements(
+    view.phase === "ready",
+    sources,
+    dests,
+  );
   return (
     <TelemetryProvider value={adapter.telemetry}>
       <div
@@ -344,6 +435,22 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
       >
         <span className="sr-only" role="status">
           {saveAnnouncement}
+        </span>
+        <span
+          className="sr-only"
+          id="recovery-alert"
+          aria-live="assertive"
+          aria-atomic="true"
+        >
+          <span key={recoveryNotice.serial}>{recoveryNotice.urgent}</span>
+        </span>
+        <span
+          className="sr-only"
+          id="recovery-status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <span key={recoveryNotice.serial}>{recoveryNotice.polite}</span>
         </span>
         <header
           className="titlebar"
@@ -379,7 +486,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             title={
               bot === "ready"
                 ? `Discord bot details · ${GATEWAY_STATUS[snapshot?.gateway.phase ?? "disconnected"]}`
-                : "Set up the Discord bot"
+                : botStatusLabel(bot, botName)
             }
           >
             {bot === "ready" ? (
@@ -388,11 +495,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
               <span className="bot-dot" aria-hidden />
             )}
             <span className="bot-chip-name">
-              {bot === "ready"
-                ? botName
-                : bot === "checking"
-                  ? "Checking bot"
-                  : "Set up bot"}
+              {botStatusLabel(bot, botName)}
             </span>
             {bot === "ready" && (
               <span
@@ -462,7 +565,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                 type="button"
                 className="icon-btn"
                 aria-label="Dismiss error"
-                onClick={adapter.dismissError}
+                onClick={() => adapter.dismissError()}
               >
                 <X size={16} />
               </button>
@@ -512,7 +615,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     mode={mode}
                     expand={wide && sources.length <= 2}
                     h={{
-                      dismiss: adapter.dismissError,
+                      dismiss: () => adapter.dismissError(`src:${c.uid}`),
                       change: () => open({ kind: "source", replaceUid: c.uid }),
                       remove: () =>
                         void send({ type: "remove-source", stripId: c.uid }),
@@ -556,14 +659,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                   d.kind === "playback"
                     ? `${d.channel.name}, playback output`
                     : `${d.channel.name} on ${d.server.name}`,
-                state:
-                  d.state === "live"
-                    ? d.kind === "discord"
-                      ? "on"
-                      : "playing"
-                    : d.state === "fault"
-                      ? "fault"
-                      : "stopped",
+                state: destinationChipState(d),
               }))}
               addLabel="Add destination"
               onAdd={addDestination}
@@ -585,7 +681,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                 data-count={dests.length}
                 style={
                   {
-                    "--dst-natural": `${dests.length === 1 ? (mode === "history" ? 194 : 182) : dests.length * (mode === "history" ? 146 : 134) + (dests.length - 1) * 8}px`,
+                    "--dst-natural": `${dests.length === 1 ? (mode === "history" ? 194 : 182) : dests.length * (mode === "history" ? 146 : 134) + (dests.length - 1) * 8 + dests.filter((d) => d.fault || d.operationError).length * 46}px`,
                   } as React.CSSProperties
                 }
               >
@@ -601,7 +697,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                     botReady={bot === "ready"}
                     botName={botName}
                     h={{
-                      dismiss: adapter.dismissError,
+                      dismiss: () => adapter.dismissError(`dst:${d.uid}`),
                       change: () => open({ kind: "room", replaceUid: d.uid }),
                       remove: () => {
                         setConfirm(null);
@@ -642,6 +738,7 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
                             })
                           : open({ kind: "room", replaceUid: d.uid }),
                       details: () => open({ kind: "net", uid: d.uid }),
+                      bot: () => open({ kind: "bot" }),
                     }}
                   />
                 ))}
@@ -664,7 +761,17 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
           <SourcePicker
             sources={sources}
             catalog={catalog}
-            error={view.commandError?.message ?? null}
+            error={
+              replacingSource
+                ? (view.targetErrors[`src:${replacingSource.uid}`]?.error
+                    .message ?? null)
+                : failedCommand &&
+                    ["add-source", "refresh-sources"].includes(
+                      failedCommand.type,
+                    )
+                  ? (view.commandError?.message ?? null)
+                  : null
+            }
             busy={view.pending.length > 0}
             discovery={snapshot.sourceDiscovery}
             onRefresh={() => void send({ type: "refresh-sources" })}
@@ -699,7 +806,20 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             onRefreshPlayback={() =>
               void send({ type: "refresh-playback-devices" })
             }
-            error={view.commandError?.message ?? null}
+            error={
+              replacingDest
+                ? (view.targetErrors[`dst:${replacingDest.uid}`]?.error
+                    .message ?? null)
+                : failedCommand &&
+                    [
+                      "add-destination",
+                      "add-playback-destination",
+                      "refresh-catalog",
+                      "refresh-playback-devices",
+                    ].includes(failedCommand.type)
+                  ? (view.commandError?.message ?? null)
+                  : null
+            }
             busy={view.pending.length > 0}
             discovery={snapshot.discovery}
             onRefresh={() => void send({ type: "refresh-catalog" })}
@@ -741,7 +861,15 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             bot={bot}
             botName={botName}
             busy={view.configuringBot}
-            error={view.configurationError?.message ?? null}
+            error={
+              view.configurationError?.message ??
+              (view.commandErrorCommand?.type === "recheck-configuration"
+                ? (view.commandError?.message ?? null)
+                : null)
+            }
+            statusMessage={snapshot?.bot.message ?? null}
+            onRecheck={() => void send({ type: "recheck-configuration" })}
+            replacementBlocked={live}
             configure={adapter.configureBot}
             thenRoom={sheet.next === "room"}
             onDone={() =>
@@ -758,7 +886,11 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
             saveWarning={warning}
             saving={saving}
             onRetrySave={() => void retrySave()}
-            error={view.commandError?.message ?? null}
+            error={
+              failedCommand?.type === "set-settings"
+                ? (view.commandError?.message ?? null)
+                : null
+            }
             onSettings={(s) => void adapter.setSettings(s)}
             meterMode={mode}
             onMeterMode={(meterStyle) =>

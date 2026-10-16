@@ -118,7 +118,7 @@ test("release binds exact Tauri names and telemetry event without faking accepte
     "data-state",
     "idle",
   );
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await page.getByRole("button", { name: /^Connect / }).click();
   await expect(page.locator(".dest-card")).toHaveAttribute(
     "data-state",
     "idle",

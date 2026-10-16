@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { NetChart, OnAirTime, StatTiles } from "./cards";
-import { GATEWAY_STATUS, STATUS, statusKey } from "./copy";
+import { destinationStatusLabel, GATEWAY_STATUS, statusKey } from "./copy";
 import type {
   AppError,
   AppSettings,
@@ -160,8 +160,10 @@ function Refresh({
     <button
       type="button"
       className="btn btn-quiet"
-      onClick={onRefresh}
-      disabled={busy}
+      onClick={() => {
+        if (!busy) onRefresh();
+      }}
+      aria-disabled={busy}
     >
       {busy ? (
         <LoaderCircle size={15} className="spin" />
@@ -206,8 +208,23 @@ export function SourcePicker({
   const list = (tab === "application" ? apps : inputs).filter((s) =>
     `${s.name} ${s.detail}`.toLowerCase().includes(q.trim().toLowerCase()),
   );
+  const retryCurrent =
+    replacing?.state === "fault" || replacing?.state === "stopped";
+  const refreshedFault = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      replacing?.state === "fault" &&
+      refreshedFault.current !== replacing.uid
+    ) {
+      refreshedFault.current = replacing.uid;
+      onRefresh();
+    }
+  }, [replacing?.state, replacing?.uid, onRefresh]);
   const chosen = catalog.find(
-    (s) => s.id === sel && s.available && !inMix.has(s.id),
+    (s) =>
+      s.id === sel &&
+      s.available &&
+      (!inMix.has(s.id) || (retryCurrent && s.id === replacing?.sourceId)),
   );
   const unavailable = (s: CatalogSource) =>
     s.disabledReason
@@ -261,7 +278,30 @@ export function SourcePicker({
             type="button"
             role="tab"
             aria-selected={tab === id}
+            tabIndex={tab === id ? 0 : -1}
             className="tab"
+            onKeyDown={(event) => {
+              if (
+                !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+              )
+                return;
+              event.preventDefault();
+              const next =
+                event.key === "Home"
+                  ? "application"
+                  : event.key === "End"
+                    ? "recording"
+                    : tab === "application"
+                      ? "recording"
+                      : "application";
+              setTab(next);
+              setSel(null);
+              const tabs =
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                  "[role=tab]",
+                );
+              tabs?.[next === "application" ? 0 : 1]?.focus();
+            }}
             onClick={() => {
               setTab(id);
               setSel(null);
@@ -291,19 +331,20 @@ export function SourcePicker({
         {list.map((s) => {
           const why = unavailable(s);
           const isCurrent = s.id === replacing?.sourceId;
+          const selectable = !why && (!isCurrent || retryCurrent);
           return (
             <div key={s.id}>
               <button
                 type="button"
                 role="option"
                 aria-selected={sel === s.id}
-                aria-disabled={!!why && !isCurrent}
+                aria-disabled={!selectable}
                 className="pick-row"
-                data-disabled={(why && !isCurrent) || undefined}
-                onClick={() => !why && !isCurrent && setSel(s.id)}
-                onDoubleClick={() => !why && !isCurrent && onPick(s.id)}
+                data-disabled={!selectable || undefined}
+                onClick={() => selectable && setSel(s.id)}
+                onDoubleClick={() => selectable && !busy && onPick(s.id)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !why && !isCurrent) {
+                  if (e.key === "Enter" && selectable && !busy) {
                     e.preventDefault();
                     onPick(s.id);
                   }
@@ -313,11 +354,7 @@ export function SourcePicker({
                 <span className="pick-text">
                   <span className="pick-name">{s.name}</span>
                   <span className="pick-detail">
-                    {why && !isCurrent
-                      ? why
-                      : sel === s.id && s.note
-                        ? s.note
-                        : s.detail}
+                    {why ? why : sel === s.id && s.note ? s.note : s.detail}
                   </span>
                 </span>
                 <span className="pick-meta">
@@ -926,6 +963,9 @@ export function BotSetup({
   onDone,
   onClose,
   thenRoom,
+  statusMessage,
+  onRecheck,
+  replacementBlocked,
 }: {
   bot: BotState;
   configure: (token: string) => Promise<boolean>;
@@ -935,14 +975,19 @@ export function BotSetup({
   onDone: () => void;
   onClose: () => void;
   thenRoom: boolean;
+  statusMessage: string | null;
+  onRecheck: () => void;
+  replacementBlocked: boolean;
 }) {
+  const [rechecked, setRechecked] = useState(false);
+  const checking = busy || bot === "checking";
   const [token, setToken] = useState("");
   const [show, setShow] = useState(false);
   const [saved, setSaved] = useState(false);
   const [replacing] = useState(bot === "ready");
-  const phase = busy
+  const phase = checking
     ? "checking"
-    : saved && bot === "ready"
+    : (saved || rechecked) && bot === "ready"
       ? "ok"
       : error
         ? "bad"
@@ -956,7 +1001,13 @@ export function BotSetup({
   return (
     <Sheet
       title={replacing ? "Replace bot token" : "Set up Discord bot"}
-      initialFocus={phase === "ok" ? ".sheet-foot .btn-primary" : "#bot-token"}
+      initialFocus={
+        phase === "ok"
+          ? ".sheet-foot .btn-primary"
+          : replacementBlocked
+            ? ".bot-recovery button"
+            : "#bot-token"
+      }
       onClose={onClose}
       footer={
         phase === "ok" ? (
@@ -968,7 +1019,9 @@ export function BotSetup({
             type="submit"
             form="bot-token-form"
             className="btn btn-primary"
-            disabled={phase === "checking" || token.trim() === ""}
+            disabled={
+              phase === "checking" || replacementBlocked || token.trim() === ""
+            }
           >
             {phase === "checking" ? (
               <LoaderCircle size={15} className="spin" />
@@ -992,12 +1045,43 @@ export function BotSetup({
           <p className="setup-intro">
             Use your own Discord bot to send the mix to a voice room.
           </p>
+          {(bot === "invalid" ||
+            bot === "error" ||
+            replacementBlocked ||
+            (rechecked && checking)) && (
+            <div className="bot-recovery" role={checking ? "status" : "alert"}>
+              <p>
+                {checking
+                  ? "Checking the saved bot with Discord…"
+                  : replacementBlocked && bot === "ready"
+                    ? "Check the saved bot without replacing its token."
+                    : (statusMessage ??
+                      (bot === "invalid"
+                        ? "Discord rejected the saved token."
+                        : "The saved bot could not be checked."))}
+              </p>
+              <Refresh
+                label="Check again"
+                busy={checking}
+                onRefresh={() => {
+                  setRechecked(true);
+                  onRecheck();
+                }}
+              />
+            </div>
+          )}
+          {replacementBlocked && (
+            <p className="field-error" role="status">
+              Disconnect Discord outputs and finish any pending cleanup before
+              replacing the token. You can still check the saved bot.
+            </p>
+          )}
           <form
             id="bot-token-form"
             className="token-form"
             onSubmit={(event) => {
               event.preventDefault();
-              if (!busy && token.trim()) void test();
+              if (!checking && !replacementBlocked && token.trim()) void test();
             }}
           >
             <label className="field">
@@ -1007,6 +1091,7 @@ export function BotSetup({
                   id="bot-token"
                   type={show ? "text" : "password"}
                   value={token}
+                  disabled={replacementBlocked || checking}
                   autoComplete="off"
                   spellCheck={false}
                   aria-describedby="token-care"
@@ -1445,11 +1530,7 @@ export function ConnectionSheet({
   );
   const local = dest.kind === "playback";
   const sk = local && dest.state === "live" ? "playing" : statusKey(dest.state);
-  const statusLabel = local
-    ? dest.state === "live"
-      ? "Playing"
-      : "Stopped"
-    : STATUS[statusKey(dest.state)];
+  const statusLabel = destinationStatusLabel(dest.state, dest.kind);
   return (
     <Sheet
       title={dest.kind === "playback" ? "Playback output" : "Connection"}
@@ -1464,20 +1545,33 @@ export function ConnectionSheet({
         <span className="conn-room">
           {channel?.name} <span className="conn-server">{server?.name}</span>
         </span>
-        <span className="conn-time tabular">
-          <OnAirTime since={dest.liveAt} />
-        </span>
+        {dest.liveAt !== undefined && dest.state === "live" && (
+          <span className="conn-time tabular">
+            <OnAirTime since={dest.liveAt} />
+          </span>
+        )}
       </div>
       <div className="conn-chart">
         <NetChart uid={dest.uid} seconds={120} minHeight={40} local={local} />
       </div>
       <StatTiles uid={dest.uid} local={local} />
       <dl className="facts-list tabular">
-        <dt>Underrun frames</dt>
+        <dt>Underrun frames since start</dt>
         <dd ref={underruns}>Unavailable</dd>
         <dt>Audio</dt>
         <dd>{local ? "Native mix · 48 kHz stereo" : "Opus · 48 kHz stereo"}</dd>
       </dl>
+      {(dest.connection.phase === "error" ||
+        dest.connection.phase === "cleanup-incomplete" ||
+        dest.connection.phase === "recovering") && (
+        <p className="conn-note" role="status">
+          {dest.connection.message}
+        </p>
+      )}
+      <p className="conn-note">
+        Dropped and underrun frames are totals since this output started. One
+        frame is one stereo sample pair; 48 frames represent 1 ms of audio.
+      </p>
       <p className="conn-note">
         {local
           ? "The meter observes samples handed to this selected device after output volume and mute; it does not prove physical audibility. Buffer is audio queued inside Echocord, not device or listener delay."

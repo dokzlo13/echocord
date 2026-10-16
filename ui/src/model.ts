@@ -1,8 +1,11 @@
 import type {
+  AppError,
   AppSettings,
   BotStatus,
   Connection,
+  ControlCommand,
   DestinationKind,
+  ErrorCode,
   InputStrip,
   Server as NativeServer,
   PlaybackDevice,
@@ -32,6 +35,7 @@ export interface Server {
 }
 export type SourceState = InputStrip["phase"];
 export interface Fault {
+  code?: ErrorCode | undefined;
   title: string;
   actionLabel: string;
 }
@@ -44,7 +48,8 @@ export interface SourceCard {
   muted: boolean;
   gainDb: number | null;
   fault?: Fault | undefined;
-  operationError?: string | undefined;
+  operationError?: AppError | undefined;
+  operationCommand?: ControlCommand["type"] | undefined;
   restored: boolean;
 }
 export type DestState =
@@ -73,7 +78,8 @@ export interface DestCard {
   volumeDb: number | null;
   muted: boolean;
   fault?: Fault | undefined;
-  operationError?: string | undefined;
+  operationError?: AppError | undefined;
+  operationCommand?: ControlCommand["type"] | undefined;
   confirmRemove: boolean;
   op: number;
   liveAt?: number | undefined;

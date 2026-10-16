@@ -109,7 +109,6 @@ test("source ordinals compact after middle and first removal while colour, ident
   );
   const jump = page.getByRole("button", {
     name: "Show source 2: Preview recording input",
-    exact: true,
   });
   await jump.focus();
   await jump.press("Enter");
@@ -275,7 +274,10 @@ test("destination ordinals compact without remounting or resetting a surviving r
     ),
   ).toBe(true);
   await survivor
-    .getByRole("button", { name: "Mute Listening room", exact: true })
+    .getByRole("button", {
+      name: "Mute Listening room on Listening group",
+      exact: true,
+    })
     .click();
   expect(
     await page.evaluate(() => window.uiHarness.transport.commands),
@@ -319,7 +321,7 @@ test("long duplicate identities retain distinct section, ordinal and server name
     [`Show source 3: ${name}`, "strip:3"],
     [`Show destination 2: ${name} on Вечерняя группа`, "dest:2"],
   ] as const) {
-    const button = page.getByRole("button", { name: label, exact: true });
+    const button = page.getByRole("button", { name: label });
     await button.focus();
     await button.press("Enter");
     const card = page.locator(`[id="card-${id}"]`);

@@ -73,7 +73,6 @@ for (const [width, height] of [
       await page
         .getByRole("button", {
           name: "Show destination 2: Сессия on Вечерняя группа",
-          exact: true,
         })
         .click();
       const compact = target.locator(".d-stage-line");
@@ -121,10 +120,10 @@ for (const [width, height] of [
           "live",
         );
         await expect(
-          target.getByRole("button", { name: "Cancel", exact: true }),
+          target.getByRole("button", { name: /^Cancel / }),
         ).toBeVisible();
       }
-      await target.getByRole("button", { name: "Cancel", exact: true }).click();
+      await target.getByRole("button", { name: /^Cancel / }).click();
       await expect(page.locator(".dest-card").first()).toHaveAttribute(
         "data-state",
         "live",
@@ -197,12 +196,9 @@ test("full log records only observed stage intervals and resets for a new sessio
       })),
     });
   });
-  await expect(
-    target.locator(".d-log li").nth(0).locator(".log-time"),
-  ).toHaveCount(0);
-  await expect(
-    target.locator(".d-log li").nth(1).locator(".log-time"),
-  ).toHaveCount(0);
+  await expect(target.locator(".d-log li")).toHaveCount(1);
+  await expect(target.locator(".d-log")).not.toContainText("Checking the bot");
+  await expect(target.locator(".d-log")).not.toContainText("Reaching Discord");
   await expect(target.locator('.d-log [aria-current="step"]')).toContainText(
     "Joining",
   );

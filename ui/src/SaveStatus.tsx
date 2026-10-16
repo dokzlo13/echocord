@@ -23,8 +23,8 @@ export function SaveStatus({
       <div className="save-copy">
         <strong>Changes not saved</strong>
         <span id={reasonId} className={details ? "sr-only" : "save-reason"}>
-          {warning.message} Changes still apply now. Next launch uses your last
-          saved setup.
+          {warning.message} Changes apply now, but may be lost when you quit
+          Echocord.
         </span>
       </div>
       {details && (

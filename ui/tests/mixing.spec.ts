@@ -105,7 +105,7 @@ test("source failure is contained on its card while destination remains live", a
     t.emit({ inputs });
   });
   await expect(
-    page.locator(".source-card").first().getByRole("alert"),
+    page.locator(".source-card").first().getByRole("note"),
   ).toContainText("process exited");
   await expect(page.locator(".dest-card")).toHaveAttribute(
     "data-state",
@@ -123,7 +123,7 @@ test("restored application waits for explicit Capture and preserves destination 
   await open(page, "restored");
   const restored = page.locator(".source-card").nth(1);
   await expect(restored).toHaveAttribute("data-state", "stopped");
-  await expect(restored).toContainText("press Capture to reattach");
+  await expect(restored).toContainText("Press Capture to start");
   expect(await commands(page)).toEqual([]);
   await restored
     .getByRole("button", { name: "Capture Preview browser", exact: true })
@@ -176,7 +176,10 @@ test("destination mute uses its own command and keeps source metering", async ({
   await open(page);
   await page
     .locator(".dest-card")
-    .getByRole("button", { name: "Mute Session room", exact: true })
+    .getByRole("button", {
+      name: "Mute Session room on Studio group",
+      exact: true,
+    })
     .click();
   await expect(page.locator(".dest-card")).toHaveAttribute(
     "data-muted",
@@ -198,14 +201,10 @@ test("connect, cancel and disconnect remain destination operations", async ({
 }) => {
   await open(page, "disconnected");
   await page.evaluate(() => (window.uiHarness.transport.holdConnect = true));
-  await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Cancel", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: /^Connect / }).click();
+  await expect(page.getByRole("button", { name: /^Cancel / })).toBeVisible();
+  await page.getByRole("button", { name: /^Cancel / }).click();
+  await expect(page.getByRole("button", { name: /^Connect / })).toBeVisible();
   expect((await commands(page)).map((c) => c.type)).toEqual([
     "connect-destination",
     "disconnect-destination",
@@ -221,14 +220,10 @@ test("cleanup incomplete blocks reconnect and exposes Retry disconnect", async (
 }) => {
   await open(page, "cleanup");
   await expect(
-    page.getByRole("button", { name: "Retry disconnect", exact: true }),
+    page.getByRole("button", { name: /^Disconnect / }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Connect", exact: true }),
-  ).toHaveCount(0);
-  await page
-    .getByRole("button", { name: "Retry disconnect", exact: true })
-    .click();
+  await expect(page.getByRole("button", { name: /^Connect / })).toHaveCount(0);
+  await page.getByRole("button", { name: /^Disconnect / }).click();
   expect((await commands(page))[0]?.type).toBe("disconnect-destination");
   await expect(page.locator(".dest-card")).toHaveAttribute(
     "data-state",
@@ -279,7 +274,7 @@ test("reserved server is explicit and room replacement names reconnect", async (
     page.getByText(/Another card reserves Session room/),
   ).toBeVisible();
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Change room", exact: true }).click();
+  await page.getByRole("button", { name: /^Change room / }).click();
   await page.getByRole("option", { name: "Lounge", exact: true }).click();
   await expect(
     page.getByText("Briefly reconnects to change rooms"),
@@ -347,7 +342,13 @@ test("sheet keyboard focus is trapped and Escape returns to card identity", asyn
   await identity.click();
   await expect(page.getByRole("searchbox")).toBeFocused();
   await page.getByRole("searchbox").press("Shift+Tab");
+  await expect(page.getByRole("tab", { name: "Applications" })).toBeFocused();
+  await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("tab", { name: "Inputs" })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "Inputs" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
   await page.getByRole("button", { name: "Back", exact: true }).focus();
   await page.keyboard.press("Shift+Tab");
   await expect(
@@ -428,7 +429,7 @@ test("connection details expose unavailable metrics and true measurement boundar
   page,
 }) => {
   await open(page);
-  await page.getByRole("button", { name: "On air", exact: true }).click();
+  await page.getByRole("button", { name: /^On air\./ }).click();
   await expect(
     page.getByRole("dialog", { name: /Connection details/ }),
   ).toBeVisible();
@@ -744,7 +745,7 @@ test("targeted source operation errors preserve whole cards and live native phas
     .getByRole("button", { name: "Stop capturing Preview player", exact: true })
     .click();
   await expect(
-    page.locator(".source-card").first().getByRole("alert"),
+    page.locator(".source-card").first().getByRole("note"),
   ).toContainText("selected application changed");
   await expect(page.locator(".source-card").first()).toHaveAttribute(
     "data-state",
@@ -760,7 +761,7 @@ test("targeted source operation errors preserve whole cards and live native phas
       .evaluate((e) => e.getBoundingClientRect().bottom <= innerHeight),
   ).toBe(true);
   await expect(
-    page.getByRole("button", { name: "Disconnect", exact: true }),
+    page.getByRole("button", { name: /^Disconnect / }),
   ).toBeVisible();
   await page
     .locator(".source-card")
@@ -768,7 +769,7 @@ test("targeted source operation errors preserve whole cards and live native phas
     .getByRole("button", { name: "Dismiss", exact: true })
     .click();
   await expect(
-    page.locator(".source-card").first().getByRole("alert"),
+    page.locator(".source-card").first().getByRole("note"),
   ).toHaveCount(0);
 });
 

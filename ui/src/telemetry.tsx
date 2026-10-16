@@ -2,6 +2,7 @@ import { createContext, useContext } from "react";
 import type {
   DestinationStrip,
   DestinationTelemetry,
+  InputStrip,
   MixTelemetry,
 } from "./generated";
 
@@ -53,10 +54,39 @@ export class TelemetryStore {
   private latest: MixTelemetry | null = null;
   private histories = new Map<string, Ring>();
   private outputs = new Map<string, DestinationState>();
+  private inputs = new Map<string, string>();
   private unknown = emptyNetwork();
   private lastLevel = Number.NEGATIVE_INFINITY;
   private peaks = new Map<string, { db: number; until: number }>();
   private visibleListeners = new Set<() => void>();
+  setInputs(inputs: InputStrip[]) {
+    const valid = new Set(inputs.map((input) => input.stripId));
+    const replaced = new Set<string>();
+    for (const input of inputs) {
+      const previous = this.inputs.get(input.stripId);
+      if (previous !== undefined && previous !== input.sourceId) {
+        this.histories.delete(`src:${input.stripId}`);
+        this.peaks.delete(`src:${input.stripId}`);
+        replaced.add(input.stripId);
+      }
+      this.inputs.set(input.stripId, input.sourceId);
+    }
+    for (const id of this.inputs.keys()) {
+      if (!valid.has(id)) {
+        this.inputs.delete(id);
+        this.histories.delete(`src:${id}`);
+        this.peaks.delete(`src:${id}`);
+      }
+    }
+    if (this.latest && replaced.size) {
+      this.latest = {
+        ...this.latest,
+        inputs: this.latest.inputs.filter(
+          (input) => !replaced.has(input.stripId),
+        ),
+      };
+    }
+  }
   setDestinations(destinations: DestinationStrip[]) {
     const valid = new Set(destinations.map((d) => d.destinationId));
     for (const d of destinations) {
@@ -200,6 +230,7 @@ export class TelemetryStore {
       : (this.outputs.values().next().value?.network ?? this.unknown);
   clear() {
     this.latest = null;
+    this.inputs.clear();
     this.outputs.clear();
     this.histories.clear();
     this.peaks.clear();

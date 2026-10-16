@@ -26,7 +26,7 @@ test("restored rooms and playback stay idle until each explicit start", async ({
     await page.evaluate(() => window.uiHarness.transport.commands),
   ).toEqual([]);
   const second = await show(page, "Сессия");
-  await second.getByRole("button", { name: "Connect", exact: true }).click();
+  await second.getByRole("button", { name: /^Connect / }).click();
   await expect(second).toHaveAttribute("data-state", "live");
   await expect(page.locator('.dest-card[data-state="idle"]')).toHaveCount(3);
   expect(
@@ -40,18 +40,23 @@ test("room mute gain disconnect cancel and source controls leave peers untouched
   await start(page);
   const second = await show(page, "Сессия");
   await second
-    .getByRole("button", { name: "Mute Сессия", exact: true })
+    .getByRole("button", {
+      name: "Mute Сессия on Вечерняя группа",
+      exact: true,
+    })
     .click();
   await second
-    .getByRole("slider", { name: "Сессия volume" })
+    .getByRole("slider", { name: "Сессия on Вечерняя группа volume" })
     .press("ArrowLeft");
-  await second.getByRole("slider", { name: "Сессия volume" }).blur();
-  await second.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await second
+    .getByRole("slider", { name: "Сессия on Вечерняя группа volume" })
+    .blur();
+  await second.getByRole("button", { name: /^Disconnect / }).click();
   await page.evaluate(() => {
     window.uiHarness.transport.holdConnect = true;
   });
-  await second.getByRole("button", { name: "Connect", exact: true }).click();
-  await second.getByRole("button", { name: "Cancel", exact: true }).click();
+  await second.getByRole("button", { name: /^Connect / }).click();
+  await second.getByRole("button", { name: /^Cancel / }).click();
   await page
     .locator(".source-card")
     .getByRole("button", { name: "Stop capturing Preview player" })
@@ -99,14 +104,14 @@ test("room-specific permission and cleanup faults leave other rooms and playback
     t.emit({ destinations: ds });
   });
   const denied = await show(page, "Сессия");
-  await expect(denied.getByRole("alert")).toContainText("cannot speak");
+  await expect(denied.getByRole("note")).toContainText("cannot speak");
   const cleanup = await show(page, "Listening room");
   await expect(
-    cleanup.getByRole("button", { name: "Retry disconnect", exact: true }),
+    cleanup.getByRole("button", { name: /^Disconnect / }),
   ).toBeVisible();
   const local = await show(page, "Preview headphones");
-  await local.getByRole("button", { name: "Stop", exact: true }).click();
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Stop / }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   await expect(local).toHaveAttribute("data-state", "live");
   const first = await show(page, "Session room");
   await expect(first).toHaveAttribute("data-state", "live");
@@ -205,7 +210,7 @@ test("idle configured rooms reserve their server and Current remains a no-op", a
 }) => {
   await start(page, "rooms-restored");
   const first = await show(page, "Session room");
-  await first.getByRole("button", { name: "Change room", exact: true }).click();
+  await first.getByRole("button", { name: /^Change room / }).click();
   const current = page.getByRole("option", { name: /Session room/ });
   await expect(current).toContainText("Current");
   await current.press("Enter");
@@ -452,8 +457,8 @@ test("shared connection errors follow native gateway state and keep source/playb
   await expect(page.getByText(/Reserved for Сессия/)).toBeVisible();
   await page.keyboard.press("Escape");
   const local = await show(page, "Preview headphones");
-  await local.getByRole("button", { name: "Stop", exact: true }).click();
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Stop / }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   await page
     .locator(".source-card")
     .getByRole("button", { name: "Stop capturing Preview player" })
@@ -563,7 +568,7 @@ test("changing and removing one live room preserves peer room sessions and playb
 }) => {
   await start(page);
   const first = await show(page, "Session room");
-  await first.getByRole("button", { name: "Change room", exact: true }).click();
+  await first.getByRole("button", { name: /^Change room / }).click();
   await page.getByRole("option", { name: "Lounge", exact: true }).click();
   await expect(
     page.getByText("Briefly reconnects to change rooms"),
@@ -625,7 +630,7 @@ test("a replacement waits for its own old server cleanup before any retargeting"
     });
   });
   const first = await show(page, "Session room");
-  await first.getByRole("button", { name: "Change room", exact: true }).click();
+  await first.getByRole("button", { name: /^Change room / }).click();
   await expect(
     page.getByText(
       "Finish cleanup for Late room before changing this destination.",
@@ -784,8 +789,8 @@ test("source and playback commands preserve blocked server lifetimes until expli
     });
   });
   const local = await show(page, "Preview headphones");
-  await local.getByRole("button", { name: "Stop", exact: true }).click();
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Stop / }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   const gain = page.getByRole("slider", { name: "Preview player gain" });
   await gain.press("ArrowLeft");
   await gain.blur();

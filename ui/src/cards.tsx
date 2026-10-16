@@ -12,12 +12,14 @@ import {
   X,
 } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { STAGES, STATUS, stageLine, statusKey } from "./copy";
+import { destinationStatusLabel, STAGES, stageLine, statusKey } from "./copy";
+import { HelpLink } from "./helpLinks";
 import { ServerTile, SourceGlyph } from "./icons";
 import type {
   DestCard as Dest,
   MeterMode,
   SourceCard as Source,
+  Stage,
 } from "./model";
 import { fraction, paint, useTelemetryStore } from "./telemetry";
 
@@ -457,8 +459,8 @@ export function StatTiles({
             ?.querySelectorAll<HTMLElement>("[data-value]")
             .forEach((el, i) => {
               if (i === values.length - 1) {
-                if ((n.drops ?? 0) > 0) el.dataset.warn = "";
-                else delete el.dataset.warn;
+                // Session totals do not establish a current audio problem.
+                delete el.dataset.warn;
               }
               el.textContent =
                 values[i] == null ? "—" : `${Math.round(values[i] ?? 0)}`;
@@ -501,9 +503,9 @@ export function StatTiles({
       </span>
       <span
         className="stat"
-        title="Native output frames dropped to keep queued audio bounded"
+        title="Native output frames dropped since this output started, to keep queued audio bounded"
       >
-        <span className="stat-label">Dropped</span>
+        <span className="stat-label">Dropped frames</span>
         <span className="stat-value tabular" data-value>
           —
         </span>
@@ -692,57 +694,46 @@ function ConnectLog({
   stage,
   room,
 }: {
-  stage?: string | undefined;
+  stage?: Stage | undefined;
   room: string;
 }) {
-  const times = useRef<Record<string, number>>({});
+  const observations = useRef<
+    { key: number; id: Stage; start: number; end?: number }[]
+  >([]);
+  const serial = useRef(0);
   useEvery(200);
   const now = performance.now();
-  if (stage && times.current[stage] === undefined) times.current[stage] = now;
-  const idx = STAGES.findIndex((x) => x.id === stage);
+  const previous = observations.current.at(-1);
+  if (stage && previous?.id !== stage) {
+    if (previous) previous.end = now;
+    observations.current.push({ key: ++serial.current, id: stage, start: now });
+    if (observations.current.length > 8) observations.current.shift();
+  }
   const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   return (
     <ol className="connect-log d-log" aria-label="Connection progress">
-      {STAGES.map((st, i) => {
-        const status = i < idx ? "done" : i === idx ? "now" : "wait";
-        const start = times.current[st.id];
-        const next = times.current[STAGES[i + 1]?.id ?? ""];
-        let result: ReactNode = "—";
-        if (status === "done")
-          result = (
-            <>
-              <span className="log-ok">OK</span>
-              {start !== undefined && next !== undefined && (
-                <span className="log-time">{secs(next - start)}</span>
-              )}
-            </>
-          );
-        else if (status === "now")
-          result = (
-            <>
-              <LoaderCircle size={13} className="spin" aria-hidden />
-              {start !== undefined && (
-                <span className="log-time">{secs(now - start)}</span>
-              )}
-            </>
-          );
+      {observations.current.map((observed) => {
+        const done = observed.end !== undefined;
         return (
           <li
-            key={st.id}
-            data-status={status}
-            aria-current={status === "now" ? "step" : undefined}
+            key={observed.key}
+            data-status={done ? "done" : "now"}
+            aria-current={done ? undefined : "step"}
           >
             <span className="log-mark" aria-hidden>
-              {status === "done" ? (
-                <Check size={13} />
-              ) : status === "now" ? (
-                <span className="log-dot" />
-              ) : (
-                <span className="log-dot" />
-              )}
+              {done ? <Check size={13} /> : <span className="log-dot" />}
             </span>
-            <span className="log-label">{LOG_LABEL[st.id]?.(room)}…</span>
-            <span className="log-result tabular">{result}</span>
+            <span className="log-label">{LOG_LABEL[observed.id]?.(room)}…</span>
+            <span className="log-result tabular">
+              {done ? (
+                <span className="log-ok">Done</span>
+              ) : (
+                <LoaderCircle size={13} className="spin" aria-hidden />
+              )}
+              <span className="log-time">
+                {secs((observed.end ?? now) - observed.start)}
+              </span>
+            </span>
           </li>
         );
       })}
@@ -760,7 +751,7 @@ function InlinePing({ uid }: { uid: string }) {
         () => {
           const n = store.net(uid);
           if (ref.current)
-            ref.current.textContent = `${n.buffer === null ? "—" : Math.round(n.buffer)} ms buffer · ${n.drops ?? "—"} dropped`;
+            ref.current.textContent = `${n.buffer === null ? "—" : Math.round(n.buffer)} ms queued · ${n.drops ?? "—"} frames dropped since start`;
         },
         2,
       ),
@@ -802,13 +793,19 @@ function Slip({
   text,
   compact,
   children,
+  id,
 }: {
   text: string;
+  id?: string | undefined;
   compact?: boolean;
   children?: ReactNode | undefined;
 }) {
   return (
-    <div className={`slip${compact ? " operation-slip" : ""}`} role="alert">
+    <div
+      id={id}
+      className={`slip${compact ? " operation-slip" : ""}`}
+      role="note"
+    >
       <TriangleAlert size={16} aria-hidden className="slip-icon" />
       <span className="slip-text" title={text}>
         {text}
@@ -893,11 +890,13 @@ function useIdentityNotice(
 const sourceTag = (c: Source) =>
   c.state === "opening"
     ? "Opening…"
-    : c.state === "stopped"
-      ? "Stopped"
-      : c.muted && c.state === "capturing"
-        ? "Muted"
-        : null;
+    : c.state === "fault"
+      ? "Fault"
+      : c.state === "stopped"
+        ? "Stopped"
+        : c.muted && c.state === "capturing"
+          ? "Muted"
+          : null;
 
 /* ----------------------------------------------------------------- sources */
 
@@ -938,12 +937,27 @@ export function SourceCard({
   );
   const detail =
     notice ??
-    (card.restored
-      ? "From last session · press Capture to reattach"
+    (card.restored && s.kind === "application" && card.state === "stopped"
+      ? "From last session. Press Capture to start."
       : s.detail);
   const tag = sourceTag(card);
+  const restartRequired =
+    card.fault?.code === "engine-stopped" ||
+    card.fault?.code === "cleanup-incomplete" ||
+    card.operationError?.code === "engine-stopped";
+  const selectRequired =
+    !restartRequired &&
+    ((card.state === "fault" &&
+      (!s.available || card.fault?.code === "invalid-selection")) ||
+      (card.operationError?.code === "invalid-selection" &&
+        (card.operationCommand === "start-capture" ||
+          card.operationCommand === "replace-source")));
+  const noteId = `source-note-${card.uid}`;
+  const hasNote = Boolean(
+    card.operationError || (card.state === "fault" && card.fault),
+  );
   const idle =
-    card.state === "stopped"
+    card.state === "stopped" || card.state === "fault"
       ? "Not capturing"
       : opening
         ? "Opening…"
@@ -956,6 +970,7 @@ export function SourceCard({
         className="btn btn-capture"
         data-on
         onClick={h.stop}
+        aria-describedby={hasNote ? noteId : undefined}
         title={`Stop capturing ${s.name}`}
         aria-label={`Stop capturing ${s.name}`}
       >
@@ -964,18 +979,30 @@ export function SourceCard({
         ) : (
           <Square size={11} fill="currentColor" />
         )}
-        <span>{opening ? "Opening" : "Stop"}</span>
+        <span>Stop</span>
       </button>
     ) : (
       <button
         type="button"
         className="btn btn-capture btn-primary"
-        onClick={h.capture}
-        title={`Capture ${s.name}`}
-        aria-label={`Capture ${s.name}`}
+        onClick={() => {
+          if (!restartRequired) (selectRequired ? h.change : h.capture)();
+        }}
+        aria-disabled={restartRequired}
+        aria-describedby={hasNote ? noteId : undefined}
+        title={
+          restartRequired
+            ? "Quit and reopen Echocord before capturing again."
+            : selectRequired
+              ? `Select ${s.name} again`
+              : `Capture ${s.name}`
+        }
+        aria-label={
+          selectRequired ? `Select ${s.name} again` : `Capture ${s.name}`
+        }
       >
         <Circle size={11} fill="currentColor" />
-        <span>Capture</span>
+        <span>{selectRequired ? "Select again" : "Capture"}</span>
       </button>
     );
 
@@ -983,14 +1010,22 @@ export function SourceCard({
     <button
       type="button"
       className="identity"
-      onClick={h.change}
+      onClick={() => {
+        if (!restartRequired) h.change();
+      }}
+      aria-disabled={restartRequired}
+      aria-describedby={hasNote ? noteId : undefined}
       title={`Change ${s.name}`}
       aria-label={`Change ${s.name}`}
     >
       <SourceGlyph glyph={s.glyph} tint={s.tint} />
       <span className="id-text">
         <span className="id-name">{s.name}</span>
-        <span className="id-detail" data-notice={notice ? true : undefined}>
+        <span
+          className="id-detail"
+          title={detail ?? undefined}
+          data-notice={notice ? true : undefined}
+        >
           {detail}
         </span>
       </span>
@@ -998,13 +1033,22 @@ export function SourceCard({
     </button>
   );
 
-  const fault = card.state === "fault" && card.fault && (
-    <Slip text={card.fault.title}>
-      <button type="button" className="btn btn-small" onClick={h.fault}>
-        {card.fault.actionLabel}
-      </button>
-    </Slip>
-  );
+  const fault = card.state === "fault" &&
+    card.fault &&
+    !card.operationError && (
+      <Slip id={noteId} text={card.fault.title}>
+        {!restartRequired && !selectRequired && (
+          <button
+            type="button"
+            className="btn btn-small"
+            onClick={h.fault}
+            aria-label={`Select ${s.name} again`}
+          >
+            Select again
+          </button>
+        )}
+      </Slip>
+    );
 
   return (
     <article
@@ -1027,39 +1071,37 @@ export function SourceCard({
         {tag && <span className="tag state-tag">{tag}</span>}
         <Remove label={`Remove ${s.name}`} onClick={h.remove} />
       </div>
-      {fault ? (
-        <div className="card-row fault-row">{fault}</div>
-      ) : (
-        <div className="card-row controls-row">
-          {capture}
-          <MuteToggle
-            muted={card.muted}
-            onChange={h.mute}
-            what={`${s.name} in the mix`}
-          />
-          {card.operationError ? (
-            <Slip text={card.operationError} compact>
-              <button
-                type="button"
-                className="btn btn-small"
-                onClick={h.dismiss}
-              >
-                Dismiss
-              </button>
-            </Slip>
-          ) : (
-            <ChannelFader
-              levelKey={`src:${card.uid}`}
-              mode={expand ? "simple" : mode}
-              gainDb={card.gainDb}
-              onChange={h.gain}
-              onCommit={h.commit}
-              label={`${s.name} gain`}
-              muted={card.muted}
-              idle={idle}
-              readout={readout}
-            />
-          )}
+      <div className="card-row controls-row">
+        {capture}
+        <MuteToggle
+          muted={card.muted}
+          onChange={h.mute}
+          what={`${s.name} in the mix`}
+        />
+        <ChannelFader
+          levelKey={`src:${card.uid}`}
+          mode={expand ? "simple" : mode}
+          gainDb={card.gainDb}
+          onChange={h.gain}
+          onCommit={h.commit}
+          label={`${s.name} gain`}
+          muted={card.muted}
+          idle={idle}
+          readout={readout}
+        />
+      </div>
+      {fault && <div className="card-row fault-row">{fault}</div>}
+      {card.operationError && (
+        <div className="card-row fault-row">
+          <Slip id={noteId} text={card.operationError.message} compact>
+            <button
+              type="button"
+              className="btn btn-small btn-quiet"
+              onClick={h.dismiss}
+            >
+              Dismiss
+            </button>
+          </Slip>
         </div>
       )}
       {expand && <SourceHistory levelKey={`src:${card.uid}`} />}
@@ -1081,6 +1123,7 @@ export interface DestHandlers {
   mute: (m: boolean) => void;
   fault: () => void;
   details: () => void;
+  bot: () => void;
 }
 
 function Preflight({
@@ -1143,17 +1186,23 @@ export function DestCard({
   const { host, readout } = useLevel(`dst:${card.uid}`);
   const local = card.kind === "playback";
   const sk = local && card.state === "live" ? "playing" : statusKey(card.state);
-  const statusLabel = local
-    ? card.state === "live"
-      ? "Playing"
-      : card.state === "connecting"
-        ? "Opening"
-        : card.state === "disconnecting"
-          ? "Stopping"
-          : card.state === "fault" || card.state === "cleanup-incomplete"
-            ? "Fault"
-            : "Stopped"
-    : STATUS[statusKey(card.state)];
+  const statusLabel =
+    card.connection.phase === "error" &&
+    card.connection.code === "cleanup-incomplete"
+      ? "Unconfirmed"
+      : destinationStatusLabel(card.state, card.kind);
+  const identityName = local
+    ? channel.name
+    : `${channel.name} on ${server.name}`;
+  const detailsLabel = `${local ? "Playback output" : "Connection"} details for ${identityName}`;
+  const errorCode =
+    card.operationCommand === "connect-destination" && card.operationError
+      ? card.operationError.code
+      : card.connection.phase === "error"
+        ? card.connection.code
+        : undefined;
+  const cleanupUnconfirmed =
+    card.state === "cleanup-incomplete" || errorCode === "cleanup-incomplete";
   const notice = useIdentityNotice(
     `${card.kind}:${card.deviceId ?? `${card.serverId}:${card.channelId}`}`,
     channel.name,
@@ -1168,46 +1217,78 @@ export function DestCard({
     !card.confirmRemove
   );
   const hasNet = live || card.state === "recovering";
+  const noteId = `destination-note-${card.uid}`;
+  const hasNote = Boolean(
+    card.operationError || card.fault || card.state === "recovering",
+  );
 
   let action: ReactNode;
-  if (card.state === "idle") {
+  if (cleanupUnconfirmed) {
+    const label = local ? "Stop" : "Disconnect";
     action = (
       <button
         type="button"
-        className="btn btn-primary btn-connect"
-        onClick={h.connect}
+        className="btn btn-connect"
+        onClick={h.disconnect}
+        aria-describedby={hasNote ? noteId : undefined}
+        aria-label={`${label} ${identityName}`}
       >
-        {local ? "Play" : "Connect"}
-      </button>
-    );
-  } else if (card.state === "cleanup-incomplete") {
-    action = (
-      <button type="button" className="btn btn-connect" onClick={h.disconnect}>
-        {local ? "Retry stop" : "Retry disconnect"}
-      </button>
-    );
-  } else if (card.state === "fault") {
-    action = (
-      <button type="button" className="btn btn-connect" onClick={h.connect}>
-        Retry
+        {label}
       </button>
     );
   } else if (card.state === "disconnecting") {
     action = (
-      <button type="button" className="btn btn-connect" disabled>
+      <button
+        type="button"
+        className="btn btn-connect"
+        aria-disabled="true"
+        aria-describedby={hasNote ? noteId : undefined}
+        aria-label={`${local ? "Stopping" : "Leaving"} ${identityName}`}
+      >
         <LoaderCircle size={14} className="spin" />
         {local ? "Stopping" : "Leaving"}
       </button>
     );
+  } else if (card.state === "idle" || card.state === "fault") {
+    const setup =
+      !local &&
+      (!botReady ||
+        errorCode === "authentication" ||
+        errorCode === "configuration");
+    const change = errorCode === "invalid-selection";
+    const label = setup
+      ? "Set up bot"
+      : change
+        ? local
+          ? "Change device"
+          : "Change room"
+        : local
+          ? "Play"
+          : "Connect";
+    action = (
+      <button
+        type="button"
+        className="btn btn-primary btn-connect"
+        onClick={setup ? h.bot : change ? h.change : h.connect}
+        aria-describedby={hasNote ? noteId : undefined}
+        aria-label={`${label} ${setup ? `for ${identityName}` : identityName}`}
+      >
+        {label}
+      </button>
+    );
   } else {
+    const label =
+      card.state === "connecting" ? "Cancel" : local ? "Stop" : "Disconnect";
     action = (
       <button
         type="button"
         className="btn btn-connect"
         data-on
         onClick={h.disconnect}
+        aria-describedby={hasNote ? noteId : undefined}
+        aria-label={`${label} ${identityName}`}
       >
-        {busy ? "Cancel" : local ? "Stop" : "Disconnect"}
+        {label}
       </button>
     );
   }
@@ -1217,9 +1298,24 @@ export function DestCard({
       type="button"
       className="badge"
       data-status={sk}
-      onClick={h.details}
-      disabled={!hasNet}
-      title={hasNet ? "Connection details" : undefined}
+      onClick={() => {
+        if (hasNet) h.details();
+      }}
+      aria-disabled={!hasNet}
+      title={
+        cleanupUnconfirmed
+          ? "Cleanup unconfirmed"
+          : hasNet
+            ? detailsLabel
+            : statusLabel
+      }
+      aria-label={
+        cleanupUnconfirmed
+          ? "Cleanup unconfirmed"
+          : hasNet
+            ? `${statusLabel}. ${detailsLabel}`
+            : statusLabel
+      }
     >
       <span className="badge-dot" aria-hidden />
       {statusLabel}
@@ -1230,9 +1326,13 @@ export function DestCard({
     <button
       type="button"
       className="identity"
-      onClick={h.change}
-      title="Change room"
-      aria-label={local ? `Change ${channel.name}` : "Change room"}
+      onClick={() => {
+        if (!cleanupUnconfirmed && card.state !== "disconnecting") h.change();
+      }}
+      aria-disabled={cleanupUnconfirmed || card.state === "disconnecting"}
+      aria-describedby={hasNote ? noteId : undefined}
+      title={`${local ? "Change device" : "Change room"}: ${identityName}`}
+      aria-label={`${local ? "Change device" : "Change room"} ${identityName}`}
     >
       {local ? (
         <SourceGlyph glyph="playback" tint="#6b7f8e" />
@@ -1290,17 +1390,17 @@ export function DestCard({
         </span>
       </div>
     );
-  } else if (faulted && card.fault) {
+  } else if (faulted && card.fault && !card.operationError) {
     body = (
-      <Slip text={card.fault.title}>
-        <button type="button" className="btn btn-small" onClick={h.fault}>
-          {card.fault.actionLabel}
-        </button>
+      <Slip id={noteId} text={card.fault.title}>
+        {errorCode === "permission-denied" && (
+          <HelpLink to="guide">Permissions guide</HelpLink>
+        )}
       </Slip>
     );
   } else if (card.operationError) {
     body = (
-      <Slip text={card.operationError} compact>
+      <Slip id={noteId} text={card.operationError.message} compact>
         <button type="button" className="btn btn-small" onClick={h.dismiss}>
           Dismiss
         </button>
@@ -1322,7 +1422,6 @@ export function DestCard({
             {STAGES.map((st, i) => (
               <li
                 key={st.id}
-                data-done={i < idx || undefined}
                 data-now={i === idx || undefined}
                 aria-current={i === idx ? "step" : undefined}
               >
@@ -1340,9 +1439,14 @@ export function DestCard({
     body = (
       <>
         {card.state === "recovering" && (
-          <span className="net-line warn" aria-live="polite">
-            <TriangleAlert size={13} aria-hidden /> Connection dropped ·
-            retrying ({card.attempt ?? 1} of 3)
+          <span id={noteId} className="net-line warn">
+            <TriangleAlert size={13} aria-hidden />
+            {card.connection.phase === "recovering"
+              ? card.connection.message
+              : "Reconnecting…"}
+            {card.attempt !== undefined &&
+              card.attempt > 1 &&
+              ` Attempt ${card.attempt}.`}
           </span>
         )}
         {/* Density is chosen by CSS from the height the card actually gets:
@@ -1351,25 +1455,34 @@ export function DestCard({
           type="button"
           className="stats-btn d-tiles"
           onClick={h.details}
-          title="Connection details"
+          title={detailsLabel}
+          aria-label={detailsLabel}
         >
           <StatTiles uid={card.uid} local={local} />
         </button>
         <div className="chart-slot d-chart">
           <NetChart uid={card.uid} seconds={60} local={local} />
         </div>
-        <span className="net-line tabular d-meta">
-          <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} />{" "}
-          {local ? "playing" : "on air"}
-        </span>
+        {live && (
+          <span className="net-line tabular d-meta">
+            <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} />{" "}
+            {local ? "playing" : "on air"}
+          </span>
+        )}
         <button
           type="button"
           className="net-line tabular d-line"
           onClick={h.details}
-          title="Connection details"
+          title={detailsLabel}
+          aria-label={detailsLabel}
         >
-          <InlinePing uid={card.uid} /> <span className="sep" />
-          <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} />
+          <InlinePing uid={card.uid} />
+          {live && (
+            <>
+              <span className="sep" />
+              <Timer size={13} aria-hidden /> <OnAirTime since={card.liveAt} />
+            </>
+          )}
         </button>
       </>
     );
@@ -1436,13 +1549,13 @@ export function DestCard({
         {badge}
         {remove}
       </div>
-      {!faulted && !card.confirmRemove && (
+      {!card.confirmRemove && (
         <div className="card-row controls-row">
           {action}
           <MuteToggle
             muted={card.muted}
             onChange={h.mute}
-            what={channel.name}
+            what={identityName}
           />
           <ChannelFader
             levelKey={`dst:${card.uid}`}
@@ -1450,7 +1563,7 @@ export function DestCard({
             gainDb={card.volumeDb}
             onChange={h.volume}
             onCommit={h.commit}
-            label={`${channel.name} volume`}
+            label={`${identityName} volume`}
             muted={card.muted}
             idle={live ? undefined : local ? "Not playing" : "Not sending"}
             readout={readout}
@@ -1508,7 +1621,11 @@ export function SlotHead({
   return (
     <header className="slot-head">
       <h2 className="slot-title">{title}</h2>
-      {summary && <span className="slot-summary">{summary}</span>}
+      {summary && (
+        <span className="slot-summary" title={summary}>
+          {summary}
+        </span>
+      )}
       {chips.length > 1 && (
         <nav className="chips" aria-label={`Jump to ${title.toLowerCase()}`}>
           {chips.map((c, i) => (
@@ -1518,8 +1635,8 @@ export function SlotHead({
               className="ch chip tabular"
               data-colour={c.colour}
               data-state={c.state}
-              aria-label={`Show ${itemLabel.toLowerCase()} ${i + 1}: ${c.label}`}
-              title={`${itemLabel} ${i + 1}: ${c.label}`}
+              aria-label={`Show ${itemLabel.toLowerCase()} ${i + 1}: ${c.label}, ${c.state === "cleanup-incomplete" ? "cleanup unconfirmed" : c.state}`}
+              title={`${itemLabel} ${i + 1}: ${c.label}, ${c.state === "cleanup-incomplete" ? "cleanup unconfirmed" : c.state}`}
               onClick={() => jump(c.uid)}
             >
               {i + 1}

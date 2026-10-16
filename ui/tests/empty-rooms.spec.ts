@@ -120,7 +120,6 @@ for (const [width, height] of [
         await page
           .getByRole("button", {
             name: "Show destination 4: Late room on Late session",
-            exact: true,
           })
           .click();
         const last = page.locator(".dest-card").last();

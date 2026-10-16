@@ -13,7 +13,7 @@ test("live settings remain applied when saving fails and retry saves without rep
   await expect(tray).not.toBeChecked();
   await expect(
     page.getByRole("dialog").getByRole("region", { name: "Save status" }),
-  ).toContainText("Changes still apply now");
+  ).toContainText("Changes apply now");
   await page
     .getByRole("dialog")
     .getByRole("button", { name: "Retry save" })
@@ -87,9 +87,7 @@ for (const [width, height] of [
       page.locator(".source-card").getByRole("button", { name: /^Mute / }),
     ).toBeInViewport();
     await expect(
-      page
-        .locator(".dest-card")
-        .getByRole("button", { name: "Disconnect", exact: true }),
+      page.locator(".dest-card").getByRole("button", { name: /^Disconnect / }),
     ).toBeInViewport();
     expect(
       await page.evaluate(
@@ -103,3 +101,28 @@ for (const [width, height] of [
     });
   });
 }
+
+test("background save progress stays pending until the native writer finishes", async ({
+  page,
+}) => {
+  await page.goto("/tests/harness.html?fixture=connected");
+  await page.evaluate(() =>
+    window.uiHarness.transport.emit({
+      preferencesSaving: true,
+      preferencesWarning: {
+        code: "configuration",
+        message: "Preferences could not be saved.",
+      },
+    }),
+  );
+  const saving = page.getByRole("button", { name: "Saving…", exact: true });
+  await expect(saving).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByRole("status")).toHaveText("Saving changes.");
+  await page.evaluate(() =>
+    window.uiHarness.transport.emit({ preferencesSaving: false }),
+  );
+  await expect(
+    page.getByRole("button", { name: "Retry save", exact: true }),
+  ).toBeEnabled();
+  await expect(page.getByRole("status")).toContainText("Still not saved");
+});

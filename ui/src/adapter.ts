@@ -29,6 +29,9 @@ export interface ViewState {
   error: AppError | null;
   commandError: AppError | null;
   commandErrorCommand: ControlCommand | null;
+  targetErrors: Readonly<
+    Record<string, { error: AppError; command: ControlCommand }>
+  >;
   pending: readonly string[];
   configuringBot: boolean;
   configurationError: AppError | null;
@@ -42,6 +45,7 @@ export function appError(value: unknown): AppError {
     "authentication",
     "permission-denied",
     "capture-failed",
+    "engine-stopped",
     "connection-failed",
     "cleanup-incomplete",
     "internal",
@@ -61,6 +65,63 @@ export function appError(value: unknown): AppError {
       "Could not reach Echocord. Reopen the app or retry loading its status.",
   };
 }
+function commandTarget(command: ControlCommand | null) {
+  if (command && "stripId" in command) return `src:${command.stripId}`;
+  if (command && "destinationId" in command)
+    return `dst:${command.destinationId}`;
+  return null;
+}
+
+function targetExists(snapshot: ControlSnapshot | null, target: string) {
+  return Boolean(
+    snapshot?.inputs.some((input) => target === `src:${input.stripId}`) ||
+      snapshot?.destinations.some(
+        (destination) => target === `dst:${destination.destinationId}`,
+      ),
+  );
+}
+
+function configurationError(value: unknown): AppError {
+  // Configuration failures may contain token-bearing native exception text.
+  // Select fixed copy by known code only; never forward the supplied message.
+  const code =
+    typeof value === "object" && value !== null && "code" in value
+      ? value.code
+      : null;
+  switch (code) {
+    case "authentication":
+      return {
+        code,
+        message:
+          "Discord rejected this bot token. Check it in the Developer Portal and try again.",
+      };
+    case "busy":
+      return {
+        code,
+        message:
+          "Disconnect Discord outputs and finish pending cleanup before replacing the token.",
+      };
+    case "connection-failed":
+      return {
+        code,
+        message:
+          "Could not reach Discord. Check your connection and try again.",
+      };
+    case "permission-denied":
+      return {
+        code,
+        message:
+          "Permission was denied while saving this bot. Check access and try again.",
+      };
+    default:
+      return {
+        code: "configuration",
+        message:
+          "Could not confirm this bot token was saved. Check bot status and try again.",
+      };
+  }
+}
+
 interface FaderWork {
   command: ControlCommand | null;
   timer: ReturnType<typeof setTimeout> | null;
@@ -84,6 +145,7 @@ export class ControlAdapter {
     error: null,
     commandError: null,
     commandErrorCommand: null,
+    targetErrors: {},
     pending: [],
     configuringBot: false,
     configurationError: null,
@@ -114,12 +176,22 @@ export class ControlAdapter {
     this.revision = snapshot.revision;
     this.telemetry.setDestinations(snapshot.destinations);
     this.telemetry.ingest(snapshot.telemetry);
+    this.telemetry.setInputs(snapshot.inputs);
     if (
       !this.state.snapshot ||
       controls(this.state.snapshot) !== controls(snapshot) ||
       this.state.phase !== "ready"
     )
-      this.publish({ snapshot, phase: "ready", error: null });
+      this.publish({
+        snapshot,
+        phase: "ready",
+        error: null,
+        targetErrors: Object.fromEntries(
+          Object.entries(this.state.targetErrors).filter(([target]) =>
+            targetExists(snapshot, target),
+          ),
+        ),
+      });
   };
   start = async () => {
     this.dispose();
@@ -131,6 +203,7 @@ export class ControlAdapter {
       error: null,
       commandError: null,
       commandErrorCommand: null,
+      targetErrors: {},
       pending: [],
       configuringBot: false,
       configurationError: null,
@@ -194,16 +267,30 @@ export class ControlAdapter {
     this.telemetry.setVisible(false);
     this.telemetry.clear();
   };
-  dismissError = () =>
-    this.publish({ commandError: null, commandErrorCommand: null });
+  dismissError = (target?: string) => {
+    const currentTarget = commandTarget(this.state.commandErrorCommand);
+    const targetErrors = { ...this.state.targetErrors };
+    if (target) delete targetErrors[target];
+    this.publish({
+      targetErrors,
+      ...(target === undefined || target === currentTarget
+        ? { commandError: null, commandErrorCommand: null }
+        : {}),
+    });
+  };
   dispatch = async (command: ControlCommand): Promise<boolean> => {
     if (!this.active || this.state.phase !== "ready") return false;
     const g = this.generation;
     const key = JSON.stringify(command);
+    const target = commandTarget(command);
+    const targetErrors = { ...this.state.targetErrors };
+    if (target) delete targetErrors[target];
     this.publish({
       pending: [...this.state.pending, key],
-      commandError: null,
-      commandErrorCommand: null,
+      targetErrors,
+      ...(target === commandTarget(this.state.commandErrorCommand)
+        ? { commandError: null, commandErrorCommand: null }
+        : {}),
     });
     try {
       await this.transport.dispatch(command);
@@ -213,6 +300,14 @@ export class ControlAdapter {
         this.publish({
           commandError: appError(e),
           commandErrorCommand: command,
+          ...(target && targetExists(this.state.snapshot, target)
+            ? {
+                targetErrors: {
+                  ...this.state.targetErrors,
+                  [target]: { error: appError(e), command },
+                },
+              }
+            : {}),
         });
       return false;
     } finally {
@@ -233,15 +328,9 @@ export class ControlAdapter {
       token = "";
       await request;
       return this.active && g === this.generation;
-    } catch {
+    } catch (error) {
       if (this.active && g === this.generation)
-        this.publish({
-          configurationError: {
-            code: "configuration",
-            message:
-              "Could not confirm this bot token was saved. Check bot status and try again.",
-          },
-        });
+        this.publish({ configurationError: configurationError(error) });
       return false;
     } finally {
       token = "";

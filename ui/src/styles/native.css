@@ -89,21 +89,6 @@ body {
   object-fit: cover;
   border-radius: inherit;
 }
-.source-card .controls-row > .slip {
-  height: var(--cf-h);
-  padding: 3px 6px;
-  gap: 6px;
-}
-.operation-slip {
-  height: 28px;
-  padding: 1px 6px;
-  gap: 6px;
-}
-.operation-slip .slip-text {
-  display: block;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
 
 /* Compact progress geometry; traces use native rings. */
 .spark {
@@ -346,4 +331,130 @@ body {
   background: var(--bg);
   border-top: 0;
   padding-top: 10px;
+}
+
+/* Faults retain the ordinary controls and add their recovery message below. */
+.source-card.row:has(.fault-row) {
+  flex: none;
+  grid-template-rows: 40px var(--cf-h) auto;
+  min-height: 0;
+}
+.source-card.row .fault-row {
+  grid-row: auto;
+}
+.source-card.row[data-expand]:has(.fault-row) {
+  flex: 1 1 0;
+  grid-template-rows: 40px var(--cf-h) auto minmax(0, 1fr);
+  min-height: 260px;
+}
+.dest-card.panel:has(.dest-body > .slip) {
+  flex: none;
+  min-height: max-content;
+}
+.dst-list[data-count="1"] > .dest-card.panel:has(.dest-body > .slip) {
+  flex: 1 0 auto;
+  min-height: max-content;
+}
+.slip.operation-slip {
+  height: auto;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+.slip .slip-text {
+  display: block;
+  flex: 1 1 12rem;
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.slip {
+  flex-wrap: wrap;
+}
+.slip-icon {
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.slip-actions:empty {
+  display: none;
+}
+.slip-actions {
+  flex-wrap: wrap;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+.slip-actions .help-link {
+  white-space: normal;
+}
+.bot-chip[data-bot="error"] .bot-dot {
+  background: var(--fault);
+}
+.bot-recovery {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--fault-line);
+  border-radius: var(--r-ctl);
+  background: var(--fault-bg);
+  color: var(--ink);
+  margin-bottom: 16px;
+}
+.bot-recovery p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.chip[data-state="cleanup-incomplete"] {
+  color: var(--fault);
+  border-color: var(--fault-line);
+}
+.chip[data-state="connecting"],
+.chip[data-state="recovering"],
+.chip[data-state="disconnecting"] {
+  color: var(--standby);
+  border-color: var(--standby-line);
+}
+.btn[aria-disabled="true"],
+.identity[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+.badge[aria-disabled="true"] {
+  cursor: default;
+}
+.net-line.warn {
+  white-space: normal;
+  align-items: flex-start;
+}
+@container win (max-height: 539px) {
+  .card:has(.slip) {
+    padding: 10px;
+    gap: 8px;
+  }
+  .slip,
+  .slip.operation-slip {
+    padding: 6px 8px;
+  }
+  .slip .slip-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+}
+
+@container win (max-height: 455px) and (max-width: 699px) {
+  .window:has(.dst-slot[data-many] .slip) .src-slot .empty {
+    flex-direction: row;
+    justify-content: space-between;
+    min-height: 80px;
+    padding: 8px 12px;
+    gap: 12px;
+    text-align: left;
+  }
+  .window:has(.dst-slot[data-many] .slip) .src-slot .empty > .btn {
+    flex: none;
+  }
 }

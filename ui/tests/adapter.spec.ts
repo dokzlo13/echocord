@@ -422,3 +422,118 @@ test("fixture room joins share a gateway lifetime while joining or recovering pe
   await t.dispatch({ type: "disconnect-destination", destinationId: "dest:3" });
   expect(t.current.gateway.phase).toBe("disconnected");
 });
+
+test("card errors survive other card operations and dismiss independently", async () => {
+  const t = new FixtureTransport("many");
+  const adapter = new ControlAdapter(t);
+  await adapter.start();
+  t.reject = {
+    code: "invalid-selection",
+    message: "Select this application again.",
+  };
+  await adapter.dispatch({ type: "start-capture", stripId: "strip:1" });
+  t.reject = null;
+  await adapter.dispatch({
+    type: "set-source-muted",
+    stripId: "strip:2",
+    muted: false,
+  });
+  expect(
+    adapter.getSnapshot().targetErrors["src:strip:1"]?.error.message,
+  ).toContain("Select this application");
+  t.reject = { code: "busy", message: "This output is still stopping." };
+  await adapter.dispatch({
+    type: "connect-destination",
+    destinationId: "dest:1",
+  });
+  expect(Object.keys(adapter.getSnapshot().targetErrors)).toHaveLength(2);
+  adapter.dismissError("src:strip:1");
+  expect(adapter.getSnapshot().targetErrors["src:strip:1"]).toBeUndefined();
+  expect(
+    adapter.getSnapshot().targetErrors["dst:dest:1"]?.error.message,
+  ).toContain("still stopping");
+  t.reject = null;
+  await adapter.dispatch({
+    type: "remove-destination",
+    destinationId: "dest:1",
+  });
+  expect(adapter.getSnapshot().targetErrors).toEqual({});
+  adapter.dispose();
+});
+
+test("token failures retain useful codes without propagating private exception text", async () => {
+  for (const [code, text] of [
+    ["authentication", "Discord rejected"],
+    ["busy", "Disconnect Discord outputs"],
+    ["connection-failed", "Could not reach Discord"],
+    ["internal", "Could not confirm"],
+  ] as const) {
+    const t = new FixtureTransport();
+    t.configureBot = async () => {
+      throw { code, message: "private synthetic token must not be displayed" };
+    };
+    const adapter = new ControlAdapter(t);
+    await adapter.start();
+    expect(await adapter.configureBot("synthetic-token")).toBe(false);
+    expect(adapter.getSnapshot().configurationError?.message).toContain(text);
+    expect(adapter.getSnapshot().configurationError?.message).not.toContain(
+      "private",
+    );
+    adapter.dispose();
+  }
+});
+
+test("source replacement clears only that identity's history and peak while recapture preserves peers", async () => {
+  const t = new FixtureTransport("many");
+  const adapter = new ControlAdapter(t);
+  await adapter.start();
+  adapter.telemetry.ingest(t.current.telemetry);
+  const peer = adapter.telemetry.history("src:strip:2");
+  const original = adapter.telemetry.history("src:strip:1");
+  expect(original).toBeDefined();
+  adapter.telemetry.read("src:strip:1");
+  t.emit({
+    inputs: t.current.inputs.map((input) =>
+      input.stripId === "strip:1"
+        ? {
+            ...input,
+            sourceId: "recording:new-owned-fixture",
+            phase: "opening",
+          }
+        : input,
+    ),
+  });
+  expect(adapter.telemetry.history("src:strip:1")).toBeUndefined();
+  expect(adapter.telemetry.read("src:strip:1").peak).toBeNull();
+  expect(adapter.telemetry.history("src:strip:2")).toBe(peer);
+  await wait(110);
+  adapter.telemetry.ingest(t.current.telemetry);
+  const replaced = adapter.telemetry.history("src:strip:1");
+  expect(replaced).toBeDefined();
+  expect(replaced).not.toBe(original);
+  t.emit({
+    inputs: t.current.inputs.map((input) => ({ ...input, phase: "capturing" })),
+  });
+  expect(adapter.telemetry.history("src:strip:1")).toBe(replaced);
+  adapter.dispose();
+});
+
+test("rejected unknown targets do not grow the card error inventory", async () => {
+  const t = new FixtureTransport();
+  const adapter = new ControlAdapter(t);
+  await adapter.start();
+  t.reject = {
+    code: "invalid-selection",
+    message: "This source no longer exists.",
+  };
+  for (let index = 0; index < 20; index++)
+    await adapter.dispatch({
+      type: "start-capture",
+      stripId: `missing:${index}`,
+    });
+  expect(adapter.getSnapshot().targetErrors).toEqual({});
+  expect(adapter.getSnapshot().commandError?.message).toContain(
+    "no longer exists",
+  );
+  adapter.dispose();
+});

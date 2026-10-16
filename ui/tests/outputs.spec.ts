@@ -13,7 +13,10 @@ async function addPlayback(page: Page, name = "Preview headphones") {
   await page.getByRole("option", { name: new RegExp(name) }).press("Enter");
   await expect(page.getByRole("dialog")).toHaveCount(0);
   return page.locator('.dest-card[data-kind="playback"]').filter({
-    has: page.getByRole("button", { name: `Change ${name}`, exact: true }),
+    has: page.getByRole("button", {
+      name: `Change device ${name}`,
+      exact: true,
+    }),
   });
 }
 
@@ -23,21 +26,15 @@ test("first-run playback needs no bot and is idle until explicit Play", async ({
   await start(page, "first-run");
   const card = await addPlayback(page);
   await expect(card).toHaveAttribute("data-state", "idle");
-  await expect(
-    card.getByRole("button", { name: "Play", exact: true }),
-  ).toBeVisible();
+  await expect(card.getByRole("button", { name: /^Play / })).toBeVisible();
   expect(
     await page.evaluate(() =>
       window.uiHarness.transport.commands.map((c) => c.type),
     ),
   ).toEqual(["add-playback-destination"]);
-  await card.getByRole("button", { name: "Play", exact: true }).click();
-  await expect(
-    card.getByRole("button", { name: "Playing", exact: true }),
-  ).toBeVisible();
-  await expect(
-    card.getByRole("button", { name: "Connect", exact: true }),
-  ).toHaveCount(0);
+  await card.getByRole("button", { name: /^Play / }).click();
+  await expect(card.getByRole("button", { name: /^Playing\./ })).toBeVisible();
+  await expect(card.getByRole("button", { name: /^Connect / })).toHaveCount(0);
   await expect(card.getByText("On air", { exact: true })).toHaveCount(0);
 });
 
@@ -46,7 +43,7 @@ test("playback Stop mute gain remove and endpoint replacement target only its ca
 }) => {
   await start(page);
   const local = await addPlayback(page);
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   await local
     .getByRole("button", { name: "Mute Preview headphones", exact: true })
     .click();
@@ -55,7 +52,10 @@ test("playback Stop mute gain remove and endpoint replacement target only its ca
     .press("ArrowLeft");
   await local.getByRole("slider", { name: "Preview headphones volume" }).blur();
   await local
-    .getByRole("button", { name: "Change Preview headphones", exact: true })
+    .getByRole("button", {
+      name: "Change device Preview headphones",
+      exact: true,
+    })
     .click();
   await expect(
     page.getByRole("tab", { name: "Discord", exact: true }),
@@ -65,7 +65,7 @@ test("playback Stop mute gain remove and endpoint replacement target only its ca
     "Preview speakers",
   );
   const current = page.locator('.dest-card[data-kind="playback"]');
-  await current.getByRole("button", { name: "Stop", exact: true }).click();
+  await current.getByRole("button", { name: /^Stop / }).click();
   await current
     .getByRole("button", { name: "Remove Preview speakers", exact: true })
     .click();
@@ -99,13 +99,13 @@ test("local playback and discovery remain usable during Discord join and REST fa
     });
   });
   const local = await addPlayback(page);
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   await expect(local).toHaveAttribute("data-state", "live");
   await expect(page.locator('.dest-card[data-kind="discord"]')).toHaveAttribute(
     "data-state",
     "connecting",
   );
-  await local.getByRole("button", { name: "Stop", exact: true }).click();
+  await local.getByRole("button", { name: /^Stop / }).click();
   expect(
     await page.evaluate(() =>
       window.uiHarness.transport.commands.some(
@@ -120,7 +120,7 @@ test("token replacement is available while only playback runs", async ({
 }) => {
   await start(page, "disconnected");
   const local = await addPlayback(page);
-  await local.getByRole("button", { name: "Play", exact: true }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
   await page.getByRole("button", { name: "Preview bot", exact: false }).click();
   await expect(
     page.getByRole("button", { name: "Replace token", exact: true }),
@@ -170,9 +170,7 @@ test("local faults and unconfirmed Stop preserve other outputs and expose Retry 
     t.emit({ destinations: ds });
   });
   const first = page.locator('.dest-card[data-kind="playback"]').first();
-  await expect(
-    first.getByRole("button", { name: "Retry stop", exact: true }),
-  ).toBeVisible();
+  await expect(first.getByRole("button", { name: /^Stop / })).toBeVisible();
   await expect(page.locator('.dest-card[data-kind="discord"]')).toHaveAttribute(
     "data-state",
     "live",
@@ -180,10 +178,9 @@ test("local faults and unconfirmed Stop preserve other outputs and expose Retry 
   await page
     .getByRole("button", {
       name: "Show destination 2: Preview headphones, playback output",
-      exact: true,
     })
     .click();
-  await first.getByRole("button", { name: "Retry stop", exact: true }).click();
+  await first.getByRole("button", { name: /^Stop / }).click();
   expect(
     await page.evaluate(() => window.uiHarness.transport.commands.at(-1)),
   ).toEqual({ type: "disconnect-destination", destinationId: "local:1" });
@@ -194,8 +191,8 @@ test("playback details never contain Discord or gateway metrics", async ({
 }) => {
   await start(page);
   const local = await addPlayback(page);
-  await local.getByRole("button", { name: "Play", exact: true }).click();
-  await local.getByRole("button", { name: "Playing", exact: true }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
+  await local.getByRole("button", { name: /^Playing\./ }).click();
   const sheet = page.getByRole("dialog", { name: /Playback output details/ });
   await expect(sheet).toBeVisible();
   await expect(sheet.getByText("Gateway", { exact: true })).toHaveCount(0);
@@ -279,12 +276,11 @@ for (const [w, h] of [
     await page
       .getByRole("button", {
         name: "Show destination 4: Preview cable input, playback output",
-        exact: true,
       })
       .click();
     await expect(
       page.getByRole("button", {
-        name: "Change Preview cable input",
+        name: "Change device Preview cable input",
         exact: true,
       }),
     ).toBeFocused();
@@ -447,8 +443,8 @@ test("playback search reports no matches and local graph hover never invents gat
   await expect(page.getByText(/No playback device matches/)).toBeVisible();
   await page.keyboard.press("Escape");
   const local = await addPlayback(page);
-  await local.getByRole("button", { name: "Play", exact: true }).click();
-  await local.getByRole("button", { name: "Playing", exact: true }).click();
+  await local.getByRole("button", { name: /^Play / }).click();
+  await local.getByRole("button", { name: /^Playing\./ }).click();
   const sheet = page.getByRole("dialog", { name: /Playback output details/ });
   await sheet.locator(".net-plot").hover();
   await expect(sheet.locator(".net-tip")).toBeVisible();

@@ -40,6 +40,13 @@ negotiated native buffer and scratch capacity. Ordinary PCM and I24 conversion
 retain their existing behavior. Device selection, stream routing, playback and
 stop/drain policy are unchanged.
 
+Packets marked `AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR` still deliver their PCM,
+but this local override supplies `StreamInstant::ZERO` for the uncertain capture
+timestamp. Echocord treats that sentinel as unavailable and skips device-clock
+learning for the packet. The callback's arrival timestamp stays valid. This
+avoids treating a plausible but explicitly uncertain native timestamp as a clock
+measurement, without discarding valid sound or making it a fatal stream error.
+
 `scripts/test_cpal_patch.py` compiles the actual patched packet function and the
 upstream equilibrium helper against a synthetic packet provider. It checks
 silent nonzero/null payloads, unsigned midpoint silence, ordinary PCM, I24,

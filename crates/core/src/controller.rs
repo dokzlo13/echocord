@@ -17,6 +17,7 @@ use tokio::{
 };
 
 const MAX_SETTINGS_BYTES: u64 = 65536;
+const CURRENT_PREFERENCES_VERSION: u8 = 4;
 
 #[derive(Clone)]
 pub struct ControllerConfig {
@@ -130,7 +131,7 @@ fn cleanup_error() -> AppError {
     )
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Preferences {
     #[serde(default)]
@@ -144,6 +145,52 @@ struct Preferences {
     destinations: Vec<DestinationStrip>,
     #[serde(default)]
     settings: AppSettings,
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_PREFERENCES_VERSION,
+            selection: Selection::default(),
+            output: None,
+            inputs: Vec::new(),
+            destinations: Vec::new(),
+            settings: AppSettings::default(),
+        }
+    }
+}
+
+fn newer_preferences() -> AppError {
+    error(
+        ErrorCode::Configuration,
+        "These preferences were written by a newer Echocord version and were preserved.",
+    )
+}
+fn preferences_version(value: &serde_json::Value) -> Result<u8, AppError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| Failure::Configuration.error())?;
+    let Some(version) = object.get("version") else {
+        return Ok(0);
+    };
+    if let Some(version) = version.as_u64() {
+        return if version > u64::from(CURRENT_PREFERENCES_VERSION) {
+            Err(newer_preferences())
+        } else {
+            Ok(version as u8)
+        };
+    }
+    // JSON integers beyond u64 may be represented as floats. They are still
+    // newer versions; never truncate them into the supported version range.
+    if version
+        .as_f64()
+        .is_some_and(|version| version > f64::from(CURRENT_PREFERENCES_VERSION))
+    {
+        return Err(newer_preferences());
+    }
+    Err(error(
+        ErrorCode::Configuration,
+        "The preferences version is invalid and the file was preserved.",
+    ))
 }
 
 fn separate_settings(config: &ControllerConfig) -> bool {
@@ -193,13 +240,21 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     file.take(MAX_SETTINGS_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| Failure::Configuration.error())?;
+    decode_preferences(&bytes)
+}
+
+fn decode_preferences(bytes: &[u8]) -> Result<Preferences, AppError> {
     if bytes.len() as u64 > MAX_SETTINGS_BYTES {
         return Err(Failure::Configuration.error());
     }
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| Failure::Configuration.error())?;
+    // Probe the envelope first: a future schema need not deserialize as today's
+    // Preferences, and even its version may exceed today's u8 representation.
+    preferences_version(&value)?;
     let mut prefs: Preferences =
-        serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
+        serde_json::from_value(value).map_err(|_| Failure::Configuration.error())?;
     migrate_preferences(&mut prefs)?;
-    validate_preferences(&prefs)?;
     for input in &mut prefs.inputs {
         // The source identity is authoritative, not the serialized kind.
         input.kind = if crate::audio::application::is_application_id(&input.source_id) {
@@ -253,68 +308,97 @@ fn validate_legacy_output(output: Option<&Output>) -> Result<(), AppError> {
 }
 
 fn migrate_preferences(prefs: &mut Preferences) -> Result<(), AppError> {
-    if prefs.version > 4 {
-        return Err(Failure::Configuration.error());
+    if prefs.version > CURRENT_PREFERENCES_VERSION {
+        return Err(newer_preferences());
     }
-    if prefs.version < 2 {
-        // Validate before converting the legacy percentage into a gain.
-        validate_legacy_output(prefs.output.as_ref())?;
-        if let Some(source_id) = &prefs.selection.source_id
-            && !crate::audio::application::is_application_id(source_id)
-        {
-            prefs.inputs.push(InputStrip {
-                strip_id: "input-1".into(),
-                source_id: source_id.clone(),
-                kind: SourceKind::Recording,
-                display_name: "Saved recording input".into(),
-                detail: None,
-                phase: InputPhase::Stopped,
-                fault: None,
-                gain_db: Some(0.0),
-                muted: false,
-                colour_slot: 0,
-                restored: true,
-            });
+    // Each transition runs once, in order. New schemas add a step here and
+    // update the current validator; loading never rewrites the user's file.
+    while prefs.version < CURRENT_PREFERENCES_VERSION {
+        match prefs.version {
+            0 => {
+                // Unversioned files use the version-one selection/output shape.
+                prefs.version = 1;
+            }
+            1 => {
+                migrate_legacy_selection(prefs)?;
+                prefs.version = 2;
+            }
+            2 => {
+                // Version three added explicit playback destinations. Serde's
+                // kind/device defaults preserve older Discord destinations.
+                prefs.version = 3;
+            }
+            3 => {
+                // Multiple Discord rooms became valid only in version four;
+                // upgrading must not legitimize an invalid older setup.
+                if prefs
+                    .destinations
+                    .iter()
+                    .filter(|d| d.kind == DestinationKind::Discord)
+                    .count()
+                    > 1
+                {
+                    return Err(Failure::Configuration.error());
+                }
+                prefs.version = 4;
+            }
+            _ => return Err(Failure::Configuration.error()),
         }
-        if let (Some(server_id), Some(channel_id)) =
-            (&prefs.selection.server_id, &prefs.selection.channel_id)
-        {
-            let output = prefs
-                .output
-                .clone()
-                .unwrap_or(ControlSnapshot::default().output);
-            prefs.destinations.push(DestinationStrip {
-                session_id: 0,
-                kind: DestinationKind::Discord,
-                device_id: None,
-                display_name: None,
-                destination_id: "discord-1".into(),
-                server_id: server_id.clone(),
-                channel_id: channel_id.clone(),
-                connection: Connection::Disconnected,
-                volume_db: if output.volume_percent == 0 {
-                    None
-                } else {
-                    Some(20.0 * (output.volume_percent as f32 / 100.0).log10())
-                },
-                muted: output.muted,
-            });
-        }
+    }
+    validate_preferences(prefs)
+}
+
+fn migrate_legacy_selection(prefs: &mut Preferences) -> Result<(), AppError> {
+    // Validate before converting the legacy percentage into a gain.
+    validate_legacy_output(prefs.output.as_ref())?;
+    if let Some(source_id) = &prefs.selection.source_id
+        && !crate::audio::application::is_application_id(source_id)
+    {
+        prefs.inputs.push(InputStrip {
+            strip_id: "input-1".into(),
+            source_id: source_id.clone(),
+            kind: SourceKind::Recording,
+            display_name: "Saved recording input".into(),
+            detail: None,
+            phase: InputPhase::Stopped,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: true,
+        });
+    }
+    if let (Some(server_id), Some(channel_id)) =
+        (&prefs.selection.server_id, &prefs.selection.channel_id)
+    {
+        let output = prefs
+            .output
+            .clone()
+            .unwrap_or(ControlSnapshot::default().output);
+        prefs.destinations.push(DestinationStrip {
+            session_id: 0,
+            kind: DestinationKind::Discord,
+            device_id: None,
+            display_name: None,
+            destination_id: "discord-1".into(),
+            server_id: server_id.clone(),
+            channel_id: channel_id.clone(),
+            connection: Connection::Disconnected,
+            volume_db: if output.volume_percent == 0 {
+                None
+            } else {
+                Some(20.0 * (output.volume_percent as f32 / 100.0).log10())
+            },
+            muted: output.muted,
+        });
     }
     Ok(())
 }
 
 fn validate_preferences(prefs: &Preferences) -> Result<(), AppError> {
-    if prefs.version > 4
+    if prefs.version != CURRENT_PREFERENCES_VERSION
         || prefs.inputs.len() > MAX_INPUTS
         || prefs.destinations.len() > MAX_DESTINATIONS
-        || (prefs.version < 4
-            && prefs
-                .destinations
-                .iter()
-                .filter(|d| d.kind == DestinationKind::Discord)
-                .count()
-                > 1)
         || prefs
             .destinations
             .iter()
@@ -402,23 +486,25 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
     };
     if let Ok(file) = std::fs::File::open(path) {
         let mut old = Vec::new();
-        if file
-            .take(MAX_SETTINGS_BYTES + 1)
+        file.take(MAX_SETTINGS_BYTES + 1)
             .read_to_end(&mut old)
-            .is_ok()
-            && serde_json::from_slice::<serde_json::Value>(&old)
-                .ok()
-                .and_then(|v| v.get("version").and_then(|v| v.as_u64()))
-                .is_some_and(|version| version > 4)
-        {
+            .map_err(|_| Failure::Configuration.error())?;
+        if old.len() as u64 > MAX_SETTINGS_BYTES {
             return Err(error(
                 ErrorCode::Configuration,
-                "These preferences were written by a newer Echocord version and were preserved.",
+                "The existing preferences exceed the supported size and were preserved.",
             ));
+        }
+        // Malformed JSON retains the existing recovery policy: a later save may
+        // replace it. A readable version envelope must be understood first.
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&old)
+            && value.get("version").is_some()
+        {
+            preferences_version(&value)?;
         }
     }
     let bytes = serde_json::to_vec(&Preferences {
-        version: 4,
+        version: CURRENT_PREFERENCES_VERSION,
         inputs: snapshot
             .inputs
             .iter()
@@ -3713,8 +3799,7 @@ mod tests {
             ),
         ] {
             let mut prefs: Preferences = serde_json::from_value(value).unwrap();
-            migrate_preferences(&mut prefs).unwrap();
-            assert!(validate_preferences(&prefs).is_err(), "{name}");
+            assert!(migrate_preferences(&mut prefs).is_err(), "{name}");
         }
 
         let mut valid: Preferences = serde_json::from_value(serde_json::json!({
@@ -3771,6 +3856,127 @@ mod tests {
         a.snapshot.destinations.clear();
         a.next_destination = 1;
         assert_eq!(a.allocate_destination_id("discord"), "discord-2");
+    }
+    #[test]
+    fn every_supported_preference_version_upgrades_once_without_rewriting_on_load() {
+        let directory = std::env::temp_dir().join(format!(
+            "echocord-preferences-upgrades-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut config = config();
+        config.settings_file = Some(path.clone());
+        let legacy = serde_json::json!({
+            "selection": {"sourceId": "fixture-recording", "serverId": "1", "channelId": "2"},
+            "output": {"volumePercent": 37, "muted": true}
+        });
+        let canonical = decode_preferences(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        for version in 0..=CURRENT_PREFERENCES_VERSION {
+            let mut value = if version < 2 {
+                legacy.clone()
+            } else {
+                serde_json::to_value(&canonical).unwrap()
+            };
+            value["version"] = version.into();
+            let original = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&path, &original).unwrap();
+            let mut loaded = load_preferences(&config).unwrap();
+            assert_eq!(loaded.version, CURRENT_PREFERENCES_VERSION);
+            assert_eq!(loaded.inputs.len(), 1);
+            assert_eq!(loaded.inputs[0].strip_id, "input-1");
+            assert_eq!(loaded.inputs[0].source_id, "fixture-recording");
+            assert_eq!(loaded.inputs[0].phase, InputPhase::Opening);
+            assert_eq!(loaded.destinations.len(), 1);
+            assert_eq!(loaded.destinations[0].destination_id, "discord-1");
+            assert_eq!(loaded.destinations[0].connection, Connection::Disconnected);
+            assert!(loaded.destinations[0].muted);
+            assert_eq!(
+                loaded.destinations[0].volume_db,
+                canonical.destinations[0].volume_db
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+
+            let normalized = serde_json::to_vec(&loaded).unwrap();
+            migrate_preferences(&mut loaded).unwrap();
+            assert_eq!(serde_json::to_vec(&loaded).unwrap(), normalized);
+            let decoded_again = decode_preferences(&normalized).unwrap();
+            assert_eq!(serde_json::to_vec(&decoded_again).unwrap(), normalized);
+            save_preferences(
+                &config,
+                &ControlSnapshot {
+                    inputs: loaded.inputs,
+                    destinations: loaded.destinations,
+                    settings: loaded.settings,
+                    selection: loaded.selection,
+                    ..ControlSnapshot::default()
+                },
+            )
+            .unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(saved["version"], CURRENT_PREFERENCES_VERSION);
+            assert_eq!(load_preferences(&config).unwrap().inputs.len(), 1);
+        }
+        assert_eq!(
+            decode_preferences(b"{}").unwrap().version,
+            CURRENT_PREFERENCES_VERSION
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn unknown_version_envelopes_are_preserved_without_parsing_the_current_schema() {
+        let directory = std::env::temp_dir().join(format!(
+            "echocord-preferences-envelopes-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("settings.json");
+        let mut config = config();
+        config.settings_file = Some(path.clone());
+        for version in ["5", "99", "256", "18446744073709551616"] {
+            let future = format!(
+                "{{\"version\":{version},\"inputs\":\"new schema\",\"settings\":[],\"newField\":true}}"
+            );
+            std::fs::write(&path, &future).unwrap();
+            let failure = load_preferences(&config).err().unwrap();
+            assert!(failure.message.contains("newer Echocord version"));
+            assert!(save_preferences(&config, &ControlSnapshot::default()).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
+        }
+        for version in ["-1", "4.0", "null", "\"future\"", "true", "{}"] {
+            let invalid = format!("{{\"version\":{version}}}");
+            std::fs::write(&path, &invalid).unwrap();
+            assert!(load_preferences(&config).is_err());
+            assert!(save_preferences(&config, &ControlSnapshot::default()).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        }
+        let oversized = format!(
+            "{{\"version\":5,\"newField\":\"{}\"}}",
+            "x".repeat(MAX_SETTINGS_BYTES as usize)
+        );
+        std::fs::write(&path, &oversized).unwrap();
+        assert!(load_preferences(&config).is_err());
+        assert!(save_preferences(&config, &ControlSnapshot::default()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), oversized);
+
+        for malformed in [
+            b"{".as_slice(),
+            br#"{"version":4,"unknownCurrentField":true}"#,
+            br#"{"version":4,"inputs":"invalid"}"#,
+        ] {
+            std::fs::write(&path, malformed).unwrap();
+            assert!(load_preferences(&config).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), malformed);
+        }
+        // Retain recovery from malformed JSON on a later intentional save.
+        std::fs::write(&path, b"{").unwrap();
+        save_preferences(&config, &ControlSnapshot::default()).unwrap();
+        assert_eq!(
+            load_preferences(&config).unwrap().version,
+            CURRENT_PREFERENCES_VERSION
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn versioned_preferences_migrate_restore_safely_and_preserve_future_files() {

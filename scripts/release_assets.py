@@ -29,7 +29,7 @@ MAX_ARCHIVE = 512 * 1024 * 1024
 MAX_SOURCES = 64 * 1024 * 1024
 REMEDY = (
     "Wait for or rerun ALL jobs of the CI push run for this exact main commit, "
-    "then rerun the unpublished release workflow. Do not use another commit's "
+    "then rerun ALL jobs of the unpublished release workflow. Do not use another commit's "
     "artifact or a local binary."
 )
 

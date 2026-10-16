@@ -15,6 +15,8 @@ pub(super) struct SourceLink {
     seen_fence: Option<(u64, u64, u64)>,
     last_ns: Option<u64>,
     blocked: Option<Reason>,
+    dropped_baseline: u64,
+    gaps_baseline: u64,
 }
 impl SourceLink {
     pub(super) fn new() -> Result<Self, &'static str> {
@@ -28,6 +30,8 @@ impl SourceLink {
             seen_fence: None,
             last_ns: None,
             blocked: None,
+            dropped_baseline: 0,
+            gaps_baseline: 0,
         })
     }
     pub(super) fn enabled(&self) -> bool {
@@ -56,6 +60,20 @@ impl SourceLink {
         self.timing.state_ms = Some(super::observation_clock_ms());
         let observed = consumer.slots().min(link::CAPACITY);
         discard(consumer, shared, observed);
+        self.dropped_baseline = shared.dropped.load(Ordering::Acquire);
+        self.gaps_baseline = shared.underrun.load(Ordering::Acquire);
+    }
+    /// The shared counters include producer overflow as well as consumer
+    /// discard. Sampling one canonical total prevents omissions/double counts.
+    pub(super) fn observe_counts(&mut self, shared: &Shared) {
+        self.timing.dropped = shared
+            .dropped
+            .load(Ordering::Acquire)
+            .saturating_sub(self.dropped_baseline);
+        self.timing.gaps = shared
+            .underrun
+            .load(Ordering::Acquire)
+            .saturating_sub(self.gaps_baseline);
     }
     pub(super) fn snapshot(&self) -> TimingObservation {
         self.timing.snapshot()

@@ -672,7 +672,9 @@ impl LivePcm {
         if let Some(correction) = &mut reader.correction
             && correction.enabled()
         {
-            return correction.drain(&mut reader.consumer, shared, frames);
+            let fresh = correction.drain(&mut reader.consumer, shared, frames);
+            correction.observe_counts(shared);
+            return fresh;
         }
         let mut fresh = false;
         let mut budget = shared.queue_capacity;
@@ -688,6 +690,7 @@ impl LivePcm {
         #[cfg(any(windows, test))]
         if let Some(correction) = &mut reader.correction {
             correction.legacy_observed(reader.consumer.slots(), fresh);
+            correction.observe_counts(shared);
         }
         fresh
     }
@@ -1322,13 +1325,12 @@ mod windows {
                     .then(|| capture_time.checked_duration_since(cpal::StreamInstant::ZERO))
                     .flatten()
                     .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
-                if data.len().is_multiple_of(channels) {
-                    if !writer
+                if data.len().is_multiple_of(channels)
+                    && !writer
                         .writer
                         .observe_native_packet(data.len() / channels, rate, timestamp)
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
                 writer.write(data, |sample| sample.to_sample::<f32>());
             },
@@ -1482,6 +1484,49 @@ pub(crate) mod tests {
         feed(&mut writer, 240, 0.125, -0.25);
         assert!(session.input.drain_frames_observed(&mut output));
         assert_eq!(output, [[0.125, -0.25]; 240]);
+    }
+
+    #[test]
+    fn timing_uses_canonical_overflow_and_off_gap_counts_with_mode_baselines() {
+        let (mut writer, mut session, _clock) = physical_setup();
+        session.input.configure_clock_correction(false, 1, 0);
+        let mut output = [[0.0; 2]; 240];
+        session.input.drain_frames(&mut output);
+        assert_eq!(
+            session
+                .input
+                .timing_observation()
+                .unwrap()
+                .gap_output_frames,
+            240
+        );
+        feed(&mut writer, link::CAPACITY, 0.125, -0.25);
+        session.input.drain_frames(&mut output);
+        assert_eq!(
+            session
+                .input
+                .timing_observation()
+                .unwrap()
+                .dropped_input_frames,
+            (link::CAPACITY - QUEUE_FRAMES) as u64
+        );
+        session.input.configure_clock_correction(true, 1, 1);
+        feed(&mut writer, link::CAPACITY + 240, 0.125, -0.25);
+        session.input.drain_frames(&mut output);
+        let timing = session.input.timing_observation().unwrap();
+        assert_eq!(
+            timing.dropped_input_frames, 240,
+            "producer overflow must be included exactly once"
+        );
+        assert_eq!(
+            timing.gap_output_frames, 0,
+            "new mode establishes its own counter baseline"
+        );
+        session.input.configure_clock_correction(false, 1, 2);
+        session.input.drain_frames(&mut output);
+        let timing = session.input.timing_observation().unwrap();
+        assert_eq!(timing.dropped_input_frames, 0);
+        assert_eq!(timing.gap_output_frames, 240);
     }
 
     #[test]

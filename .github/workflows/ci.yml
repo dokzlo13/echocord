@@ -46,6 +46,8 @@ jobs:
     name: Windows x64 build and native core
     runs-on: windows-2022
     timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '4'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

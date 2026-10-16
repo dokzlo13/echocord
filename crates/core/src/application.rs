@@ -585,7 +585,11 @@ mod native {
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_LOOPBACK
                     | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                    | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+                    | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+                    // Microsoft recommends this higher-quality converter for
+                    // human listening when AUTOCONVERTPCM needs resampling:
+                    // https://learn.microsoft.com/windows/win32/coreaudio/audclnt-streamflags-xxx-constants
+                    | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                 0,
                 0,
                 &format,

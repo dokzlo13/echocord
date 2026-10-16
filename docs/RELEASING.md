@@ -51,6 +51,8 @@ git push origin v0.1.0
 
 The release workflow performs provenance and content checks before publication. Check its reported source CI run and artifact ID, completed release run, tag/commit, release notes, all expected assets and their checksums. Download and inspect the published EXE and source archive; perform a credential-free Windows startup and offline-license check where available. Keep the corresponding-source archive beside the binary for the lifetime of the release.
 
+CI's `overwrite: true` applies only to the short-lived `release-assets` workflow artifact when a CI run is repeated. The replacement receives a new immutable artifact ID; previously selected IDs fail provenance validation. It never replaces published GitHub release files, which remain immutable under the release policy.
+
 If the exact main CI run is pending, wait for it before rerunning the unpublished release workflow. If its artifact expired or validation needs a fresh run, rerun **all jobs of that same main-push CI run**, then rerun the release workflow. A failed-jobs-only attempt does not establish both required jobs in the latest attempt. Missing, ambiguous, expired or mismatched provenance fails closed; there is no fallback build or alternate-commit download.
 
 If validation fails before publication, fix the cause and rerun the failed workflow only when its source remains correct. Do not bypass checks or upload an unrelated local binary. If source must change, choose the next version or an unpublished replacement tag according to review; never move/delete a version tag or replace assets after that release has been published. Publish a new patch version for corrections.

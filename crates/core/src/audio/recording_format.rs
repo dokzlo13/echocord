@@ -15,7 +15,9 @@ pub(super) struct RecordingResampler {
     interleaved: Vec<f32>,
     channels: u16,
     filled: usize,
-    partial_left: Option<f32>,
+    partial_left: Option<(f32, u64)>,
+    staged_oldest_ns: Option<u64>,
+    history_origins: [Option<u64>; 3],
 }
 
 impl RecordingResampler {
@@ -46,6 +48,8 @@ impl RecordingResampler {
             channels,
             filled: 0,
             partial_left: None,
+            staged_oldest_ns: None,
+            history_origins: [None; 3],
         })
     }
 
@@ -53,16 +57,28 @@ impl RecordingResampler {
         self.resampler.reset();
         self.filled = 0;
         self.partial_left = None;
+        self.staged_oldest_ns = None;
+        self.history_origins.fill(None);
         // Staging is fully overwritten before processing the next complete block.
     }
 
     /// Native callback boundaries have no significance to sample timing: keep
     /// incomplete frames/blocks and never insert padding at a callback edge.
+    #[cfg(test)]
     pub(super) fn write<T: Copy>(
         &mut self,
         data: &[T],
         convert: impl Fn(T) -> f32,
         mut emit: impl FnMut(&[f32]),
+    ) -> Result<bool, rubato::ResampleError> {
+        self.write_timed(data, convert, 0, |samples, _| emit(samples))
+    }
+    pub(super) fn write_timed<T: Copy>(
+        &mut self,
+        data: &[T],
+        convert: impl Fn(T) -> f32,
+        exposed_ns: u64,
+        mut emit: impl FnMut(&[f32], u64),
     ) -> Result<bool, rubato::ResampleError> {
         let mut pre_clip = false;
         for &sample in data {
@@ -74,14 +90,16 @@ impl RecordingResampler {
             } else {
                 0.0
             };
-            let frame = if self.channels == 1 {
-                [sample; 2]
-            } else if let Some(left) = self.partial_left.take() {
-                [left, sample]
+            let (frame, origin) = if self.channels == 1 {
+                ([sample; 2], exposed_ns)
+            } else if let Some((left, origin)) = self.partial_left.take() {
+                ([left, sample], origin.min(exposed_ns))
             } else {
-                self.partial_left = Some(sample);
+                self.partial_left = Some((sample, exposed_ns));
                 continue;
             };
+            self.staged_oldest_ns =
+                Some(self.staged_oldest_ns.map_or(origin, |old| old.min(origin)));
             self.input[0][self.filled] = frame[0];
             self.input[1][self.filled] = frame[1];
             self.filled += 1;
@@ -97,7 +115,21 @@ impl RecordingResampler {
                 {
                     *frame = [left, right];
                 }
-                emit(&self.interleaved[..produced * 2]);
+                let origin = self.staged_oldest_ns.expect("complete staged block");
+                // Three 128-frame blocks conservatively cover the 256-tap
+                // filter and its cubic phase neighbours at both supported rates.
+                let oldest = self
+                    .history_origins
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .chain(Some(origin))
+                    .min()
+                    .unwrap();
+                emit(&self.interleaved[..produced * 2], oldest);
+                self.history_origins.rotate_right(1);
+                self.history_origins[0] = Some(origin);
+                self.staged_oldest_ns = None;
                 self.filled = 0;
             }
         }
@@ -201,6 +233,31 @@ pub(crate) mod tests {
             },
         );
         2.0 * sin.hypot(cos) / frames as f64
+    }
+
+    #[test]
+    fn retained_recording_filter_and_partial_frame_keep_original_exposure() {
+        let mut converter = RecordingResampler::new(44_100, 2).unwrap();
+        converter.write_timed(&[0.5], |x| x, 1, |_, _| {}).unwrap();
+        let mut origins = Vec::new();
+        converter
+            .write_timed(&[0.5; 255], |x| x, 10, |_, origin| origins.push(origin))
+            .unwrap();
+        assert_eq!(origins, vec![1]);
+        for stamp in [20, 30, 40] {
+            converter
+                .write_timed(&[0.0; 256], |x| x, stamp, |_, origin| origins.push(origin))
+                .unwrap();
+            assert_eq!(*origins.last().unwrap(), 1);
+        }
+        converter
+            .write_timed(&[0.0; 256], |x| x, 50, |_, origin| origins.push(origin))
+            .unwrap();
+        assert_eq!(*origins.last().unwrap(), 20);
+        converter.reset();
+        converter
+            .write_timed(&[0.0; 512], |x| x, 100, |_, origin| assert_eq!(origin, 100))
+            .unwrap();
     }
 
     #[test]

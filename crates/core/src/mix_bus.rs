@@ -2,14 +2,17 @@
 //! but never maps it. Every shared access is aligned atomic, including samples.
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
-pub const CAPACITY: usize = 1920;
+pub const CAPACITY: usize = 4096;
+const LEGACY_CAPACITY: usize = 1920;
+const CORRECTION_MAX_AGE_MS: u64 = 80;
 const MAX_AGE_MS: u64 = 40;
-const VERSION: u64 = 2;
+const VERSION: u64 = 3;
 const MAGIC: u64 = 0x4543484f4d495831;
 #[repr(C, align(8))]
 struct Slot {
     sequence: AtomicU64,
     stereo: AtomicU64,
+    exposed_ms: AtomicU64,
 }
 #[repr(C, align(8))]
 pub struct Bus {
@@ -28,6 +31,23 @@ pub struct ReadStats {
     pub underrun_frames: u32,
 }
 
+/// Snapshot for bounded admission; a subsequent exact pull validates it again.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CorrectionWindow {
+    pub latest: u64,
+    pub available: usize,
+    pub continuity: u64,
+    pub alive: bool,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CorrectionRead {
+    pub valid_frames: usize,
+    pub dropped_frames: u32,
+    pub queued_frames: u32,
+    pub oldest_ms: Option<u64>,
+    pub continuity: u64,
+}
+
 impl Bus {
     #[cfg(test)]
     pub(crate) fn test_bus() -> Box<Self> {
@@ -41,6 +61,7 @@ impl Bus {
             slots: std::array::from_fn(|_| Slot {
                 sequence: AtomicU64::new(0),
                 stereo: AtomicU64::new(0),
+                exposed_ms: AtomicU64::new(0),
             }),
         });
         bus.initialize();
@@ -78,12 +99,132 @@ impl Bus {
                 u64::from(frame[0].to_bits()) | (u64::from(frame[1].to_bits()) << 32),
                 SeqCst,
             );
+            slot.exposed_ms.store(now_ms, SeqCst);
             slot.sequence
                 .store(cursor.wrapping_mul(2).wrapping_add(2), SeqCst);
             cursor += 1;
         }
         self.heartbeat_ms.store(now_ms, SeqCst);
         self.cursor.store(cursor, SeqCst);
+    }
+    pub(crate) fn correction_window(&self, cursor: u64, now_ms: u64) -> CorrectionWindow {
+        let latest = self.cursor();
+        let heartbeat = self.heartbeat_ms.load(SeqCst);
+        let continuity = self.continuity_floor.load(SeqCst);
+        let alive = self.valid() && now_ms.saturating_sub(heartbeat) <= MAX_AGE_MS;
+        let oldest = latest
+            .saturating_sub(CAPACITY as u64)
+            .max(continuity.min(latest));
+        CorrectionWindow {
+            latest,
+            available: if alive {
+                latest
+                    .saturating_sub(cursor.max(oldest))
+                    .min(CAPACITY as u64) as usize
+            } else {
+                0
+            },
+            continuity,
+            alive,
+        }
+    }
+    pub(crate) fn correction_lease_valid(
+        &self,
+        continuity: u64,
+        oldest_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        self.valid()
+            && self.continuity_floor.load(SeqCst) == continuity
+            && now_ms.saturating_sub(self.heartbeat_ms.load(SeqCst)) <= MAX_AGE_MS
+            && oldest_ms <= now_ms.saturating_add(1)
+            && now_ms.saturating_sub(oldest_ms) <= CORRECTION_MAX_AGE_MS
+    }
+    /// No synthetic silence enters a correction filter. Only an entirely
+    /// coherent/fresh block returns a nonzero valid_frames count.
+    pub(crate) fn read_correction(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        now_ms: u64,
+    ) -> CorrectionRead {
+        self.read_correction_clocked(cursor, frames, now_ms, completion_clock(now_ms), |_| {})
+    }
+    fn read_correction_clocked(
+        &self,
+        cursor: &mut u64,
+        frames: &mut [[f32; 2]],
+        now_ms: u64,
+        completed: impl FnOnce() -> u64,
+        mut observe: impl FnMut(ReadBoundary),
+    ) -> CorrectionRead {
+        frames.fill([0.0; 2]);
+        let original = *cursor;
+        let window = self.correction_window(*cursor, now_ms);
+        observe(ReadBoundary::Floor);
+        let mut result = CorrectionRead {
+            continuity: window.continuity,
+            ..CorrectionRead::default()
+        };
+        if !window.alive || frames.len() > CAPACITY {
+            *cursor = window.latest;
+            result.dropped_frames = cursor.saturating_sub(original).min(u32::MAX as u64) as u32;
+            return result;
+        }
+        let oldest = window
+            .latest
+            .saturating_sub(CAPACITY as u64)
+            .max(window.continuity.min(window.latest));
+        *cursor = (*cursor).max(oldest);
+        result.dropped_frames = cursor.saturating_sub(original).min(u32::MAX as u64) as u32;
+        let available = window.latest.saturating_sub(*cursor) as usize;
+        if frames.len() > available {
+            result.queued_frames = available.min(CAPACITY) as u32;
+            return result;
+        }
+        let mut valid = true;
+        let mut oldest_ms = u64::MAX;
+        for frame in frames.iter_mut() {
+            let slot = &self.slots[*cursor as usize % CAPACITY];
+            let expected = cursor.wrapping_mul(2).wrapping_add(2);
+            let first = slot.sequence.load(SeqCst);
+            let stereo = slot.stereo.load(SeqCst);
+            let exposure = slot.exposed_ms.load(SeqCst);
+            let last = slot.sequence.load(SeqCst);
+            let left = f32::from_bits(stereo as u32);
+            let right = f32::from_bits((stereo >> 32) as u32);
+            if first != expected
+                || last != expected
+                || !left.is_finite()
+                || !right.is_finite()
+                || exposure > now_ms.saturating_add(1)
+                || now_ms.saturating_sub(exposure) > CORRECTION_MAX_AGE_MS
+            {
+                valid = false;
+            } else {
+                *frame = [left, right];
+                oldest_ms = oldest_ms.min(exposure);
+            }
+            *cursor += 1;
+        }
+        observe(ReadBoundary::Copied);
+        let final_ms = completed();
+        if !valid
+            || final_ms.saturating_sub(now_ms) > MAX_AGE_MS
+            || !self.correction_lease_valid(window.continuity, oldest_ms, final_ms)
+        {
+            frames.fill([0.0; 2]);
+            *cursor = (*cursor).max(self.continuity_floor.load(SeqCst));
+            if final_ms.saturating_sub(now_ms) > MAX_AGE_MS {
+                *cursor = (*cursor).max(window.latest);
+            }
+            result.dropped_frames = cursor.saturating_sub(original).min(u32::MAX as u64) as u32;
+        } else if !frames.is_empty() {
+            result.valid_frames = frames.len();
+            result.oldest_ms = Some(oldest_ms);
+        }
+        result.queued_frames = self.cursor().saturating_sub(*cursor).min(CAPACITY as u64) as u32;
+        result
     }
     pub fn read(&self, cursor: &mut u64, frames: &mut [[f32; 2]], now_ms: u64) {
         let _ = self.read_counted(cursor, frames, now_ms);
@@ -134,7 +275,7 @@ impl Bus {
         let floor = self.continuity_floor.load(SeqCst);
         observe(ReadBoundary::Floor);
         let oldest = latest
-            .saturating_sub(CAPACITY as u64)
+            .saturating_sub(LEGACY_CAPACITY as u64)
             .max(floor.min(latest));
         stats.dropped_frames = oldest.saturating_sub(*cursor).min(u32::MAX as u64) as u32;
         *cursor = (*cursor).max(oldest);
@@ -182,10 +323,13 @@ impl Bus {
                     .saturating_sub(original_cursor)
                     .min(u32::MAX as u64) as u32,
                 underrun_frames: frames.len().min(u32::MAX as usize) as u32,
-                queued_frames: self.cursor().saturating_sub(*cursor).min(CAPACITY as u64) as u32,
+                queued_frames: self
+                    .cursor()
+                    .saturating_sub(*cursor)
+                    .min(LEGACY_CAPACITY as u64) as u32,
             };
         }
-        stats.queued_frames = latest.saturating_sub(*cursor).min(CAPACITY as u64) as u32;
+        stats.queued_frames = latest.saturating_sub(*cursor).min(LEGACY_CAPACITY as u64) as u32;
         stats
     }
 }
@@ -399,9 +543,103 @@ pub use native::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Existing read/voice fixtures deliberately retain the old logical window.
+    const CAPACITY: usize = LEGACY_CAPACITY;
     fn bus() -> Box<Bus> {
         Bus::test_bus()
     }
+    #[test]
+    fn correction_reads_distinguish_valid_silence_from_an_incomplete_block() {
+        let bus = bus();
+        bus.write(&[[0.0; 2]; 300], 100);
+        let window = bus.correction_window(0, 100);
+        assert!(window.alive);
+        assert_eq!(window.available, 300);
+        let mut cursor = 0;
+        let mut frames = [[9.0; 2]; 400];
+        let short = bus.read_correction(&mut cursor, &mut frames, 100);
+        assert_eq!(short.valid_frames, 0);
+        assert_eq!(cursor, 0);
+        assert_eq!(short.queued_frames, 300);
+        assert!(frames.iter().all(|frame| *frame == [0.0; 2]));
+        let silence = bus.read_correction(&mut cursor, &mut frames[..300], 100);
+        assert_eq!(silence.valid_frames, 300);
+        assert_eq!(silence.oldest_ms, Some(100));
+        assert_eq!(silence.continuity, window.continuity);
+        assert_eq!(cursor, 300);
+    }
+
+    #[test]
+    fn correction_capacity_does_not_expand_legacy_or_voice_retention() {
+        let bus = bus();
+        let source: Vec<_> = (1..=3000).map(|n| [n as f32, -(n as f32)]).collect();
+        bus.write(&source, 10);
+        assert_eq!(bus.correction_window(0, 10).available, 3000);
+        let mut corrected = 0;
+        let mut legacy = 0;
+        let mut output = [[0.0; 2]; 240];
+        let result = bus.read_correction(&mut corrected, &mut output, 10);
+        assert_eq!(result.valid_frames, 240);
+        assert_eq!(output[0], [1.0, -1.0]);
+        let result = bus.read_counted(&mut legacy, &mut output, 10);
+        assert_eq!(result.dropped_frames, 1080);
+        assert_eq!(output[0], [1081.0, -1081.0]);
+        assert!(result.queued_frames <= LEGACY_CAPACITY as u32);
+    }
+
+    #[test]
+    fn correction_sample_age_is_independent_of_recent_producer_activity() {
+        for age in [80, 81] {
+            let bus = bus();
+            bus.write(&[[0.5, -0.25]; 240], 100);
+            for tick in 1..=4 {
+                bus.write(&[[0.125, -0.0625]; 240], 100 + tick * 20);
+            }
+            let mut cursor = 0;
+            let mut output = [[0.0; 2]; 240];
+            let result = bus.read_correction(&mut cursor, &mut output, 100 + age);
+            if age == 80 {
+                assert_eq!(result.valid_frames, 240);
+                assert_eq!(result.oldest_ms, Some(100));
+            } else {
+                assert_eq!(result.valid_frames, 0);
+                assert_eq!(result.dropped_frames, 240);
+                assert_eq!(output, [[0.0; 2]; 240]);
+            }
+        }
+    }
+
+    #[test]
+    fn correction_completion_checks_reader_pause_and_changed_continuity() {
+        for producer_resumed in [false, true] {
+            let bus = bus();
+            bus.write(&[[0.75, -0.25]; 960], 0);
+            let mut cursor = 0;
+            let mut output = [[0.0; 2]; 240];
+            let result = bus.read_correction_clocked(
+                &mut cursor,
+                &mut output,
+                1,
+                || 1000,
+                |boundary| {
+                    if producer_resumed && boundary == ReadBoundary::Copied {
+                        bus.write(&[[0.125, -0.0625]; 240], 1000);
+                    }
+                },
+            );
+            assert_eq!(result.valid_frames, 0);
+            assert_eq!(output, [[0.0; 2]; 240]);
+            assert_eq!(cursor, 960);
+            assert_eq!(result.dropped_frames, 960);
+            if !producer_resumed {
+                bus.write(&[[0.125, -0.0625]; 240], 1000);
+            }
+            let fresh = bus.read_correction(&mut cursor, &mut output, 1001);
+            assert_eq!(fresh.valid_frames, 240);
+            assert_eq!(output, [[0.125, -0.0625]; 240]);
+        }
+    }
+
     #[test]
     fn wrap_overwrite_stereo_and_stale_worker_are_bounded() {
         let bus = bus();

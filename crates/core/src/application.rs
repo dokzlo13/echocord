@@ -664,8 +664,17 @@ mod native {
         let mut data = null_mut();
         let mut frames = 0;
         let mut flags = 0;
-        unsafe { capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }
-            .map_err(|_| error("Application capture packet read failed."))?;
+        let mut qpc_position = 0u64;
+        unsafe {
+            capture.GetBuffer(
+                &mut data,
+                &mut frames,
+                &mut flags,
+                None,
+                Some(&mut qpc_position),
+            )
+        }
+        .map_err(|_| error("Application capture packet read failed."))?;
         if frames == 0 {
             return Ok(());
         }
@@ -690,7 +699,15 @@ mod native {
         if !silent && data.is_null() {
             return Err(error("Application capture returned an invalid packet."));
         }
-        // Do not inspect QPC/device timestamps: queue age measures native exposure to reader only.
+        // Capture QPC belongs to the packet's first native frame. Arrival time
+        // remains the independent queue-exposure/stall clock. Invalid native
+        // timestamps do not become invented rate observations.
+        let timestamp = (flags
+            & windows::Win32::Media::Audio::AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32
+            == 0)
+            .then(|| qpc_position.checked_mul(100))
+            .flatten();
+        writer.observe_native_packet(frames as usize, 48_000, timestamp);
         // For SILENT, the pointer may be null and is never dereferenced.
         let samples = &mut scratch[..frames as usize * 2];
         if silent {

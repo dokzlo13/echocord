@@ -10,6 +10,8 @@ use crate::model::{AppError, Capture, CapturePhase, RecordingSource};
 #[path = "application.rs"]
 pub mod application;
 #[cfg(any(windows, test))]
+pub(crate) mod link;
+#[cfg(any(windows, test))]
 pub(crate) mod recording_format;
 use rtrb::Consumer;
 #[cfg(any(windows, test))]
@@ -371,6 +373,8 @@ struct Shared {
     status: AtomicU8,
     output: AtomicU64,
     input_epoch: AtomicU64,
+    #[cfg(any(windows, test))]
+    native_clock: link::ClockPublication,
     peak_bits: AtomicU32,
     pre_clip: AtomicBool,
     last_callback_ns: AtomicU64,
@@ -662,16 +666,45 @@ struct CaptureWriter {
     // A backend normally supplies whole input frames, but retain an unmatched
     // left sample across callbacks rather than swap channels on fragmentation.
     partial_left: Option<(f32, u64, u64)>,
+    rate_estimator: link::RateEstimator,
+    packet_sizes: link::PacketSizes,
+    native_position: u64,
+    native_epoch: u64,
 }
 
 #[cfg(any(windows, test))]
 impl CaptureWriter {
+    /// Called once at the native packet boundary, never for per-frame writes
+    /// or chunks emitted by the fixed nominal-rate recording converter.
+    fn observe_native_packet(
+        &mut self,
+        frames: usize,
+        native_rate: u32,
+        timestamp_ns: Option<u64>,
+    ) {
+        let now = self.shared.clock.now();
+        let epoch = self.shared.input_epoch.load(Ordering::Acquire);
+        if epoch != self.native_epoch {
+            if let Some(timestamp) = timestamp_ns {
+                self.rate_estimator
+                    .reanchor(timestamp, self.native_position);
+            }
+            self.native_epoch = epoch;
+        }
+        let rate = timestamp_ns.and_then(|timestamp| {
+            self.rate_estimator
+                .observe(timestamp, self.native_position, native_rate)
+        });
+        let packet = self.packet_sizes.observe(frames, native_rate);
+        self.shared.native_clock.publish(rate, packet, now, epoch);
+        self.native_position = self.native_position.saturating_add(frames as u64);
+    }
     fn write<T: Copy>(&mut self, data: &[T], channels: u16, convert: impl Fn(T) -> f32) {
         let fence = (
             self.shared.input_epoch.load(Ordering::Acquire),
             self.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
         );
-        self.write_fenced(data, channels, convert, fence);
+        self.write_fenced(data, channels, convert, fence, None);
     }
 
     fn write_fenced<T: Copy>(
@@ -680,6 +713,7 @@ impl CaptureWriter {
         channels: u16,
         convert: impl Fn(T) -> f32,
         fence: (u64, u64),
+        original_exposure_ns: Option<u64>,
     ) {
         if !matches!(
             self.shared.status.load(Ordering::Acquire),
@@ -688,6 +722,7 @@ impl CaptureWriter {
             return;
         }
         let now = self.shared.clock.now();
+        let exposed_ns = original_exposure_ns.unwrap_or(now);
         let mut peak = 0.0_f32;
         for &raw in data {
             if !matches!(
@@ -716,11 +751,11 @@ impl CaptureWriter {
                 return;
             }
             let (samples, exposed_ns, frame_generation) = if channels == 1 {
-                ([sample; 2], now, generation)
+                ([sample; 2], exposed_ns, generation)
             } else if let Some((left, exposed_ns, generation)) = self.partial_left.take() {
                 ([left, sample], exposed_ns, generation)
             } else {
-                self.partial_left = Some((sample, now, generation));
+                self.partial_left = Some((sample, exposed_ns, generation));
                 continue;
             };
             if output & MUTED != 0 || frame_generation != generation {
@@ -826,8 +861,9 @@ impl RecordingWriter {
         }
         if let Some(resampler) = &mut self.resampler {
             let writer = &mut self.writer;
-            match resampler.write(data, convert, |samples| {
-                writer.write_fenced(samples, 2, |s| s, fence)
+            let exposed = writer.shared.clock.now();
+            match resampler.write_timed(data, convert, exposed, |samples, origin| {
+                writer.write_fenced(samples, 2, |s| s, fence, Some(origin))
             }) {
                 Ok(true) => writer.shared.pre_clip.store(true, Ordering::Release),
                 Ok(false) => {}
@@ -836,7 +872,7 @@ impl RecordingWriter {
         } else {
             // Keep the existing 48 kHz path free of filtering or staging delay.
             self.writer
-                .write_fenced(data, self.channels, convert, fence);
+                .write_fenced(data, self.channels, convert, fence, None);
         }
     }
 }
@@ -848,6 +884,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
         status: AtomicU8::new(OPENING),
         output: AtomicU64::new(u64::from(1.0_f32.to_bits())),
         input_epoch: AtomicU64::new(0),
+        native_clock: link::ClockPublication::default(),
         peak_bits: AtomicU32::new(u32::MAX),
         pre_clip: AtomicBool::new(false),
         last_callback_ns: AtomicU64::new(0),
@@ -873,6 +910,10 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
             producer,
             shared,
             partial_left: None,
+            rate_estimator: link::RateEstimator::default(),
+            packet_sizes: link::PacketSizes::default(),
+            native_position: 0,
+            native_epoch: 0,
         },
         CaptureSession {
             input: LivePcm {
@@ -1133,9 +1174,23 @@ mod windows {
                     "Unsupported recording conversion",
                 )
             })?;
+        let rate = config.sample_rate();
+        let channels = usize::from(config.channels());
         device.build_input_stream::<T, _, _>(
             config.config(),
-            move |data, _| writer.write(data, |sample| sample.to_sample::<f32>()),
+            move |data, info| {
+                let capture_time = info.timestamp().capture;
+                let timestamp = (capture_time != cpal::StreamInstant::ZERO)
+                    .then(|| capture_time.checked_duration_since(cpal::StreamInstant::ZERO))
+                    .flatten()
+                    .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
+                if data.len().is_multiple_of(channels) {
+                    writer
+                        .writer
+                        .observe_native_packet(data.len() / channels, rate, timestamp);
+                }
+                writer.write(data, |sample| sample.to_sample::<f32>());
+            },
             move |failure| report_error(&shared, failure.kind()),
             None,
         )
@@ -1197,6 +1252,52 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Weak;
     use symphonia_core::io::{MediaSourceStream, ReadBytes, SeekBuffered};
+
+    #[test]
+    fn native_clock_counts_packets_before_nominal_conversion_and_never_per_emitted_frame() {
+        for rate in [44_100, 48_000, 96_000] {
+            let (writer, session, clock) = setup();
+            let mut recording = RecordingWriter::new(writer, rate, 2).unwrap();
+            let frames = rate as usize / 100;
+            let data = vec![0.125; frames * 2];
+            for packet in 0..20 {
+                let timestamp = packet * 10_000_000;
+                clock.ns.store(timestamp, Ordering::Release);
+                recording
+                    .writer
+                    .observe_native_packet(frames, rate, Some(timestamp));
+                recording.write(&data, |value| value);
+                assert_eq!(
+                    recording.writer.native_position,
+                    (packet + 1) * frames as u64
+                );
+                let observation = session
+                    .control
+                    .owner
+                    .shared
+                    .native_clock
+                    .snapshot(timestamp, 0);
+                assert_eq!(observation.packet_frames, 480);
+                if packet > 0 {
+                    assert!((observation.rate.unwrap() - 1.0).abs() < 1e-8);
+                }
+            }
+            let stale = session
+                .control
+                .owner
+                .shared
+                .native_clock
+                .snapshot(300_000_000, 0);
+            assert_eq!(stale.rate, None);
+            let wrong_epoch = session
+                .control
+                .owner
+                .shared
+                .native_clock
+                .snapshot(190_000_000, 1);
+            assert_eq!(wrong_epoch.rate, None);
+        }
+    }
 
     #[derive(Default)]
     struct ManualClock {

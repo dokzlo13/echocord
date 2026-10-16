@@ -50,6 +50,7 @@ impl SourceMeters {
     fn new(strip_id: String) -> Self {
         Self {
             latest: InputTelemetry {
+                observed_at_ms: None,
                 strip_id,
                 level_dbfs: None,
                 pre_clip: false,
@@ -152,6 +153,7 @@ mod native {
         let telemetry = inputs
             .iter()
             .map(|i| InputTelemetry {
+                observed_at_ms: None,
                 strip_id: i.strip_id.clone(),
                 level_dbfs: Some(-59.5),
                 pre_clip: true,

@@ -244,6 +244,11 @@ pub struct PlaybackDevice {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DestinationTelemetry {
+    /// Native worker observation time on the shared monotonic clock.
+    #[serde(default)]
+    pub observed_at_ms: Option<f64>,
+    #[serde(default)]
+    pub gateway_observed_at_ms: Option<f64>,
     pub session_id: u32,
     pub destination_id: String,
     pub level_dbfs: Option<f32>,
@@ -298,6 +303,9 @@ impl Default for AppSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InputTelemetry {
+    /// Native worker observation time; control publications never refresh it.
+    #[serde(default)]
+    pub observed_at_ms: Option<f64>,
     pub strip_id: String,
     pub level_dbfs: Option<f32>,
     pub pre_clip: bool,
@@ -309,6 +317,13 @@ pub struct InputTelemetry {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct MixTelemetry {
+    /// Shared monotonic clock at envelope publication, never wall-clock time.
+    #[serde(default)]
+    pub clock_ms: f64,
+    #[serde(default)]
+    pub mix_observed_at_ms: Option<f64>,
+    #[serde(default)]
+    pub gateway_observed_at_ms: Option<f64>,
     #[serde(default)]
     pub destinations: Vec<DestinationTelemetry>,
     #[serde(default)]
@@ -713,9 +728,13 @@ mod tests {
             measured.capture.underrun_frames = index * 2;
             measured.capture.queued_frames = index % 1920;
             measured.telemetry = MixTelemetry {
+                clock_ms: f64::from(index),
+                mix_observed_at_ms: Some(f64::from(index)),
+                gateway_observed_at_ms: Some(f64::from(index)),
                 destinations: Vec::new(),
                 mix_pre_clip: true,
                 inputs: vec![InputTelemetry {
+                    observed_at_ms: Some(f64::from(index)),
                     strip_id: "input-1".into(),
                     level_dbfs: Some(-6.0),
                     pre_clip: true,

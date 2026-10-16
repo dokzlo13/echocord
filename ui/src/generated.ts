@@ -7,12 +7,24 @@ export type InputStrip = { stripId: string, sourceId: string, kind: SourceKind, 
 gainDb: number | null, muted: boolean, colourSlot: number, restored: boolean, };
 export type DestinationKind = "discord" | "playback";
 export type PlaybackDevice = { id: string, name: string, available: boolean, detail: string | null, };
-export type DestinationTelemetry = { sessionId: number, destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, };
+export type DestinationTelemetry = {
+/**
+ * Native worker observation time on the shared monotonic clock.
+ */
+observedAtMs: number | null, gatewayObservedAtMs: number | null, sessionId: number, destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, };
 export type DestinationStrip = { sessionId: number, kind: DestinationKind, deviceId: string | null, displayName: string | null, destinationId: string, serverId: string, channelId: string, connection: Connection, volumeDb: number | null, muted: boolean, };
 export type AppSettings = { restoreSetup: boolean, keepInTray: boolean, meterStyle: MeterStyle, };
 export type MeterStyle = "simple" | "history";
-export type InputTelemetry = { stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
-export type MixTelemetry = { destinations: Array<DestinationTelemetry>, mixPreClip: boolean, inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number,
+export type InputTelemetry = {
+/**
+ * Native worker observation time; control publications never refresh it.
+ */
+observedAtMs: number | null, stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
+export type MixTelemetry = {
+/**
+ * Shared monotonic clock at envelope publication, never wall-clock time.
+ */
+clockMs: number, mixObservedAtMs: number | null, gatewayObservedAtMs: number | null, destinations: Array<DestinationTelemetry>, mixPreClip: boolean, inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number,
 /**
  * Unavailable until measured; never a simulated voice-network statistic.
  */

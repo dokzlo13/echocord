@@ -1863,6 +1863,8 @@ impl Actor {
             .telemetry
             .destinations
             .push(DestinationTelemetry {
+                observed_at_ms: None,
+                gateway_observed_at_ms: None,
                 destination_id: id,
                 session_id: destination.session_id,
                 level_dbfs: None,
@@ -2069,6 +2071,8 @@ impl Actor {
                         .telemetry
                         .destinations
                         .push(DestinationTelemetry {
+                            observed_at_ms: None,
+                            gateway_observed_at_ms: None,
                             destination_id: id.clone(),
                             session_id: runtime.session_id,
                             level_dbfs: value
@@ -2138,6 +2142,8 @@ impl Actor {
                             .telemetry
                             .destinations
                             .push(DestinationTelemetry {
+                                observed_at_ms: None,
+                                gateway_observed_at_ms: None,
                                 destination_id: id.clone(),
                                 session_id: runtime.session_id,
                                 level_dbfs: None,
@@ -4049,6 +4055,7 @@ mod tests {
         let peer = peer.clone();
         assert_eq!(peer.colour_slot, 1);
         a.snapshot.telemetry.inputs.push(InputTelemetry {
+            observed_at_ms: None,
             strip_id: peer.strip_id.clone(),
             level_dbfs: Some(-21.0),
             pre_clip: false,

@@ -607,6 +607,8 @@ impl Manager {
             });
             let capture = active.map(|r| &r.capture);
             let measured = DestinationTelemetry {
+                observed_at_ms: None,
+                gateway_observed_at_ms: None,
                 destination_id: d.destination_id.clone(),
                 session_id: d.session_id,
                 level_dbfs: capture.and_then(|c| c.output_level_dbfs),

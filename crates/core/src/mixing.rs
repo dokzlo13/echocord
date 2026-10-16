@@ -49,6 +49,209 @@ pub struct AudioSnapshot {
     pub telemetry: Vec<InputTelemetry>,
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessingMode {
+    enabled: bool,
+    epoch: u64,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceIntent {
+    input: InputStrip,
+    epoch: u64,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceUpdate {
+    revision: u64,
+    sources: Vec<SourceIntent>,
+    drift: ProcessingMode,
+    limiter: ProcessingMode,
+}
+
+#[cfg(any(windows, test))]
+#[derive(serde::Serialize, serde::Deserialize)]
+enum AudioCommand {
+    Sources(SourceUpdate),
+    Stop,
+}
+
+#[cfg(any(windows, test))]
+fn active(input: &InputStrip) -> bool {
+    matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+}
+
+/// Updated for every accepted parent request, before replacing a coalesced
+/// mailbox value. Presentation, gain and mix-only mute do not change identity.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct RequestHistory {
+    previous: Vec<SourceIntent>,
+    next_epoch: u64,
+    drift: ProcessingMode,
+    limiter: ProcessingMode,
+}
+#[cfg(any(windows, test))]
+impl RequestHistory {
+    fn update(
+        &mut self,
+        revision: u64,
+        inputs: Vec<InputStrip>,
+        drift: bool,
+        limiter: bool,
+    ) -> SourceUpdate {
+        for (mode, enabled) in [(&mut self.drift, drift), (&mut self.limiter, limiter)] {
+            if mode.enabled != enabled {
+                mode.epoch = mode
+                    .epoch
+                    .checked_add(1)
+                    .expect("processing epoch exhausted");
+                mode.enabled = enabled;
+            }
+        }
+        let mut sources = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let unchanged = self.previous.iter().find(|previous| {
+                previous.input.strip_id == input.strip_id
+                    && previous.input.source_id == input.source_id
+                    && previous.input.kind == input.kind
+                    && active(&previous.input) == active(&input)
+            });
+            let epoch = unchanged.map_or_else(
+                || {
+                    self.next_epoch = self
+                        .next_epoch
+                        .checked_add(1)
+                        .expect("source epoch exhausted");
+                    self.next_epoch
+                },
+                |previous| previous.epoch,
+            );
+            sources.push(SourceIntent { input, epoch });
+        }
+        self.previous = sources.clone();
+        SourceUpdate {
+            revision,
+            sources,
+            drift: self.drift,
+            limiter: self.limiter,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn valid_update(update: &SourceUpdate) -> bool {
+    if update.sources.len() > MAX_INPUTS {
+        return false;
+    }
+    let text =
+        |value: &str, maximum| value.len() <= maximum && !value.chars().any(char::is_control);
+    update.sources.iter().enumerate().all(|(index, source)| {
+        let input = &source.input;
+        source.epoch != 0
+            && !input.strip_id.is_empty()
+            && text(&input.strip_id, 64)
+            && !input.source_id.is_empty()
+            && text(&input.source_id, 1024)
+            && !input.source_id.starts_with("mix-handle:")
+            && (input.kind == SourceKind::Application)
+                == crate::audio::application::is_application_id(&input.source_id)
+            && text(&input.display_name, 1024)
+            && input
+                .detail
+                .as_deref()
+                .is_none_or(|value| text(value, 1024))
+            && input
+                .fault
+                .as_ref()
+                .is_none_or(|fault| text(&fault.message, 256))
+            && valid_gain(input.gain_db)
+            && !update.sources[..index].iter().any(|other| {
+                other.input.strip_id == input.strip_id || other.input.source_id == input.source_id
+            })
+    })
+}
+
+/// Common mix processing owns only the fixed audio delay, never source capture
+/// lifetimes. It resets for an engine gap or mode epoch, not an ordinary edit.
+#[cfg(any(windows, test))]
+struct MixOutput {
+    limiter: crate::limiter::Limiter,
+    mode: ProcessingMode,
+    last_write_ms: Option<u64>,
+    pre_clip: bool,
+    reduction: Option<f32>,
+}
+#[cfg(any(windows, test))]
+impl MixOutput {
+    fn new() -> Self {
+        Self {
+            limiter: crate::limiter::Limiter::new(false),
+            mode: ProcessingMode::default(),
+            last_write_ms: None,
+            pre_clip: false,
+            reduction: None,
+        }
+    }
+    fn configure(&mut self, mode: ProcessingMode) {
+        if mode != self.mode {
+            self.mode = mode;
+            self.limiter.set_enabled(mode.enabled);
+            // A coalesced off/on can preserve the bool while changing the epoch.
+            self.limiter.reset();
+            self.reset_window();
+        }
+    }
+    fn process(&mut self, mix: &mut [[f32; 2]], now_ms: u64) {
+        if self
+            .last_write_ms
+            .is_some_and(|last| now_ms < last || now_ms - last > 40)
+        {
+            self.limiter.reset();
+            self.reset_window();
+        }
+        self.pre_clip |= mix.iter().flatten().any(|sample| sample.abs() >= 1.0);
+        let reduction = self.limiter.process_block(mix);
+        if self.mode.enabled {
+            self.reduction = Some(self.reduction.unwrap_or(0.0).max(reduction));
+        }
+        clamp_mix(mix);
+    }
+    fn write(
+        &mut self,
+        bus: &crate::mix_bus::Bus,
+        mix: &mut [[f32; 2]],
+        started_ms: u64,
+        completed: impl FnOnce() -> u64,
+    ) {
+        let previous = self.last_write_ms;
+        self.process(mix, started_ms);
+        let finished = completed();
+        let crossed_gap = previous.is_some_and(|last| {
+            started_ms.saturating_sub(last) <= 40 && finished.saturating_sub(last) > 40
+        });
+        if finished < started_ms || finished.saturating_sub(started_ms) > 40 || crossed_gap {
+            // A pause during source mixing or DSP must not stamp old mixed PCM
+            // as fresh. Clear retained audio before the first resumed bus write.
+            self.limiter.reset();
+            self.reset_window();
+            mix.fill([0.0; 2]);
+        }
+        self.last_write_ms = Some(finished);
+        bus.write(mix, finished);
+    }
+    fn reset_window(&mut self) {
+        self.pre_clip = false;
+        self.reduction = self.mode.enabled.then_some(0.0);
+    }
+}
+
 /// Retain identifiers and meter hold state between 5 ms blocks. Owned telemetry
 /// is cloned only for the 100 ms publication boundary.
 #[cfg(any(windows, test))]
@@ -95,6 +298,7 @@ impl SourceMeters {
         self.latest.dropped_frames = 0;
         self.latest.underrun_frames = 0;
         self.latest.queued_frames = 0;
+        self.latest.timing = None;
     }
 }
 
@@ -107,7 +311,6 @@ mod native {
         process::EngineProcess,
         protocol::{self, Frame, Validator},
     };
-    use serde::{Deserialize, Serialize};
     use std::{
         collections::BTreeMap,
         io::{BufReader, Read},
@@ -121,14 +324,6 @@ mod native {
         time::{Duration, Instant},
     };
 
-    #[derive(Serialize, Deserialize)]
-    enum AudioCommand {
-        Sources {
-            revision: u64,
-            inputs: Vec<InputStrip>,
-        },
-        Stop,
-    }
     #[cfg(test)]
     #[test]
     fn largest_supported_eight_card_status_and_command_fit_bounded_protocol() {
@@ -151,10 +346,12 @@ mod native {
             version: protocol::VERSION,
             generation: 1,
             sequence: 1,
-            body: AudioCommand::Sources {
-                revision: 1,
-                inputs: inputs.clone(),
-            },
+            body: AudioCommand::Sources(RequestHistory::default().update(
+                1,
+                inputs.clone(),
+                true,
+                true,
+            )),
         };
         assert!(protocol::encode(&command).is_ok());
         let telemetry = inputs
@@ -187,7 +384,8 @@ mod native {
     }
 
     struct Mailbox {
-        sources: Option<(u64, Vec<InputStrip>)>,
+        sources: Option<SourceUpdate>,
+        history: RequestHistory,
         stop: Option<Instant>,
     }
     pub struct AudioHost {
@@ -204,7 +402,8 @@ mod native {
             let inherited = bus.inheritable().map_err(|_| failure())?;
             let mailbox = Arc::new((
                 Mutex::new(Mailbox {
-                    sources: Some((0, Vec::new())),
+                    sources: Some(SourceUpdate::default()),
+                    history: RequestHistory::default(),
                     stop: None,
                 }),
                 Condvar::new(),
@@ -251,10 +450,7 @@ mod native {
                         let command = if state.stop.is_some() {
                             AudioCommand::Stop
                         } else {
-                            {
-                                let (revision, inputs) = state.sources.take().unwrap_or_default();
-                                AudioCommand::Sources { revision, inputs }
-                            }
+                            AudioCommand::Sources(state.sources.take().unwrap_or_default())
                         };
                         let stop = matches!(command, AudioCommand::Stop);
                         drop(state);
@@ -321,11 +517,17 @@ mod native {
             });
             Ok(host)
         }
-        pub fn sources(&self, inputs: Vec<InputStrip>) {
+        pub fn sources(&self, inputs: Vec<InputStrip>, drift: bool, limiter: bool) {
             let (lock, wake) = &*self.mailbox;
             let mut mail = lock.lock().unwrap_or_else(|e| e.into_inner());
             if mail.stop.is_none() {
-                mail.sources = Some((self.revision.fetch_add(1, Ordering::AcqRel) + 1, inputs));
+                let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+                let update = mail.history.update(revision, inputs, drift, limiter);
+                if !valid_update(&update) {
+                    mail.stop = Some(Instant::now());
+                } else {
+                    mail.sources = Some(update);
+                }
                 wake.notify_one();
             }
         }
@@ -370,21 +572,24 @@ mod native {
         source: String,
         deadline: Option<Instant>,
         meters: SourceMeters,
+        intent_epoch: u64,
+        session_epoch: u64,
     }
     enum Completed {
-        Open(String, Result<CaptureSession, AppError>),
-        Stopped(String, bool),
+        Open(String, String, u64, u64, Result<CaptureSession, AppError>),
+        Stopped(String, u64, bool),
     }
-    fn retire(id: String, session: CaptureSession, done: mpsc::SyncSender<Completed>) {
+    fn retire(id: String, epoch: u64, session: CaptureSession, done: mpsc::SyncSender<Completed>) {
         std::thread::spawn(move || {
             let stopped = session.control.stop();
             drop(session);
-            let _ = done.send(Completed::Stopped(id, stopped));
+            let _ = done.send(Completed::Stopped(id, epoch, stopped));
         });
     }
     fn open_pending_sources(
         slots: &mut BTreeMap<String, Slot>,
         done: &mpsc::SyncSender<Completed>,
+        next_session_epoch: &mut u64,
     ) {
         if !slots.values().any(|slot| {
             !slot.operation
@@ -428,6 +633,10 @@ mod native {
                 && let Some(input) = &mut slot.desired
                 && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
             {
+                *next_session_epoch = next_session_epoch
+                    .checked_add(1)
+                    .expect("capture lifetime exhausted");
+                slot.session_epoch = *next_session_epoch;
                 slot.source = input.source_id.clone();
                 slot.cancel = Arc::new(AtomicBool::new(false));
                 slot.operation = true;
@@ -435,6 +644,8 @@ mod native {
                 input.phase = InputPhase::Opening;
                 occupied.push((id.clone(), slot.source.clone()));
                 let source = slot.source.clone();
+                let intent_epoch = slot.intent_epoch;
+                let session_epoch = slot.session_epoch;
                 let id = id.clone();
                 let cancel = slot.cancel.clone();
                 let done = done.clone();
@@ -442,7 +653,13 @@ mod native {
                     let result = audio::start_capture_with_cancel(&source, &|| {
                         cancel.load(Ordering::Acquire)
                     });
-                    let _ = done.send(Completed::Open(id, result));
+                    let _ = done.send(Completed::Open(
+                        id,
+                        source,
+                        intent_epoch,
+                        session_epoch,
+                        result,
+                    ));
                 });
             }
         }
@@ -477,15 +694,16 @@ mod native {
                 slot.operation = true;
                 slot.deadline = Some(Instant::now() + Duration::from_millis(750));
                 slot.cancel.store(true, Ordering::Release);
-                retire(id.clone(), session, done.clone());
+                retire(id.clone(), slot.session_epoch, session, done.clone());
                 slot.meters.unavailable();
                 continue;
             }
             let mut frames = [[0.0; 2]; 240];
-            session.input.drain_frames(&mut frames);
+            let fresh = session.input.drain_frames_observed(&mut frames);
+            let capture = session.control.snapshot();
             let level = sum_source(&mut mix, &frames, input.gain_db, input.muted);
             let pre_clip = session.control.take_pre_clip();
-            if capture.level_dbfs.is_some() {
+            if fresh && capture.level_dbfs.is_some() {
                 slot.meters.observe(
                     level,
                     pre_clip,
@@ -501,7 +719,6 @@ mod native {
             }
         }
         let pre_clip = mix.iter().flatten().any(|sample| sample.abs() >= 1.0);
-        clamp_mix(&mut mix);
         (mix, pre_clip)
     }
 
@@ -533,6 +750,8 @@ mod native {
                 cancel: Arc::new(AtomicBool::new(false)),
                 deadline: None,
                 meters: SourceMeters::new("fixture".into()),
+                intent_epoch: 1,
+                session_epoch: 1,
             },
         )]);
         let (done, completed) = mpsc::sync_channel(1);
@@ -546,7 +765,7 @@ mod native {
         assert_eq!(failed.source_id, "app:42:0000000000000001");
         assert!(matches!(
             completed.recv_timeout(Duration::from_secs(1)).unwrap(),
-            Completed::Stopped(_, true)
+            Completed::Stopped(_, _, true)
         ));
     }
 
@@ -595,19 +814,27 @@ mod native {
                     source: id.clone(),
                     deadline: None,
                     meters: SourceMeters::new(id),
+                    intent_epoch: index as u64 + 1,
+                    session_epoch: index as u64 + 1,
                 },
             );
         }
         let (done, _completed) = mpsc::sync_channel(16);
         let bus = mix_bus::Bus::test_bus();
+        let mut next_session_epoch = MAX_INPUTS as u64;
+        let mut output = MixOutput::new();
+        output.configure(ProcessingMode {
+            enabled: true,
+            epoch: 1,
+        });
         let allocations = allocations_during(|| {
             for tick in 0..1000 {
                 for pump in &mut pumps {
                     pump();
                 }
-                open_pending_sources(&mut slots, &done);
-                let (mix, _) = mix_sources(&mut slots, &done);
-                bus.write(&mix, tick * 5);
+                open_pending_sources(&mut slots, &done, &mut next_session_epoch);
+                let (mut mix, _) = mix_sources(&mut slots, &done);
+                output.write(&bus, &mut mix, tick * 5, || tick * 5);
             }
         });
         assert_eq!(allocations, 0);
@@ -622,7 +849,7 @@ mod native {
     pub fn run_worker(raw: usize) -> Result<(), AppError> {
         let mapping = Mapping::inherited(raw).map_err(|_| failure())?;
         mapping.bus().initialize();
-        let (desired, latest) = std::sync::mpsc::sync_channel::<(u64, Vec<InputStrip>)>(1);
+        let (desired, latest) = std::sync::mpsc::sync_channel::<SourceUpdate>(1);
         let stop = Arc::new(AtomicBool::new(false));
         let input_stop = stop.clone();
         std::thread::spawn(move || {
@@ -634,8 +861,11 @@ mod native {
                 }
                 match frame.body {
                     AudioCommand::Stop => break,
-                    AudioCommand::Sources { revision, inputs } => {
-                        if desired.send((revision, inputs)).is_err() {
+                    AudioCommand::Sources(update) => {
+                        if !valid_update(&update) {
+                            break;
+                        }
+                        if desired.send(update).is_err() {
                             break;
                         }
                     }
@@ -666,9 +896,11 @@ mod native {
         });
         let (done, completed) = mpsc::sync_channel(16);
         let mut slots: BTreeMap<String, Slot> = BTreeMap::new();
-        let mut waiting = BTreeMap::<String, InputStrip>::new();
+        let mut waiting = BTreeMap::<String, SourceIntent>::new();
         let mut revision = 0;
-        let mut mix_pre_clip = false;
+        let mut drift = ProcessingMode::default();
+        let mut mix_output = MixOutput::new();
+        let mut next_session_epoch = 0;
         let mut next = Instant::now();
         let mut publish = next;
         while !stop.load(Ordering::Acquire) {
@@ -681,37 +913,58 @@ mod native {
                 std::process::exit(1);
             }
             let mut lifecycle_changed = false;
-            while let Ok((new_revision, inputs)) = latest.try_recv() {
+            while let Ok(update) = latest.try_recv() {
                 lifecycle_changed = true;
-                revision = new_revision;
-                for slot in slots.values_mut() {
-                    slot.meters.reset_window();
+                revision = update.revision;
+                let drift_changed = drift != update.drift;
+                drift = update.drift;
+                mix_output.configure(update.limiter);
+                if drift_changed {
+                    for slot in slots.values_mut() {
+                        slot.meters.unavailable();
+                    }
                 }
-                waiting.retain(|id, _| inputs.iter().any(|i| &i.strip_id == id));
-                if inputs.len() > MAX_INPUTS || inputs.iter().any(|i| !valid_gain(i.gain_db)) {
-                    std::process::exit(1);
-                }
+                waiting.retain(|id, _| {
+                    update
+                        .sources
+                        .iter()
+                        .any(|source| &source.input.strip_id == id)
+                });
                 for (id, slot) in &mut slots {
-                    let new = inputs.iter().find(|i| &i.strip_id == id).cloned();
-                    let needs_stop = new.as_ref().is_none_or(|i| {
-                        i.source_id != slot.source
-                            || matches!(i.phase, InputPhase::Stopped | InputPhase::Fault)
+                    let new = update
+                        .sources
+                        .iter()
+                        .find(|source| &source.input.strip_id == id);
+                    let needs_stop = new.is_none_or(|source| {
+                        source.epoch != slot.intent_epoch
+                            || source.input.source_id != slot.source
+                            || !active(&source.input)
                     });
-                    slot.desired = new;
+                    slot.desired = new.map(|source| source.input.clone());
+                    if let Some(source) = new {
+                        slot.intent_epoch = source.epoch;
+                    }
                     if needs_stop {
                         slot.cancel.store(true, Ordering::Release);
+                        slot.meters.unavailable();
                         if let Some(session) = slot.session.take() {
                             slot.operation = true;
                             slot.deadline = Some(Instant::now() + Duration::from_millis(750));
-                            retire(id.clone(), session, done.clone());
+                            retire(id.clone(), slot.session_epoch, session, done.clone());
                         }
+                    } else if drift_changed && let Some(session) = &mut slot.session {
+                        session.input.configure_clock_correction(
+                            drift.enabled,
+                            slot.session_epoch,
+                            drift.epoch,
+                        );
                     }
                 }
-                for input in inputs {
+                for source in update.sources {
+                    let input = &source.input;
                     if !slots.contains_key(&input.strip_id) {
-                        // Physical owners (including retired/opening slots) stay bounded.
                         if slots.len() >= MAX_INPUTS {
-                            waiting.insert(input.strip_id.clone(), input);
+                            waiting.insert(input.strip_id.clone(), source);
                             continue;
                         }
                         slots.insert(
@@ -720,7 +973,9 @@ mod native {
                                 meters: SourceMeters::new(input.strip_id.clone()),
                                 source: input.source_id.clone(),
                                 deadline: None,
-                                desired: Some(input),
+                                intent_epoch: source.epoch,
+                                session_epoch: 0,
+                                desired: Some(source.input),
                                 session: None,
                                 operation: false,
                                 cancel: Arc::new(AtomicBool::new(false)),
@@ -732,22 +987,43 @@ mod native {
             while let Ok(result) = completed.try_recv() {
                 lifecycle_changed = true;
                 match result {
-                    Completed::Stopped(id, clean) => {
+                    Completed::Stopped(id, epoch, clean) => {
                         if !clean {
                             std::process::exit(1);
                         }
-                        if let Some(slot) = slots.get_mut(&id) {
+                        if let Some(slot) = slots.get_mut(&id)
+                            && slot.session_epoch == epoch
+                        {
                             slot.operation = false;
                             slot.deadline = None;
                         }
                     }
-                    Completed::Open(id, result) => {
+                    Completed::Open(id, source, intent_epoch, session_epoch, result) => {
                         if let Some(slot) = slots.get_mut(&id) {
+                            if slot.session_epoch != session_epoch {
+                                if let Ok(session) = result {
+                                    retire(id, session_epoch, session, done.clone());
+                                }
+                                continue;
+                            }
                             match result {
-                                Ok(session) if !slot.cancel.load(Ordering::Acquire) => {
+                                Ok(mut session)
+                                    if !slot.cancel.load(Ordering::Acquire)
+                                        && slot.session_epoch == session_epoch
+                                        && slot.intent_epoch == intent_epoch
+                                        && slot.desired.as_ref().is_some_and(|input| {
+                                            active(input) && input.source_id == source
+                                        }) =>
+                                {
                                     slot.operation = false;
                                     slot.deadline = None;
+                                    session.input.configure_clock_correction(
+                                        drift.enabled,
+                                        session_epoch,
+                                        drift.epoch,
+                                    );
                                     slot.session = Some(session);
+                                    slot.meters.unavailable();
                                     if let Some(i) = &mut slot.desired {
                                         i.phase = InputPhase::Capturing;
                                         i.fault = None;
@@ -757,7 +1033,7 @@ mod native {
                                 Ok(session) => {
                                     slot.deadline =
                                         Some(Instant::now() + Duration::from_millis(750));
-                                    retire(id, session, done.clone());
+                                    retire(id, session_epoch, session, done.clone());
                                 }
                                 Err(error) => {
                                     if error.code == ErrorCode::CleanupIncomplete {
@@ -766,6 +1042,8 @@ mod native {
                                     slot.operation = false;
                                     slot.deadline = None;
                                     if !slot.cancel.load(Ordering::Acquire)
+                                        && slot.session_epoch == session_epoch
+                                        && slot.intent_epoch == intent_epoch
                                         && let Some(i) = &mut slot.desired
                                     {
                                         i.phase = InputPhase::Fault;
@@ -782,45 +1060,54 @@ mod native {
                     slot.desired.is_some() || slot.operation || slot.session.is_some()
                 });
                 while slots.len() < MAX_INPUTS {
-                    let Some((id, input)) = waiting.pop_first() else {
+                    let Some((id, source)) = waiting.pop_first() else {
                         break;
                     };
                     slots.insert(
                         id,
                         Slot {
-                            meters: SourceMeters::new(input.strip_id.clone()),
-                            source: input.source_id.clone(),
+                            meters: SourceMeters::new(source.input.strip_id.clone()),
+                            source: source.input.source_id.clone(),
                             deadline: None,
-                            desired: Some(input),
+                            intent_epoch: source.epoch,
+                            session_epoch: 0,
+                            desired: Some(source.input),
                             session: None,
                             operation: false,
                             cancel: Arc::new(AtomicBool::new(false)),
                         },
                     );
                 }
-                open_pending_sources(&mut slots, &done);
+                open_pending_sources(&mut slots, &done, &mut next_session_epoch);
             }
-            let (mix, clipped) = mix_sources(&mut slots, &done);
-            mix_pre_clip |= clipped;
-            mapping.bus().write(&mix, mix_bus::now_ms());
+            let started_ms = mix_bus::now_ms();
+            let (mut mix, _) = mix_sources(&mut slots, &done);
+            mix_output.write(mapping.bus(), &mut mix, started_ms, mix_bus::now_ms);
             if Instant::now() >= publish {
                 publish = Instant::now() + Duration::from_millis(100);
                 let _ = statuses.try_send(AudioSnapshot {
-                    limiter_reduction_db: None,
+                    limiter_reduction_db: mix_output.reduction,
                     observed_at_ms: Some(audio::observation_clock_ms()),
-                    mix_pre_clip,
+                    mix_pre_clip: mix_output.pre_clip,
                     revision,
                     inputs: slots.values().filter_map(|s| s.desired.clone()).collect(),
                     telemetry: slots
-                        .values()
+                        .values_mut()
                         .filter(|slot| slot.desired.is_some())
-                        .map(|slot| slot.meters.latest.clone())
+                        .map(|slot| {
+                            let mut meter = slot.meters.latest.clone();
+                            meter.timing = slot
+                                .session
+                                .as_mut()
+                                .and_then(|session| session.input.timing_observation());
+                            meter
+                        })
                         .collect(),
                 });
                 for slot in slots.values_mut() {
                     slot.meters.reset_window();
                 }
-                mix_pre_clip = false;
+                mix_output.reset_window();
             }
             next += Duration::from_millis(5);
             let now = Instant::now();
@@ -833,7 +1120,7 @@ mod native {
         for slot in slots.values_mut() {
             slot.cancel.store(true, Ordering::Release);
             if let Some(session) = slot.session.take() {
-                retire(String::new(), session, done.clone());
+                retire(String::new(), slot.session_epoch, session, done.clone());
             }
         }
         // Main returns and exits this worker process; parent confirms actual exit.
@@ -846,6 +1133,216 @@ pub use native::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn input(id: &str, source: &str) -> InputStrip {
+        InputStrip {
+            strip_id: id.into(),
+            source_id: source.into(),
+            kind: SourceKind::Recording,
+            display_name: "Fixture".into(),
+            detail: None,
+            phase: InputPhase::Opening,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        }
+    }
+
+    #[test]
+    fn parent_epochs_preserve_coalesced_lifetimes_and_modes_but_ignore_faders_and_mute() {
+        let mut history = RequestHistory::default();
+        let mut first = input("first", "A");
+        let peer = input("peer", "peer-source");
+        let a = history.update(1, vec![first.clone(), peer.clone()], true, true);
+        first.gain_db = Some(-12.0);
+        first.muted = true;
+        first.phase = InputPhase::Capturing;
+        let controls = history.update(2, vec![first.clone(), peer.clone()], true, true);
+        assert_eq!(a.sources[0].epoch, controls.sources[0].epoch);
+        assert_eq!(a.drift, controls.drift);
+        assert_eq!(a.limiter, controls.limiter);
+        first.phase = InputPhase::Stopped;
+        history.update(3, vec![first.clone(), peer.clone()], false, false);
+        first.phase = InputPhase::Opening;
+        let restarted = history.update(4, vec![first.clone(), peer.clone()], true, true);
+        assert_ne!(a.sources[0].epoch, restarted.sources[0].epoch);
+        assert_eq!(a.sources[1].epoch, restarted.sources[1].epoch);
+        assert!(restarted.drift.epoch > a.drift.epoch);
+        assert!(restarted.limiter.epoch > a.limiter.epoch);
+        first.source_id = "B".into();
+        history.update(5, vec![first.clone(), peer.clone()], true, true);
+        first.source_id = "A".into();
+        let returned = history.update(6, vec![first, peer], true, true);
+        assert!(returned.sources[0].epoch > restarted.sources[0].epoch);
+        assert_eq!(returned.sources[1].epoch, a.sources[1].epoch);
+    }
+
+    #[test]
+    fn private_source_commands_validate_identity_size_and_fit_with_maximal_telemetry() {
+        let mut inputs: Vec<_> = (0..MAX_INPUTS)
+            .map(|index| {
+                let mut input = input(
+                    &format!("{index}{}", "\\".repeat(63)),
+                    &format!("{index}{}", "\\".repeat(1023)),
+                );
+                input.display_name = "\"".repeat(1024);
+                input.detail = Some("\\".repeat(1024));
+                input.phase = InputPhase::Fault;
+                input.fault = Some(AppError::new(ErrorCode::CaptureFailed, "\"".repeat(256)));
+                input
+            })
+            .collect();
+        let update = RequestHistory::default().update(u64::MAX, inputs.clone(), true, true);
+        assert!(valid_update(&update));
+        let command = crate::protocol::Frame {
+            version: crate::protocol::VERSION,
+            generation: 1,
+            sequence: 1,
+            body: AudioCommand::Sources(update.clone()),
+        };
+        assert!(crate::protocol::encode(&command).is_ok());
+        assert!(
+            crate::protocol::encode(&crate::protocol::Frame {
+                version: crate::protocol::VERSION,
+                generation: 1,
+                sequence: 2,
+                body: AudioCommand::Stop
+            })
+            .is_ok()
+        );
+        let timing = TimingObservation {
+            epoch: format!("{}:{}:{}", u64::MAX, u64::MAX, u64::MAX),
+            phase: TimingPhase::Running,
+            applied_adjustment_ppm: Some(-1000.0),
+            queued_frames: Some(4096),
+            target_frames: Some(4096),
+            capacity_frames: 4096,
+            gap_output_frames: u64::MAX,
+            dropped_input_frames: u64::MAX,
+            resync_count: u64::MAX,
+            last_reset_reason: Some(TimingResetReason::Discontinuity),
+            last_reset_at_ms: Some(9_007_199_254_740_991.0),
+            state_observed_at_ms: Some(9_007_199_254_740_991.0),
+            audio_observed_at_ms: Some(9_007_199_254_740_991.0),
+        };
+        let telemetry = inputs
+            .iter()
+            .map(|input| InputTelemetry {
+                strip_id: input.strip_id.clone(),
+                observed_at_ms: Some(9_007_199_254_740_991.0),
+                level_dbfs: Some(-96.0),
+                pre_clip: true,
+                dropped_frames: u32::MAX,
+                underrun_frames: u32::MAX,
+                queued_frames: 4096,
+                timing: Some(timing.clone()),
+            })
+            .collect();
+        let status = crate::protocol::Frame {
+            version: crate::protocol::VERSION,
+            generation: 1,
+            sequence: 1,
+            body: AudioSnapshot {
+                observed_at_ms: Some(9_007_199_254_740_991.0),
+                mix_pre_clip: true,
+                limiter_reduction_db: Some(800.0),
+                revision: u64::MAX,
+                inputs: inputs.clone(),
+                telemetry,
+            },
+        };
+        let encoded =
+            crate::protocol::encode(&status).expect("largest supported status fits protocol");
+        println!("largest source status: {} bytes", encoded.len());
+        inputs[1].strip_id = inputs[0].strip_id.clone();
+        assert!(!valid_update(
+            &RequestHistory::default().update(1, inputs, true, false)
+        ));
+        for mutation in 0..4 {
+            let mut invalid = update.clone();
+            match mutation {
+                0 => invalid.sources[0].input.source_id = "mix-handle:42".into(),
+                1 => invalid.sources[0].input.source_id.push('x'),
+                2 => invalid.sources[0].epoch = 0,
+                _ => invalid.sources[0].input.gain_db = Some(f32::NAN),
+            }
+            assert!(!valid_update(&invalid));
+        }
+    }
+
+    #[test]
+    fn limiter_keeps_preclip_bypass_and_mode_window_contracts() {
+        let bus = crate::mix_bus::Bus::test_bus();
+        let mut output = MixOutput::new();
+        let mut raw = [[1.5, -1.25]; 240];
+        output.write(&bus, &mut raw, 0, || 0);
+        assert_eq!(raw, [[1.0, -1.0]; 240]);
+        assert!(output.pre_clip);
+        assert_eq!(output.reduction, None);
+        let on = ProcessingMode {
+            enabled: true,
+            epoch: 1,
+        };
+        output.configure(on);
+        assert!(!output.pre_clip);
+        assert_eq!(output.reduction, Some(0.0));
+        let mut loud = [[1.5, -1.25]; 240];
+        output.write(&bus, &mut loud, 5, || 5);
+        assert!(output.pre_clip);
+        assert!(output.reduction.unwrap() > 0.0);
+        assert!(
+            loud.iter()
+                .flatten()
+                .all(|sample| sample.abs() <= crate::limiter::SAMPLE_CEILING)
+        );
+        output.configure(ProcessingMode {
+            enabled: true,
+            epoch: 3,
+        });
+        let mut silent = [[0.0; 2]; 240];
+        output.write(&bus, &mut silent, 10, || 10);
+        assert_eq!(silent, [[0.0; 2]; 240]);
+        assert_eq!(output.reduction, Some(0.0));
+        output.configure(ProcessingMode {
+            enabled: false,
+            epoch: 4,
+        });
+        assert_eq!(output.reduction, None);
+    }
+
+    #[test]
+    fn limiter_source_edits_preserve_peer_but_engine_gaps_clear_before_bus_write() {
+        let bus = crate::mix_bus::Bus::test_bus();
+        let mut output = MixOutput::new();
+        let mode = ProcessingMode {
+            enabled: true,
+            epoch: 1,
+        };
+        output.configure(mode);
+        let mut mixed = [[0.75; 2]; 240];
+        output.write(&bus, &mut mixed, 0, || 0);
+        // A new Sources command/fader keeps this exact mode and shared delay.
+        output.configure(mode);
+        mixed.fill([0.25; 2]);
+        output.write(&bus, &mut mixed, 40, || 40);
+        assert_eq!(&mixed[..176], &[[0.75; 2]; 176]);
+        let mut cursor = bus.cursor();
+        mixed.fill([0.125; 2]);
+        output.write(&bus, &mut mixed, 81, || 81);
+        assert_eq!(&mixed[..176], &[[0.0; 2]; 176]);
+        assert_eq!(&mixed[176..], &[[0.125; 2]; 64]);
+        let mut observed = [[9.0; 2]; 240];
+        bus.read(&mut cursor, &mut observed, 81);
+        assert_eq!(observed, mixed);
+        // A pause after source draining/DSP is caught before fresh publication.
+        mixed.fill([0.25; 2]);
+        output.write(&bus, &mut mixed, 86, || 127);
+        assert_eq!(mixed, [[0.0; 2]; 240]);
+        mixed.fill([0.125; 2]);
+        output.write(&bus, &mut mixed, 132, || 132);
+        assert_eq!(&mixed[..176], &[[0.0; 2]; 176]);
+    }
     #[test]
     fn shared_mix_sums_stereo_clamps_and_preserves_muted_meter() {
         let source = [[0.8, -0.6]; 240];

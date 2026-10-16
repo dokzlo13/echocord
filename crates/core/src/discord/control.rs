@@ -637,6 +637,7 @@ impl Manager {
             });
             let capture = active.map(|r| &r.capture);
             let measured = DestinationTelemetry {
+                timing: None,
                 observed_at_ms: active.and_then(|room| room.observed_at_ms),
                 gateway_observed_at_ms: active
                     .filter(|room| room.wanted)

@@ -11,20 +11,39 @@ export type DestinationTelemetry = {
 /**
  * Native worker observation time on the shared monotonic clock.
  */
-observedAtMs: number | null, gatewayObservedAtMs: number | null, sessionId: number, destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, };
+observedAtMs: number | null, gatewayObservedAtMs: number | null, sessionId: number, destinationId: string, levelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number, gatewayPingMs: number | null, timing?: TimingObservation, };
 export type DestinationStrip = { sessionId: number, kind: DestinationKind, deviceId: string | null, displayName: string | null, destinationId: string, serverId: string, channelId: string, connection: Connection, volumeDb: number | null, muted: boolean, };
-export type AppSettings = { restoreSetup: boolean, keepInTray: boolean, meterStyle: MeterStyle, };
+export type AppSettings = { restoreSetup: boolean, keepInTray: boolean, meterStyle: MeterStyle, driftCorrection: boolean, mixLimiter: boolean, };
 export type MeterStyle = "simple" | "history";
 export type InputTelemetry = {
 /**
  * Native worker observation time; control publications never refresh it.
  */
-observedAtMs: number | null, stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, };
+observedAtMs: number | null, stripId: string, levelDbfs: number | null, preClip: boolean, droppedFrames: number, underrunFrames: number, queuedFrames: number, timing?: TimingObservation, };
+export type TimingPhase = "off" | "priming" | "running";
+export type TimingResetReason = "discontinuity" | "stalled-input" | "paused-output" | "starved" | "overrun";
+export type TimingObservation = {
+/**
+ * Exact lifetime/mode tuple formatted only at publication, not in callbacks.
+ */
+epoch: string, phase: TimingPhase,
+/**
+ * Actual completed adjustment: positive consumes input faster. Not clock error.
+ */
+appliedAdjustmentPpm: number | null, queuedFrames: number | null, targetFrames: number | null, capacityFrames: number,
+/**
+ * Counters are clamped to JavaScript's safe integer limit at publication.
+ */
+gapOutputFrames: number, droppedInputFrames: number, resyncCount: number, lastResetReason: TimingResetReason | null, lastResetAtMs: number | null, stateObservedAtMs: number | null, audioObservedAtMs: number | null, };
 export type MixTelemetry = {
 /**
  * Shared monotonic clock at envelope publication, never wall-clock time.
  */
-clockMs: number, mixObservedAtMs: number | null, gatewayObservedAtMs: number | null, destinations: Array<DestinationTelemetry>, mixPreClip: boolean, inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number,
+clockMs: number, mixObservedAtMs: number | null, gatewayObservedAtMs: number | null, destinations: Array<DestinationTelemetry>, mixPreClip: boolean,
+/**
+ * Maximum applied reduction during this publication window; absent if bypassed.
+ */
+limiterReductionDb: number | null, inputs: Array<InputTelemetry>, outputLevelDbfs: number | null, queuedFrames: number, droppedFrames: number, underrunFrames: number,
 /**
  * Unavailable until measured; never a simulated voice-network statistic.
  */

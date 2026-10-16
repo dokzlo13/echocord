@@ -20,7 +20,7 @@ mod preferences_writer;
 use preferences_writer::PreferencesWriter;
 
 const MAX_SETTINGS_BYTES: u64 = 65536;
-const CURRENT_PREFERENCES_VERSION: u8 = 4;
+const CURRENT_PREFERENCES_VERSION: u8 = 5;
 
 #[derive(Clone)]
 pub struct ControllerConfig {
@@ -344,6 +344,12 @@ fn migrate_preferences(prefs: &mut Preferences) -> Result<(), AppError> {
                     return Err(Failure::Configuration.error());
                 }
                 prefs.version = 4;
+            }
+            4 => {
+                // Version five persists audio-processing choices. Defaults are
+                // supplied by AppSettings; the version boundary prevents older
+                // apps from silently dropping those choices on their next save.
+                prefs.version = 5;
             }
             _ => return Err(Failure::Configuration.error()),
         }
@@ -1959,6 +1965,7 @@ impl Actor {
             .telemetry
             .destinations
             .push(DestinationTelemetry {
+                timing: None,
                 observed_at_ms: None,
                 gateway_observed_at_ms: None,
                 destination_id: id,
@@ -2167,6 +2174,7 @@ impl Actor {
                         .telemetry
                         .destinations
                         .push(DestinationTelemetry {
+                            timing: None,
                             observed_at_ms: crate::audio::clean_observation_time(
                                 value.observed_at_ms,
                                 crate::audio::observation_clock_ms(),
@@ -2248,6 +2256,7 @@ impl Actor {
                             .telemetry
                             .destinations
                             .push(DestinationTelemetry {
+                                timing: None,
                                 observed_at_ms: None,
                                 gateway_observed_at_ms: None,
                                 destination_id: id.clone(),
@@ -3138,6 +3147,7 @@ mod tests {
             observed_at_ms: Some(0.0),
             revision,
             telemetry: vec![InputTelemetry {
+                timing: None,
                 observed_at_ms: Some(0.0),
                 strip_id: input.strip_id.clone(),
                 level_dbfs: Some(-24.0),
@@ -4295,6 +4305,7 @@ mod tests {
         a.audio_observed_sources
             .insert(peer.strip_id.clone(), peer.source_id.clone());
         a.snapshot.telemetry.inputs.push(InputTelemetry {
+            timing: None,
             observed_at_ms: Some(0.0),
             strip_id: peer.strip_id.clone(),
             level_dbfs: Some(-21.0),
@@ -4660,7 +4671,7 @@ mod tests {
         let path = directory.join("settings.json");
         let mut config = config();
         config.settings_file = Some(path.clone());
-        for version in ["5", "99", "256", "18446744073709551616"] {
+        for version in ["6", "99", "256", "18446744073709551616"] {
             let future = format!(
                 "{{\"version\":{version},\"inputs\":\"new schema\",\"settings\":[],\"newField\":true}}"
             );
@@ -4703,6 +4714,36 @@ mod tests {
             CURRENT_PREFERENCES_VERSION
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn audio_settings_migrate_from_four_and_roundtrip_independent_choices() {
+        let legacy = br#"{"version":4,"settings":{"keepInTray":false,"meterStyle":"history"}}"#;
+        let loaded = decode_preferences(legacy).unwrap();
+        assert_eq!(loaded.version, 5);
+        assert!(!loaded.settings.keep_in_tray);
+        assert_eq!(loaded.settings.meter_style, MeterStyle::History);
+        assert!(loaded.settings.drift_correction);
+        assert!(!loaded.settings.mix_limiter);
+        for drift_correction in [false, true] {
+            for mix_limiter in [false, true] {
+                let prefs = Preferences {
+                    settings: AppSettings {
+                        drift_correction,
+                        mix_limiter,
+                        ..loaded.settings.clone()
+                    },
+                    ..Preferences::default()
+                };
+                let encoded = serde_json::to_vec(&prefs).unwrap();
+                let decoded = decode_preferences(&encoded).unwrap();
+                assert_eq!(decoded.settings, prefs.settings);
+                assert_eq!(decoded.version, 5);
+            }
+        }
+        for field in ["driftCorrection", "mixLimiter"] {
+            let malformed = format!("{{\"version\":5,\"settings\":{{\"{field}\":\"true\"}}}}");
+            assert!(decode_preferences(malformed.as_bytes()).is_err());
+        }
     }
     #[test]
     fn versioned_preferences_migrate_restore_safely_and_preserve_future_files() {
@@ -4922,7 +4963,7 @@ mod tests {
         a.snapshot.destinations[0].muted = true;
         save_preferences(&config, &a.snapshot).unwrap();
         let restored = load_preferences(&config).unwrap();
-        assert_eq!(restored.version, 4);
+        assert_eq!(restored.version, CURRENT_PREFERENCES_VERSION);
         assert_eq!(restored.destinations[0].kind, DestinationKind::Playback);
         assert_eq!(
             restored.destinations[0].connection,
@@ -5275,7 +5316,7 @@ mod tests {
         a.config.settings_file = Some(directory.join("prefs.json"));
         save_preferences(&a.config, &a.snapshot).unwrap();
         let restored = load_preferences(&a.config).unwrap();
-        assert_eq!(restored.version, 4);
+        assert_eq!(restored.version, CURRENT_PREFERENCES_VERSION);
         assert_eq!(restored.destinations.len(), 3);
         assert!(
             restored
@@ -5292,7 +5333,7 @@ mod tests {
         json["destinations"] = serde_json::Value::Array(vec![json["destinations"][0].clone()]);
         std::fs::write(path, serde_json::to_vec(&json).unwrap()).unwrap();
         assert_eq!(load_preferences(&a.config).unwrap().destinations.len(), 1);
-        json["version"] = 5.into();
+        json["version"] = (CURRENT_PREFERENCES_VERSION + 1).into();
         let future = serde_json::to_vec(&json).unwrap();
         std::fs::write(path, &future).unwrap();
         assert!(save_preferences(&a.config, &a.snapshot).is_err());

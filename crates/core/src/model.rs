@@ -256,6 +256,9 @@ pub struct DestinationTelemetry {
     pub dropped_frames: u32,
     pub underrun_frames: u32,
     pub gateway_ping_ms: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timing: Option<TimingObservation>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
@@ -283,6 +286,8 @@ pub struct AppSettings {
     pub restore_setup: bool,
     pub keep_in_tray: bool,
     pub meter_style: MeterStyle,
+    pub drift_correction: bool,
+    pub mix_limiter: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "kebab-case")]
@@ -296,6 +301,8 @@ impl Default for AppSettings {
             restore_setup: true,
             keep_in_tray: true,
             meter_style: MeterStyle::Simple,
+            drift_correction: true,
+            mix_limiter: false,
         }
     }
 }
@@ -312,6 +319,53 @@ pub struct InputTelemetry {
     pub dropped_frames: u32,
     pub underrun_frames: u32,
     pub queued_frames: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timing: Option<TimingObservation>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimingPhase {
+    Off,
+    Priming,
+    Running,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimingResetReason {
+    Discontinuity,
+    StalledInput,
+    PausedOutput,
+    Starved,
+    Overrun,
+}
+
+/// Scalar facts about one capture/mix or mix/playback crossing, never Discord.
+/// Queue and target use the same post-consumption boundary, in 48 kHz frames.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TimingObservation {
+    /// Exact lifetime/mode tuple formatted only at publication, not in callbacks.
+    pub epoch: String,
+    pub phase: TimingPhase,
+    /// Actual completed adjustment: positive consumes input faster. Not clock error.
+    pub applied_adjustment_ppm: Option<f64>,
+    pub queued_frames: Option<u32>,
+    pub target_frames: Option<u32>,
+    pub capacity_frames: u32,
+    /// Counters are clamped to JavaScript's safe integer limit at publication.
+    #[ts(type = "number")]
+    pub gap_output_frames: u64,
+    #[ts(type = "number")]
+    pub dropped_input_frames: u64,
+    #[ts(type = "number")]
+    pub resync_count: u64,
+    pub last_reset_reason: Option<TimingResetReason>,
+    pub last_reset_at_ms: Option<f64>,
+    pub state_observed_at_ms: Option<f64>,
+    pub audio_observed_at_ms: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, TS)]
@@ -328,6 +382,9 @@ pub struct MixTelemetry {
     pub destinations: Vec<DestinationTelemetry>,
     #[serde(default)]
     pub mix_pre_clip: bool,
+    /// Maximum applied reduction during this publication window; absent if bypassed.
+    #[serde(default)]
+    pub limiter_reduction_db: Option<f32>,
     pub inputs: Vec<InputTelemetry>,
     pub output_level_dbfs: Option<f32>,
     pub queued_frames: u32,
@@ -661,6 +718,9 @@ pub fn typescript_contract() -> String {
         AppSettings::decl(&config),
         MeterStyle::decl(&config),
         InputTelemetry::decl(&config),
+        TimingPhase::decl(&config),
+        TimingResetReason::decl(&config),
+        TimingObservation::decl(&config),
         MixTelemetry::decl(&config),
         SourceKind::decl(&config),
         RecordingSource::decl(&config),
@@ -728,12 +788,14 @@ mod tests {
             measured.capture.underrun_frames = index * 2;
             measured.capture.queued_frames = index % 1920;
             measured.telemetry = MixTelemetry {
+                limiter_reduction_db: None,
                 clock_ms: f64::from(index),
                 mix_observed_at_ms: Some(f64::from(index)),
                 gateway_observed_at_ms: Some(f64::from(index)),
                 destinations: Vec::new(),
                 mix_pre_clip: true,
                 inputs: vec![InputTelemetry {
+                    timing: None,
                     observed_at_ms: Some(f64::from(index)),
                     strip_id: "input-1".into(),
                     level_dbfs: Some(-6.0),

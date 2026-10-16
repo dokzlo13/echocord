@@ -16,6 +16,9 @@ use tokio::{
     time::Instant,
 };
 
+mod preferences_writer;
+use preferences_writer::PreferencesWriter;
+
 const MAX_SETTINGS_BYTES: u64 = 65536;
 const CURRENT_PREFERENCES_VERSION: u8 = 4;
 
@@ -476,7 +479,41 @@ fn validate_preferences(prefs: &Preferences) -> Result<(), AppError> {
     }
     Ok(())
 }
+fn preferences_from_snapshot(snapshot: &ControlSnapshot) -> Preferences {
+    Preferences {
+        version: CURRENT_PREFERENCES_VERSION,
+        inputs: snapshot
+            .inputs
+            .iter()
+            .cloned()
+            .map(|mut input| {
+                input.phase = InputPhase::Stopped;
+                input.fault = None;
+                input
+            })
+            .collect(),
+        destinations: snapshot
+            .destinations
+            .iter()
+            .cloned()
+            .map(|mut destination| {
+                destination.connection = Connection::Disconnected;
+                destination.session_id = 0;
+                destination
+            })
+            .collect(),
+        settings: snapshot.settings.clone(),
+        selection: snapshot.selection.clone(),
+        output: Some(snapshot.output.clone()),
+    }
+}
+
+#[cfg(test)]
 fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Result<(), AppError> {
+    write_preferences(config, &preferences_from_snapshot(snapshot))
+}
+
+fn write_preferences(config: &ControllerConfig, preferences: &Preferences) -> Result<(), AppError> {
     use std::io::Write;
     if !separate_settings(config) {
         return Err(Failure::Configuration.error());
@@ -503,33 +540,7 @@ fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Re
             preferences_version(&value)?;
         }
     }
-    let bytes = serde_json::to_vec(&Preferences {
-        version: CURRENT_PREFERENCES_VERSION,
-        inputs: snapshot
-            .inputs
-            .iter()
-            .cloned()
-            .map(|mut i| {
-                i.phase = InputPhase::Stopped;
-                i.fault = None;
-                i
-            })
-            .collect(),
-        destinations: snapshot
-            .destinations
-            .iter()
-            .cloned()
-            .map(|mut d| {
-                d.connection = Connection::Disconnected;
-                d.session_id = 0;
-                d
-            })
-            .collect(),
-        settings: snapshot.settings.clone(),
-        selection: snapshot.selection.clone(),
-        output: Some(snapshot.output.clone()),
-    })
-    .map_err(|_| Failure::Configuration.error())?;
+    let bytes = serde_json::to_vec(preferences).map_err(|_| Failure::Configuration.error())?;
     if bytes.len() as u64 > MAX_SETTINGS_BYTES {
         return Err(error(
             ErrorCode::Configuration,
@@ -703,6 +714,7 @@ struct Actor {
     source_scanning: bool,
     configuration: Option<ConfigurationCheck>,
     preferences_error: Option<AppError>,
+    preferences_writer: PreferencesWriter,
     shutting_down: bool,
     shutdown_waiters: Vec<oneshot::Sender<Result<(), AppError>>>,
 }
@@ -741,6 +753,7 @@ impl Actor {
             source_scanning: false,
             configuration: None,
             preferences_error: None,
+            preferences_writer: PreferencesWriter::default(),
             shutting_down: false,
             shutdown_waiters: Vec::new(),
         }
@@ -813,7 +826,16 @@ impl Actor {
                 }
             }
         }
-        match load_preferences(&self.config) {
+        let loaded = if self.config.settings_file.is_some() {
+            let config = self.config.clone();
+            tokio::task::spawn_blocking(move || load_preferences(&config))
+                .await
+                .map_err(|_| Failure::Configuration.error())
+                .and_then(|result| result)
+        } else {
+            Ok(Preferences::default())
+        };
+        match loaded {
             Ok(prefs) => {
                 self.snapshot.inputs = prefs.inputs;
                 self.snapshot.destinations = prefs.destinations;
@@ -904,15 +926,20 @@ impl Actor {
                     self.poll_discord();
                 }
             }
-            if self.shutting_down
-                && self.audio_stopped()
+            self.poll_preferences();
+            let runtime_stopped = self.audio_stopped()
                 && self.playback_stopped()
                 && !self.discord.busy()
-                && self.configuration.is_none()
-            {
+                && self.configuration.is_none();
+            if self.shutting_down && runtime_stopped {
+                self.preferences_writer.close_if_idle();
+            }
+            if self.shutting_down && self.preferences_writer.closed() && runtime_stopped {
                 let result =
                     if self.audio_cleanup_incomplete() || self.playback_cleanup_incomplete() {
                         Err(cleanup_error())
+                    } else if let Some(warning) = &self.snapshot.preferences_warning {
+                        Err(warning.clone())
                     } else {
                         Ok(())
                     };
@@ -926,6 +953,12 @@ impl Actor {
     }
     fn begin_shutdown(&mut self) {
         self.shutting_down = true;
+        // Retry a previously failed dirty setup once on Quit. An in-flight or
+        // pending save is merely flushed, never overlapped or duplicated.
+        if self.preferences_writer.dirty() && !self.preferences_writer.busy() {
+            let _ = self.persist_urgent();
+        }
+        self.preferences_writer.flush(Instant::now());
         self.discord_restart.clear();
         self.discord.stop_all();
         self.poll_discord();
@@ -1008,7 +1041,7 @@ impl Actor {
     }
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
-            ControlCommand::RetryPreferences => return self.persist(),
+            ControlCommand::RetryPreferences => return self.persist_urgent(),
             ControlCommand::RefreshPlaybackDevices => {
                 self.refresh_playback_devices();
                 return Ok(());
@@ -1593,25 +1626,78 @@ impl Actor {
         self.persist()
     }
     fn persist(&mut self) -> Result<(), AppError> {
-        let mut snapshot = self.snapshot.clone();
-        snapshot
-            .destinations
-            .retain(|d| !self.discord_removing.contains(&d.destination_id));
-        #[cfg(windows)]
-        snapshot.destinations.retain(|d| {
-            self.playback
-                .get(&d.destination_id)
-                .is_none_or(|r| !r.removing)
-        });
-        if let Err(warning) = save_preferences(&self.config, &snapshot) {
-            // The live mutation has already succeeded. A disk failure must not
-            // turn it into a rejected command or roll back a real-time control.
-            if self.snapshot.preferences_warning.as_ref() != Some(&warning) {
-                self.snapshot.preferences_warning = Some(warning);
+        self.request_preferences_save(false)
+    }
+    fn persist_urgent(&mut self) -> Result<(), AppError> {
+        self.request_preferences_save(true)
+    }
+    fn request_preferences_save(&mut self, urgent: bool) -> Result<(), AppError> {
+        if self.config.settings_file.is_none() {
+            let was_saving = self.snapshot.preferences_saving;
+            self.snapshot.preferences_saving = false;
+            if self.clear_preferences_warning() || was_saving {
                 self.publish();
             }
             return Ok(());
         }
+        let mut preferences = preferences_from_snapshot(&self.snapshot);
+        preferences
+            .destinations
+            .retain(|destination| !self.discord_removing.contains(&destination.destination_id));
+        #[cfg(windows)]
+        preferences.destinations.retain(|destination| {
+            self.playback
+                .get(&destination.destination_id)
+                .is_none_or(|runtime| !runtime.removing)
+        });
+        let mut changed = false;
+        if let Err(warning) = self.preferences_writer.request(
+            self.config.clone(),
+            preferences,
+            Instant::now(),
+            urgent || self.shutting_down,
+        ) && self.snapshot.preferences_warning.as_ref() != Some(&warning)
+        {
+            self.snapshot.preferences_warning = Some(warning);
+            changed = true;
+        }
+        let saving = self.preferences_writer.busy();
+        if self.snapshot.preferences_saving != saving {
+            self.snapshot.preferences_saving = saving;
+            changed = true;
+        }
+        if changed {
+            self.publish();
+        }
+        // Acceptance of a live change is independent from its eventual save.
+        Ok(())
+    }
+    fn poll_preferences(&mut self) {
+        let mut changed = false;
+        if let Some(completed) = self.preferences_writer.poll(Instant::now()) {
+            match completed.result {
+                Ok(()) if completed.revision == self.preferences_writer.latest_revision() => {
+                    changed |= self.clear_preferences_warning();
+                }
+                Ok(()) => {}
+                Err(warning) => {
+                    if self.snapshot.preferences_warning.as_ref() != Some(&warning) {
+                        self.snapshot.preferences_warning = Some(warning);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        let saving = self.preferences_writer.busy();
+        if self.snapshot.preferences_saving != saving {
+            self.snapshot.preferences_saving = saving;
+            changed = true;
+        }
+        if changed {
+            self.publish();
+        }
+    }
+    fn clear_preferences_warning(&mut self) -> bool {
         let cleared_warning = self.snapshot.preferences_warning.take().is_some();
         let cleared_load_error = self.preferences_error.take().is_some_and(|load_error| {
             if self.snapshot.discovery
@@ -1628,10 +1714,7 @@ impl Actor {
             };
             true
         });
-        if cleared_warning || cleared_load_error {
-            self.publish();
-        }
-        Ok(())
+        cleared_warning || cleared_load_error
     }
     fn destination_index(&self, id: &str) -> Result<usize, AppError> {
         self.snapshot
@@ -2925,6 +3008,30 @@ mod tests {
         actor
     }
 
+    fn await_preferences(actor: &mut Actor) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while actor.preferences_writer.busy() {
+            actor.poll_preferences();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "preferences worker did not settle"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!actor.snapshot.preferences_saving);
+    }
+
+    async fn await_controller_preferences(controller: &Controller) {
+        let mut snapshots = controller.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while snapshots.borrow_and_update().preferences_saving {
+                snapshots.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("preferences worker did not settle");
+    }
+
     #[test]
     fn oversized_serialized_setup_keeps_live_state_and_preserves_last_saved_file() {
         let directory =
@@ -2996,6 +3103,8 @@ mod tests {
         .unwrap();
         assert!(!a.snapshot.settings.keep_in_tray);
         assert_eq!(a.snapshot.inputs.len(), MAX_INPUTS);
+        assert!(a.snapshot.preferences_saving);
+        await_preferences(&mut a);
         assert!(
             a.snapshot
                 .preferences_warning
@@ -3010,6 +3119,7 @@ mod tests {
         // Reduce the synthetic setup without starting any native capture worker.
         a.snapshot.inputs.pop();
         a.command(ControlCommand::RetryPreferences).unwrap();
+        await_preferences(&mut a);
         assert!(a.snapshot.preferences_warning.is_none());
         let restored = load_preferences(&a.config).unwrap();
         assert_eq!(restored.inputs.len(), MAX_INPUTS - 1);
@@ -3104,6 +3214,213 @@ mod tests {
         actor.publish();
         tokio::spawn(actor.run_requests(receiver, event_rx));
         controller
+    }
+
+    type SavePermits = std::sync::mpsc::SyncSender<Result<(), AppError>>;
+    fn gated_preferences_writer() -> (
+        PreferencesWriter,
+        mpsc::Receiver<u8>,
+        SavePermits,
+        Arc<Mutex<Vec<u8>>>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (started, starts) = mpsc::channel(4);
+        let (release, releases) = std::sync::mpsc::sync_channel::<Result<(), AppError>>(4);
+        let releases = Mutex::new(releases);
+        let active = AtomicUsize::new(0);
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let observed = saved.clone();
+        let writer = PreferencesWriter::injected(move |_, preferences| {
+            assert_eq!(
+                active.fetch_add(1, Ordering::SeqCst),
+                0,
+                "writes overlapped"
+            );
+            let value = preferences.output.as_ref().unwrap().volume_percent;
+            started.blocking_send(value).unwrap();
+            let result = releases.lock().unwrap().recv().unwrap();
+            if result.is_ok() {
+                observed.lock().unwrap().push(value);
+            }
+            assert_eq!(active.fetch_sub(1, Ordering::SeqCst), 1);
+            result
+        });
+        (writer, starts, release, saved)
+    }
+
+    #[tokio::test]
+    async fn blocked_preferences_write_keeps_stop_responsive_and_shutdown_flushes_latest() {
+        let mut a = actor();
+        a.config.settings_file = Some("injected-preferences-fixture".into());
+        a.audio_failed = true; // No native capture is opened by this control fixture.
+        a.snapshot.inputs.push(InputStrip {
+            strip_id: "input-1".into(),
+            source_id: "owned-fixture".into(),
+            display_name: "Owned fixture".into(),
+            kind: SourceKind::Recording,
+            detail: None,
+            phase: InputPhase::Capturing,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        });
+        let (writer, mut starts, release, saved) = gated_preferences_writer();
+        a.preferences_writer = writer;
+        let (controller, _) = running_actor(a);
+        controller
+            .dispatch(ControlCommand::RetryPreferences)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), starts.recv())
+                .await
+                .unwrap(),
+            Some(100)
+        );
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            controller.dispatch(ControlCommand::StopCapture {
+                strip_id: "input-1".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(controller.snapshot().inputs[0].phase, InputPhase::Stopped);
+        for volume_percent in [10, 20, 77] {
+            tokio::time::timeout(
+                Duration::from_millis(250),
+                controller.dispatch(ControlCommand::SetVolume {
+                    percent: volume_percent,
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert!(controller.snapshot().preferences_saving);
+        let quitting = controller.clone();
+        let shutdown = tokio::spawn(async move { quitting.shutdown().await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!shutdown.is_finished());
+        assert!(starts.try_recv().is_err());
+        release.send(Ok(())).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), starts.recv())
+                .await
+                .unwrap(),
+            Some(77)
+        );
+        assert!(!shutdown.is_finished());
+        release.send(Ok(())).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*saved.lock().unwrap(), [100, 77]);
+        assert!(!controller.snapshot().preferences_saving);
+    }
+
+    #[tokio::test]
+    async fn older_save_success_cannot_clear_warning_for_newer_pending_setup() {
+        let mut a = actor();
+        a.config.settings_file = Some("injected-preferences-fixture".into());
+        let old_warning = error(ErrorCode::Configuration, "Previous save failed.");
+        a.snapshot.preferences_warning = Some(old_warning.clone());
+        a.preferences_error = Some(Failure::Configuration.error());
+        a.snapshot.discovery = Discovery::Error {
+            message: Failure::Configuration.error().message,
+        };
+        a.snapshot.output.volume_percent = 42;
+        let (writer, mut starts, release, _) = gated_preferences_writer();
+        a.preferences_writer = writer;
+        a.persist_urgent().unwrap();
+        let (controller, _) = running_actor(a);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), starts.recv())
+                .await
+                .unwrap(),
+            Some(42)
+        );
+        controller
+            .dispatch(ControlCommand::SetVolume { percent: 43 })
+            .await
+            .unwrap();
+        release.send(Ok(())).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), starts.recv())
+                .await
+                .unwrap(),
+            Some(43)
+        );
+        assert!(controller.snapshot().preferences_saving);
+        assert_eq!(controller.snapshot().preferences_warning, Some(old_warning));
+        assert!(matches!(
+            controller.snapshot().discovery,
+            Discovery::Error { .. }
+        ));
+        let new_warning = error(ErrorCode::Configuration, "Latest save failed.");
+        release.send(Err(new_warning.clone())).unwrap();
+        await_controller_preferences(&controller).await;
+        assert_eq!(
+            controller.snapshot().preferences_warning,
+            Some(new_warning.clone())
+        );
+        controller
+            .dispatch(ControlCommand::RetryPreferences)
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), starts.recv())
+                .await
+                .unwrap(),
+            Some(43)
+        );
+        assert!(controller.snapshot().preferences_saving);
+        assert_eq!(controller.snapshot().preferences_warning, Some(new_warning));
+        release.send(Ok(())).unwrap();
+        await_controller_preferences(&controller).await;
+        assert!(controller.snapshot().preferences_warning.is_none());
+        assert_eq!(controller.snapshot().discovery, Discovery::Ready);
+        controller.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_reports_a_failed_latest_flush_without_claiming_it_saved() {
+        let mut a = actor();
+        a.config.settings_file = Some("injected-preferences-fixture".into());
+        a.preferences_writer =
+            PreferencesWriter::injected(|_, _| Err(Failure::Configuration.error()));
+        let (controller, _) = running_actor(a);
+        controller
+            .dispatch(ControlCommand::SetMuted { muted: true })
+            .await
+            .unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(1), controller.shutdown())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(failure.code, ErrorCode::Configuration);
+        assert!(controller.snapshot().preferences_warning.is_some());
+        assert!(!controller.snapshot().preferences_saving);
+    }
+
+    #[test]
+    fn preferences_without_a_file_never_start_disk_work() {
+        let mut a = actor();
+        a.preferences_writer = PreferencesWriter::injected(|_, _| {
+            panic!("fixture without a file must not call storage")
+        });
+        a.snapshot.preferences_warning = Some(Failure::Configuration.error());
+        a.command(ControlCommand::SetMuted { muted: true }).unwrap();
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        a.poll_preferences();
+        assert_eq!(a.preferences_writer.latest_revision(), 0);
+        assert!(!a.snapshot.preferences_saving);
+        assert!(a.snapshot.preferences_warning.is_none());
     }
     #[tokio::test]
     async fn private_token_check_is_serialized_responsive_and_restores_previous_configuration() {
@@ -3334,6 +3651,7 @@ mod tests {
             .dispatch(ControlCommand::SetMuted { muted: true })
             .await
             .unwrap();
+        await_controller_preferences(&controller).await;
         assert!(settings.is_file());
         assert!(!token_file.exists());
         assert!(load_preferences(&config).unwrap().output.unwrap().muted);
@@ -3594,15 +3912,19 @@ mod tests {
         assert_eq!(a.snapshot.destinations[0].volume_db, Some(-12.0));
         assert!(a.snapshot.destinations[0].muted);
         assert!(!a.snapshot.settings.keep_in_tray);
+        assert!(a.snapshot.preferences_saving);
+        await_preferences(&mut a);
         assert!(a.snapshot.preferences_warning.is_some());
         assert!(a.snapshots.borrow().preferences_warning.is_some());
         // Commands that do not write settings and failed retries retain it.
         a.command(ControlCommand::Disconnect).unwrap();
         a.command(ControlCommand::RetryPreferences).unwrap();
+        await_preferences(&mut a);
         assert!(a.snapshot.preferences_warning.is_some());
         std::fs::remove_file(&blocked_parent).unwrap();
         let before_retry = a.snapshot.clone();
         a.command(ControlCommand::RetryPreferences).unwrap();
+        await_preferences(&mut a);
         assert!(a.snapshot.preferences_warning.is_none());
         assert!(!before_retry.same_control_state(&a.snapshot));
         let restored = load_preferences(&a.config).unwrap();
@@ -3635,6 +3957,7 @@ mod tests {
         .unwrap();
         a.command(ControlCommand::RetryPreferences).unwrap();
         assert!(!a.snapshot.settings.restore_setup);
+        await_preferences(&mut a);
         assert!(
             a.snapshot
                 .preferences_warning
@@ -4608,6 +4931,7 @@ mod tests {
             destination_id: "discord-1".into(),
         })
         .unwrap();
+        await_preferences(&mut a);
         assert!(
             a.snapshot
                 .destinations
@@ -4645,6 +4969,7 @@ mod tests {
                 .any(|d| d.destination_id == "discord-1")
         );
         assert_eq!(a.snapshot.destinations[0].connection, Connection::Connected);
+        await_preferences(&mut a);
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]

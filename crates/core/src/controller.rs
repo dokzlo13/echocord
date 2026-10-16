@@ -163,6 +163,20 @@ fn next_source_colour(inputs: &[InputStrip]) -> u8 {
         .find(|slot| !inputs.iter().any(|input| input.colour_slot == *slot))
         .unwrap_or(5)
 }
+fn next_id_counter(ids: impl Iterator<Item = u64>) -> u64 {
+    ids.max().unwrap_or(0).checked_add(1).unwrap_or(1)
+}
+fn allocate_id(prefix: &str, next: &mut u64, mut occupied: impl FnMut(&str) -> bool) -> String {
+    // Configured and retiring cards are bounded, so a free ID is found after at
+    // most that many collisions, including when a saved counter reaches u64::MAX.
+    loop {
+        let id = format!("{prefix}-{next}");
+        *next = next.checked_add(1).unwrap_or(1);
+        if !occupied(&id) {
+            return id;
+        }
+    }
+}
 fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> {
     if !separate_settings(config) {
         return Err(Failure::Configuration.error());
@@ -184,34 +198,67 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }
     let mut prefs: Preferences =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Configuration.error())?;
-    if prefs.version > 4
-        || prefs.inputs.len() > MAX_INPUTS
-        || prefs.destinations.len() > MAX_DESTINATIONS
-        || (prefs.version < 4
-            && prefs
-                .destinations
-                .iter()
-                .filter(|d| d.kind == DestinationKind::Discord)
-                .count()
-                > 1)
-        || prefs
-            .destinations
-            .iter()
-            .filter(|d| d.kind == DestinationKind::Playback)
-            .count()
-            > MAX_PLAYBACK_DESTINATIONS
-        || prefs
-            .inputs
-            .iter()
-            .any(|i| !crate::mixing::valid_gain(i.gain_db))
-        || prefs
-            .destinations
-            .iter()
-            .any(|d| !crate::mixing::valid_gain(d.volume_db))
+    migrate_preferences(&mut prefs)?;
+    validate_preferences(&prefs)?;
+    for input in &mut prefs.inputs {
+        // The source identity is authoritative, not the serialized kind.
+        input.kind = if crate::audio::application::is_application_id(&input.source_id) {
+            SourceKind::Application
+        } else {
+            SourceKind::Recording
+        };
+        input.phase = if input.kind == SourceKind::Recording && prefs.settings.restore_setup {
+            InputPhase::Opening
+        } else {
+            InputPhase::Stopped
+        };
+        input.fault = None;
+        input.restored = true;
+    }
+    for destination in &mut prefs.destinations {
+        destination.connection = Connection::Disconnected;
+        destination.session_id = 0;
+    }
+    if !prefs.settings.restore_setup {
+        prefs.inputs.clear();
+        prefs.destinations.clear();
+    }
+    if prefs
+        .selection
+        .source_id
+        .as_deref()
+        .is_some_and(crate::audio::application::is_application_id)
     {
+        prefs.selection.source_id = None;
+    }
+    // Reserve every existing colour, including later saved entries, before
+    // repairing neutral/invalid slots. Live survivors are never recoloured.
+    for index in 0..prefs.inputs.len() {
+        if prefs.inputs[index].colour_slot >= 5 {
+            prefs.inputs[index].colour_slot = next_source_colour(&prefs.inputs);
+        }
+    }
+    Ok(prefs)
+}
+
+fn validate_legacy_output(output: Option<&Output>) -> Result<(), AppError> {
+    if output.is_some_and(|o| {
+        o.volume_percent > 100
+            || o.volume_linear
+                .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
+    }) {
+        return Err(Failure::Configuration.error());
+    }
+    Ok(())
+}
+
+fn migrate_preferences(prefs: &mut Preferences) -> Result<(), AppError> {
+    if prefs.version > 4 {
         return Err(Failure::Configuration.error());
     }
     if prefs.version < 2 {
+        // Validate before converting the legacy percentage into a gain.
+        validate_legacy_output(prefs.output.as_ref())?;
         if let Some(source_id) = &prefs.selection.source_id
             && !crate::audio::application::is_application_id(source_id)
         {
@@ -254,9 +301,41 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
             });
         }
     }
+    Ok(())
+}
+
+fn validate_preferences(prefs: &Preferences) -> Result<(), AppError> {
+    if prefs.version > 4
+        || prefs.inputs.len() > MAX_INPUTS
+        || prefs.destinations.len() > MAX_DESTINATIONS
+        || (prefs.version < 4
+            && prefs
+                .destinations
+                .iter()
+                .filter(|d| d.kind == DestinationKind::Discord)
+                .count()
+                > 1)
+        || prefs
+            .destinations
+            .iter()
+            .filter(|d| d.kind == DestinationKind::Playback)
+            .count()
+            > MAX_PLAYBACK_DESTINATIONS
+        || prefs
+            .inputs
+            .iter()
+            .any(|i| !crate::mixing::valid_gain(i.gain_db))
+        || prefs
+            .destinations
+            .iter()
+            .any(|d| !crate::mixing::valid_gain(d.volume_db))
+    {
+        return Err(Failure::Configuration.error());
+    }
+    validate_legacy_output(prefs.output.as_ref())?;
     let mut strips = std::collections::HashSet::new();
     let mut sources = std::collections::HashSet::new();
-    for input in &mut prefs.inputs {
+    for input in &prefs.inputs {
         if input.source_id.is_empty()
             || input.source_id.len() > 1024
             || input.source_id.starts_with("mix-handle:")
@@ -278,11 +357,6 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
         {
             return Err(Failure::Configuration.error());
         }
-        input.kind = if crate::audio::application::is_application_id(&input.source_id) {
-            SourceKind::Application
-        } else {
-            SourceKind::Recording
-        };
     }
     let mut destination_ids = std::collections::HashSet::new();
     let mut playback_ids = std::collections::HashSet::new();
@@ -316,46 +390,7 @@ fn load_preferences(config: &ControllerConfig) -> Result<Preferences, AppError> 
     }) {
         return Err(Failure::Configuration.error());
     }
-    for input in &mut prefs.inputs {
-        input.phase = if input.kind == SourceKind::Recording && prefs.settings.restore_setup {
-            InputPhase::Opening
-        } else {
-            InputPhase::Stopped
-        };
-        input.fault = None;
-        input.restored = true;
-    }
-    for destination in &mut prefs.destinations {
-        destination.connection = Connection::Disconnected;
-        destination.session_id = 0;
-    }
-    if !prefs.settings.restore_setup {
-        prefs.inputs.clear();
-        prefs.destinations.clear();
-    }
-    if prefs
-        .selection
-        .source_id
-        .as_deref()
-        .is_some_and(crate::audio::application::is_application_id)
-    {
-        prefs.selection.source_id = None;
-    }
-    if prefs.output.as_ref().is_some_and(|o| {
-        o.volume_percent > 100
-            || o.volume_linear
-                .is_some_and(|gain| !gain.is_finite() || !(0.0..=1.0).contains(&gain))
-    }) {
-        return Err(Failure::Configuration.error());
-    }
-    // Reserve every existing colour, including later saved entries, before
-    // repairing neutral/invalid slots. Live survivors are never recoloured.
-    for index in 0..prefs.inputs.len() {
-        if prefs.inputs[index].colour_slot >= 5 {
-            prefs.inputs[index].colour_slot = next_source_colour(&prefs.inputs);
-        }
-    }
-    Ok(prefs)
+    Ok(())
 }
 fn save_preferences(config: &ControllerConfig, snapshot: &ControlSnapshot) -> Result<(), AppError> {
     use std::io::Write;
@@ -691,31 +726,18 @@ impl Actor {
                 self.snapshot.inputs = prefs.inputs;
                 self.snapshot.destinations = prefs.destinations;
                 self.snapshot.settings = prefs.settings;
-                self.next_destination = self
-                    .snapshot
-                    .destinations
-                    .iter()
-                    .filter_map(|d| {
+                self.next_destination =
+                    next_id_counter(self.snapshot.destinations.iter().filter_map(|d| {
                         d.destination_id
                             .split_once('-')
                             .map(|(_, id)| id)
                             .and_then(|id| id.parse::<u64>().ok())
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                self.next_strip = self
-                    .snapshot
-                    .inputs
-                    .iter()
-                    .filter_map(|i| {
-                        i.strip_id
-                            .strip_prefix("input-")
-                            .and_then(|n| n.parse::<u64>().ok())
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
+                    }));
+                self.next_strip = next_id_counter(self.snapshot.inputs.iter().filter_map(|i| {
+                    i.strip_id
+                        .strip_prefix("input-")
+                        .and_then(|n| n.parse::<u64>().ok())
+                }));
                 self.snapshot.selection = prefs.selection;
                 if let Some(destination) = self
                     .snapshot
@@ -1200,8 +1222,9 @@ impl Actor {
                     ));
                 }
                 let source = self.source_for_add(&source_id, None)?;
-                let strip_id = format!("input-{}", self.next_strip);
-                self.next_strip += 1;
+                let strip_id = allocate_id("input", &mut self.next_strip, |id| {
+                    self.snapshot.inputs.iter().any(|i| i.strip_id == id)
+                });
                 let colour_slot = next_source_colour(&self.snapshot.inputs);
                 self.snapshot.inputs.push(InputStrip {
                     strip_id,
@@ -1343,8 +1366,7 @@ impl Actor {
                 }
                 self.validate_destination(&server_id, &channel_id)?;
                 self.validate_server_slot(&server_id, None)?;
-                let destination_id = format!("discord-{}", self.next_destination);
-                self.next_destination += 1;
+                let destination_id = self.allocate_destination_id("discord");
                 self.snapshot.destinations.push(DestinationStrip {
                     session_id: 0,
                     kind: DestinationKind::Discord,
@@ -1504,6 +1526,24 @@ impl Actor {
                     "This destination no longer exists.",
                 )
             })
+    }
+    fn allocate_destination_id(&mut self, prefix: &str) -> String {
+        allocate_id(prefix, &mut self.next_destination, |id| {
+            if self
+                .snapshot
+                .destinations
+                .iter()
+                .any(|d| d.destination_id == id)
+                || self.discord.contains(id)
+            {
+                return true;
+            }
+            #[cfg(windows)]
+            if self.playback.contains_key(id) {
+                return true;
+            }
+            false
+        })
     }
     fn refresh_playback_devices(&mut self) {
         if self.playback_scanning {
@@ -1949,8 +1989,7 @@ impl Actor {
                     ));
                 }
                 let device = self.playback_device(&device_id, None)?;
-                let destination_id = format!("playback-{}", self.next_destination);
-                self.next_destination += 1;
+                let destination_id = self.allocate_destination_id("playback");
                 self.snapshot.destinations.push(DestinationStrip {
                     session_id: 0,
                     kind: DestinationKind::Playback,
@@ -3614,6 +3653,124 @@ mod tests {
             })
             .is_err()
         );
+    }
+    #[test]
+    fn migrated_preferences_validate_final_limits_and_duplicate_ids() {
+        let input = |n: usize| {
+            serde_json::json!({
+                "stripId": format!("input-{n}"), "sourceId": format!("recording-{n}"),
+                "kind": "recording", "displayName": "Fixture input", "detail": null,
+                "phase": "stopped", "fault": null, "gainDb": -12.5,
+                "muted": true, "colourSlot": 0, "restored": false
+            })
+        };
+        let discord = |n: usize| {
+            serde_json::json!({
+                "destinationId": format!("discord-{n}"), "serverId": n.to_string(),
+                "channelId": (n + 100).to_string(), "connection": {"phase": "disconnected"},
+                "volumeDb": -6.5, "muted": true
+            })
+        };
+        let playback = |n: usize| {
+            serde_json::json!({
+                "destinationId": format!("playback-{n}"), "kind": "playback",
+                "deviceId": format!("device-{n}"), "serverId": "", "channelId": "",
+                "connection": {"phase": "disconnected"}, "volumeDb": 0.0, "muted": false
+            })
+        };
+        let legacy_source = serde_json::json!({"sourceId": "recording-1"});
+        let legacy_room = serde_json::json!({"serverId": "1", "channelId": "101"});
+        for (name, value) in [
+            (
+                "eight inputs plus legacy source",
+                serde_json::json!({"version": 1, "selection": legacy_source,
+                    "inputs": (2..=9).map(input).collect::<Vec<_>>()}),
+            ),
+            (
+                "four destinations plus legacy room",
+                serde_json::json!({"version": 1, "selection": legacy_room,
+                    "destinations": [discord(2), playback(3), playback(4), playback(5)]}),
+            ),
+            (
+                "legacy versions still allow only one Discord room",
+                serde_json::json!({"version": 1, "selection": legacy_room,
+                    "destinations": [discord(2)]}),
+            ),
+            (
+                "four playback outputs",
+                serde_json::json!({"version": 4,
+                    "destinations": (1..=4).map(playback).collect::<Vec<_>>()}),
+            ),
+            (
+                "synthetic migration ID collision",
+                serde_json::json!({"version": 1, "selection": {"sourceId": "other-recording"},
+                    "inputs": [input(1)]}),
+            ),
+            (
+                "source identity collision after migration",
+                serde_json::json!({"version": 1, "selection": {"sourceId": "recording-2"},
+                    "inputs": [input(2)]}),
+            ),
+        ] {
+            let mut prefs: Preferences = serde_json::from_value(value).unwrap();
+            migrate_preferences(&mut prefs).unwrap();
+            assert!(validate_preferences(&prefs).is_err(), "{name}");
+        }
+
+        let mut valid: Preferences = serde_json::from_value(serde_json::json!({
+            "version": 1, "selection": legacy_source,
+            "inputs": (2..=8).map(input).collect::<Vec<_>>()
+        }))
+        .unwrap();
+        migrate_preferences(&mut valid).unwrap();
+        validate_preferences(&valid).unwrap();
+        assert_eq!(valid.inputs.len(), MAX_INPUTS);
+        assert_eq!(valid.inputs[0].strip_id, "input-2");
+        assert_eq!(valid.inputs[0].gain_db, Some(-12.5));
+        assert!(valid.inputs[0].muted);
+        assert_eq!(valid.inputs[7].strip_id, "input-1");
+        valid.inputs[0].gain_db = Some(0.5);
+        assert!(validate_preferences(&valid).is_err());
+        valid.inputs[0].gain_db = Some(f32::NAN);
+        assert!(validate_preferences(&valid).is_err());
+    }
+    #[test]
+    fn legacy_output_is_validated_before_migration_mutates_preferences() {
+        for (percent, linear) in [(101, None), (50, Some(1.1)), (50, Some(f32::NAN))] {
+            let mut prefs = Preferences {
+                version: 1,
+                selection: Selection {
+                    source_id: Some("fixture-recording".into()),
+                    server_id: Some("1".into()),
+                    channel_id: Some("2".into()),
+                },
+                output: Some(Output {
+                    volume_percent: percent,
+                    volume_linear: linear,
+                    muted: true,
+                }),
+                ..Preferences::default()
+            };
+            assert!(migrate_preferences(&mut prefs).is_err());
+            assert!(prefs.inputs.is_empty());
+            assert!(prefs.destinations.is_empty());
+        }
+    }
+    #[test]
+    fn restored_id_counters_wrap_without_overflow_or_reusing_occupied_ids() {
+        assert_eq!(next_id_counter([1, u64::MAX].into_iter()), 1);
+        let mut next = next_id_counter([1, u64::MAX - 1].into_iter());
+        let last = format!("input-{}", u64::MAX);
+        let occupied = ["input-1", "input-2", last.as_str()];
+        let id = allocate_id("input", &mut next, |id| occupied.contains(&id));
+        assert_eq!(id, "input-3");
+        assert_eq!(next, 4);
+
+        let mut a = actor();
+        simulated_room(&mut a, "discord-1", "1");
+        a.snapshot.destinations.clear();
+        a.next_destination = 1;
+        assert_eq!(a.allocate_destination_id("discord"), "discord-2");
     }
     #[test]
     fn versioned_preferences_migrate_restore_safely_and_preserve_future_files() {

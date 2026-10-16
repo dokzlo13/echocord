@@ -6,11 +6,15 @@ The normal gate is `python scripts/dev.py check` (`python3` on Linux/WSL). It ru
 
 Core tests cover buffer accounting, exact source identity, gain/mute, shared mixing, bounded readers, output capacity and reservations, cancellation/recovery, stale generations, saved setup and source-colour repair. Regression tests should exercise meaningful behavior rather than mirror an implementation.
 
+Recovery fixtures cover stale queued room changes after gateway failure, repeated transport-refresh events, bounded refresh budgets, replacement only after confirmed worker exit, permission denial, transient credential reads and cancellation during gateway recovery. They use fabricated credentials and no network connection. Persistence fixtures block the writer deliberately while issuing Stop, coalesce rapid changes, fence older completions and verify shutdown flush/failure. Windows versions of these fixtures open no audio endpoints.
+
 Browser tests use the fixture/control adapter and cover per-card operations, configuration, errors, sheets, keyboard focus, telemetry isolation and layout. Use synthetic names/accounts. Test artifacts belong in `artifacts/`, not source control. The preview is not a functional audio runtime.
 
 Check UI changes at 440×640,455×455,420×420,760×440 and1000×640 as relevant, with Simple and History meters. Preserve complete controls, independent list scrolling and no document overflow. Include long identities, faults, reduced motion, visible focus, full-sheet focus trapping/Escape/return, and progressive source/destination card/jump numbering. Inspect a bounded screenshot set and fix findings together.
 
 Source add/remove/replace must preserve surviving IDs, colours, commands and histories. Test freed-colour reuse after repeated operations and saved neutral-colour repair without altering normal restoration. Frozen-clock tests should set time before navigation; do not race a browser clock against a host `new Date()`.
+
+Recovery UI tests include ordinary same-source retry, explicit reselection, faulted gain/mute, unconfirmed cleanup, native recovery messages, per-card operation errors, bot recheck and focus retained through state transitions. Test the longest real fault messages in both meter modes at all five sizes; faders must remain usable and notes reachable by scrolling.
 
 ## Windows runtime
 

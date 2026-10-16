@@ -34,11 +34,15 @@ Recording negotiation prefers 48 kHz, then 44.1 kHz, then 96 kHz, with mono/ster
 
 Source gain and mix-only mute are independent. Source meters observe post-gain audio before source mute, so muted activity remains visible; original application playback is unaffected by the mix-only mute. Sources sum into a bounded native mix with clipping/overload indication. Destination gain/mute applies to each reader independently. There is no implicit monitor, routing matrix, recording-file feature, or normalization/DSP chain.
 
+The mixer reuses source-owned meter storage between 100 ms publications; its steady 5 ms processing loop allocates no telemetry collections. Application loopback requests Windows' listening-quality conversion. Shared bus timing uses the cross-process performance counter, and continuity fences discard queued audio from before a producer suspension. Each output attaches at the current write position, without replaying historical audio.
+
 ## State, cancellation and recovery
 
 Commands target stable source/destination IDs. Session and worker generations fence stale events and telemetry. Discord handshake ordering, late/canceled joins, membership reconciliation and cleanup ambiguity require explicit handling; local worker exit alone is not proof that the bot left remotely. An unresolved reservation remains visible until cleanup is confirmed.
 
 Ordinary source/output failures are contained. A gateway reset stops its Discord cohort while capture and local playback remain independent. Disconnect/Quit cancels retry intent. Recovery never silently changes the selected source, device, server, or room.
+
+Queued room changes belong to their gateway generation and are discarded after its failure. Voice reconnect or unexpected track termination can request a replacement worker for the same current room intent, at most twice per minute. The gateway rechecks current membership, session and mute state before releasing credentials, even when their token is unchanged. Replacement waits for confirmed old-worker exit; an unconfirmed exit never authorizes a second writer. Transient credential-read failures have a fixed 30-second retry budget. Permission failures take effect immediately, with subsequent permission requests spaced by five seconds. Leaving during gateway recovery retains its original 12-second deadline so a resumed gateway can confirm departure.
 
 A capture open/cleanup deadline remains a whole-audio-worker failure boundary: native destructors cannot be safely abandoned. The parent retains process ownership and reports the failure; output readers produce paced silence after the producer becomes stale. Replacing that policy requires confirmed old-owner exit, generation fencing and fresh-audio recovery tests.
 
@@ -49,6 +53,8 @@ Preferences store explicit identities, gain/mute and ordinary settings under a v
 The loader checks the version envelope before schema deserialization, applies ordered migrations, validates the final bounded state and normalizes runtime fields. Loading does not write files. Additive settings have defaults; semantic schema changes require a new migration and historical-fixture coverage. Live mutation succeeds independently of saving: a failed write publishes `preferencesWarning`, while `RetryPreferences` saves the current setup without replaying a control action. Only successful persistence clears that warning.
 
 The current settings schema is version 4, with explicit transitions from versions 0–3. Final route/identity/gain validation follows migration. Future versions, malformed version declarations and oversized existing files are preserved; serialized output is also checked against the file budget before replacing the previous valid file. Atomic writes retain the last valid setup on failure.
+
+One dedicated writer handles disk operations outside the control actor. It holds one active revision and one coalesced pending preferences payload. Changes debounce for 150 ms, with a 500 ms maximum scheduling wait; Retry and Quit flush promptly. `preferencesSaving` describes pending/in-flight work. An older revision's success cannot clear a warning for a newer unsaved setup. Shutdown waits for the latest flush and writer exit within the shell's existing shutdown policy; a failed flush is reported as a failure. These scheduling bounds do not promise a disk-completion deadline.
 
 The bot token is encrypted with Windows current-user DPAPI. It stays backend-owned and is omitted from snapshots and diagnostics. Token validation or saving never joins voice. The UI token field is ephemeral; replacement is restricted while relevant Discord lifetimes remain active.
 

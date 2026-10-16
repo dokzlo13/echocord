@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "echocord"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "echocord-core",
  "tauri",
@@ -1326,7 +1326,7 @@ dependencies = [
 
 [[package]]
 name = "echocord-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "directories",

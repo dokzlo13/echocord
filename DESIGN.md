@@ -26,6 +26,10 @@ Default 440×640, minimum 420×420, with remembered size. A 36px custom title ba
 
 A source shows identity, state/remove, Capture/Stop, mix-only Mute and a combined gain/meter. A destination shows identity, state/remove, output controls, Mute/volume and progressive diagnostics. Discord uses Connect/Cancel/Disconnect and On air; a playback device uses Play/Stop and Playing/Stopped. Keep real server/device imagery and accessible fallbacks. Source faults stay on their cards; removing an active output uses inline confirmation.
 
+Faults keep the controls mounted and usable. Retry uses the ordinary Capture, Connect or Play verb; a missing identity opens selection instead. Cleanup uncertainty shows Unconfirmed with its full accessible description and offers Stop/Disconnect, never a new start. Recovery shows the native explanation and permits Disconnect. Keep one wrapping note per card, prioritizing operation error, fault and then recovery. Keyboard focus survives phase changes. App-level announcements name the affected cards and combine shared failures.
+
+Summaries list problems before active states; jump buttons include the state in their accessible names. Bot checking, rejected tokens and failed checks have distinct labels, with Check again available in bot setup. Errors stay attached to their own card until dismissed or another command targets it.
+
 Source and destination numbering is independent: hide numbers/jump navigation with zero or one card; show matching contiguous one-based card/jump ordinals with multiple cards. Removal compacts display numbers without changing IDs, actions or histories. A single source keeps its on/muted/off summary without a numeric count. Jump labels identify section, ordinal and full identity; Discord room labels include server context.
 
 Colours remain separate from ordinals. New sources use the lowest free coloured slot 0–4, then neutral 5 while all five are occupied. Live operations preserve surviving colours. On restore, reserve every valid coloured assignment before repairing neutral/out-of-range slots with available colours in saved order. Destination card numbers stay neutral; their state remains in existing status badges.
@@ -51,5 +55,7 @@ Bot setup puts the token field first, focuses it and supports Enter to submit. A
 Bot details show real profile/shared-gateway facts, discovered room counts and reservation status. Room discovery is not proof of access; permissions are checked when connecting. Do not display hardcoded Connect/Speak grants or unexplained OK badges. Settings shows the package-derived app version and only wired controls.
 
 Failed preference writes keep live controls applied. A persistent bottom strip says Changes not saved, offers Details and Retry save, and spans both columns without moving card tops. Settings pins the full reason and retry in its footer. The warning clears only after saving succeeds; polite status announcements distinguish saving from rejected controls. Settings also links to the offline license viewer: filter document titles, deliberately select a document, and read/copy its plain text. Filtering and retrying preserve the open document; Escape returns to Settings and restores focus to Licenses.
+
+Background saving is separate from accepting the live control change. A save retry remains pending while the native writer works, and a previous warning stays visible until the latest setup is saved.
 
 Test relevant states, keyboard behavior and the five documented sizes in [TESTING.md](docs/TESTING.md). Browser screenshots do not establish native accessibility, display scaling or physical audio behavior.

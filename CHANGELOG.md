@@ -4,6 +4,27 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 
 ## Unreleased
 
+## 0.3.0 — 2026-10-16
+
+### Reliability
+
+- Keep Stop and other live controls responsive while preferences save in the background. Rapid changes coalesce, save retries report progress, and Quit flushes the latest setup.
+- Prevent a queued Discord room change from reconnecting after its gateway has failed. Bound voice transport refreshes, reverify the current room, and wait for confirmed worker exit before replacement.
+- Apply Discord permission failures promptly and allow pending departures to complete across gateway recovery without reviving canceled connections.
+- Discard stale shared audio across producer suspension, use a precise shared Windows clock, and eliminate steady-state mixer telemetry allocations.
+- Request Windows' listening-quality conversion for selected application audio.
+
+### Interface
+
+- Keep capture, volume and mute controls reachable on faulted cards, with direct retry or reselection actions and truthful cleanup/recovery states.
+- Distinguish rejected bot tokens from failed checks and offer Check again. Keep operation errors on the affected card and preserve keyboard focus through connection changes.
+- Prioritize problems in summaries, name states in navigation, wrap recovery explanations in compact windows, and reset only the replaced source's history.
+
+### Scope
+
+- Adaptive drift correction, performance presets, surround input and a mix limiter remain deferred. Synthetic limiter comparisons exposed modulation and post-transient ducking; no unvalidated audio processing or speculative tuning controls are enabled.
+- Automated recovery and signal fixtures do not establish physical device compatibility, listener delivery or multi-hour stability. Windows 11 x64 and the existing runtime requirements remain unchanged.
+
 ## 0.2.0 — 2026-10-16
 
 ### Added

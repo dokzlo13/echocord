@@ -47,6 +47,7 @@ struct Inner {
     times: BTreeMap<String, Timing>,
     sender: Option<UnboundedSender<ShardRunnerMessage>>,
     registered: bool,
+    failed: bool,
     connected: bool,
     user: UserId,
     http: Arc<serenity::http::Http>,
@@ -68,6 +69,10 @@ impl Inner {
         }
     }
     fn fatal(&mut self, code: Failure) {
+        if self.failed {
+            return;
+        }
+        self.failed = true;
         self.sender = None;
         self.connected = false;
         let keys = self
@@ -728,6 +733,7 @@ pub async fn run_worker() -> Result<(), Failure> {
             times: BTreeMap::new(),
             sender: None,
             registered: false,
+            failed: false,
             connected: false,
             user: user.id,
             http,
@@ -828,6 +834,7 @@ mod tests {
                 times: BTreeMap::new(),
                 sender: Some(sender),
                 registered: true,
+                failed: false,
                 connected: true,
                 user: UserId::new(3),
                 http: Arc::new(serenity::http::Http::new("synthetic-unused")),
@@ -1088,6 +1095,7 @@ mod tests {
             .server("1", Some("private-endpoint-canary"), "private-token-canary");
         let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
         i.fatal(Failure::Connection);
+        i.fatal(Failure::Permission); // First terminal failure owns the epoch.
         assert!(
             i.correlation
                 .verify(

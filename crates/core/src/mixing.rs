@@ -559,11 +559,13 @@ mod native {
             }
         }
         let mut controls = StopAll(Vec::new());
+        let mut pumps = Vec::new();
         let mut slots = BTreeMap::new();
         for index in 0..MAX_INPUTS {
-            // These are owned Rust generators feeding private rings. They open
-            // no endpoint and produce no physical or network output.
-            let session = audio::bus_capture(|frames| frames.fill([0.125, -0.25]));
+            // Feed the real capture rings directly, without relying on native
+            // thread scheduling. No endpoint, network or physical output opens.
+            let (session, pump) = audio::tests::synchronous_mixer_fixture();
+            pumps.push(pump);
             controls.0.push(session.control.clone());
             let id = format!("fixture-{index}");
             let input = InputStrip {
@@ -596,6 +598,9 @@ mod native {
         let bus = mix_bus::Bus::test_bus();
         let allocations = allocations_during(|| {
             for tick in 0..1000 {
+                for pump in &mut pumps {
+                    pump();
+                }
                 open_pending_sources(&mut slots, &done);
                 let (mix, _) = mix_sources(&mut slots, &done);
                 bus.write(&mix, tick * 5);

@@ -1193,7 +1193,7 @@ pub(crate) fn bus_capture(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Weak;
     use symphonia_core::io::{MediaSourceStream, ReadBytes, SeekBuffered};
@@ -1251,6 +1251,19 @@ mod tests {
             .status
             .store(RUNNING, Ordering::Release);
         (writer, session, clock)
+    }
+
+    /// Feed the real private capture ring on a virtual clock. Allocation tests
+    /// must not depend on OS scheduling or the freshness of background threads.
+    #[cfg(windows)]
+    pub(crate) fn synchronous_mixer_fixture() -> (CaptureSession, impl FnMut()) {
+        let (mut writer, session, clock) = setup();
+        (session, move || {
+            clock.ns.fetch_add(5_000_000, Ordering::Relaxed);
+            for _ in 0..QUANTUM_FRAMES {
+                writer.write(&[0.125, -0.25], 2, |sample| sample);
+            }
+        })
     }
 
     #[test]

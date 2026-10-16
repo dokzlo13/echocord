@@ -34,6 +34,7 @@ pub struct Slot {
     state: Option<State>,
     server: Option<Server>,
     released: Option<VoiceSecret>,
+    refresh_requested: bool,
     join_state_seen: bool,
     join_server_seen: bool,
     incomplete_cancel: bool,
@@ -58,7 +59,7 @@ impl Slot {
             session_id: state.session.clone(),
             user_id: user_id.into(),
         };
-        (self.released.as_ref() != Some(&secret)).then_some(secret)
+        (self.refresh_requested || self.released.as_ref() != Some(&secret)).then_some(secret)
     }
     pub fn left(&self) -> bool {
         if !self.issued {
@@ -113,6 +114,7 @@ impl Correlator {
                 state: None,
                 server: None,
                 released: None,
+                refresh_requested: false,
                 join_state_seen: false,
                 join_server_seen: false,
                 incomplete_cancel: false,
@@ -307,6 +309,40 @@ impl Correlator {
         slot.verifying = Some(slot.counter);
         Some((slot.counter, secret))
     }
+    /// Renew only the current active credential, with a new REST/counter fence.
+    /// This never sends another gateway join or accepts a retired token.
+    pub fn request_refresh(&mut self, key: &RoomKey) -> bool {
+        let Some(slot) = self.slot(key) else {
+            return false;
+        };
+        let (Some(released), Some(server), Some(state)) =
+            (&slot.released, &slot.server, &slot.state)
+        else {
+            return false;
+        };
+        if !slot.wanted
+            || !slot.issued
+            || slot.phase != Phase::Active
+            || slot.refresh_requested
+            || released.token != server.token
+            || released.endpoint != server.endpoint
+            || released.session_id != state.session
+            || state.channel != key.channel_id
+            || self
+                .retired
+                .iter()
+                .any(|(guild, token)| guild == &key.server_id && token == &released.token)
+        {
+            return false;
+        }
+        let Some(counter) = slot.counter.checked_add(1) else {
+            return false;
+        };
+        let slot = self.slot_mut(key).expect("matched slot");
+        slot.counter = counter;
+        slot.refresh_requested = true;
+        true
+    }
     pub fn verify(
         &mut self,
         key: &RoomKey,
@@ -332,6 +368,7 @@ impl Correlator {
         }
         slot.revision = slot.revision.checked_add(1)?;
         slot.released = Some(secret.clone());
+        slot.refresh_requested = false;
         slot.phase = Phase::Active;
         Some(slot.revision)
     }
@@ -515,5 +552,60 @@ mod tests {
         c.state("1", Some("88"), "other", true);
         assert!(!c.preflight(&k, 0, true));
         assert!(!c.preflight(&k, 1, false));
+    }
+    #[test]
+    fn transport_refresh_rechecks_current_credentials_with_a_new_counter_and_revision() {
+        let mut c = Correlator::default();
+        let k = key(1, "2");
+        c.reserve(k.clone()).unwrap();
+        c.preflight(&k, 0, true);
+        c.mark_join_sent(&k);
+        c.state("1", Some("2"), "session", true);
+        c.server("1", Some("host"), "token");
+        let (first_counter, secret) = c.begin_verification(&k, "3").unwrap();
+        assert_eq!(
+            c.verify(&k, first_counter, &secret, Some("2"), Some("session"), true),
+            Some(1)
+        );
+        assert!(c.begin_verification(&k, "3").is_none());
+        assert!(c.request_refresh(&k));
+        assert!(!c.request_refresh(&k));
+        let (counter, repeated) = c.begin_verification(&k, "3").unwrap();
+        assert!(counter > first_counter);
+        assert_eq!(secret, repeated);
+        c.state("1", Some("2"), "session", true);
+        assert!(
+            c.verify(&k, counter, &repeated, Some("2"), Some("session"), true)
+                .is_none()
+        );
+        let (counter, repeated) = c.begin_verification(&k, "3").unwrap();
+        assert_eq!(
+            c.verify(&k, counter, &repeated, Some("2"), Some("session"), true),
+            Some(2)
+        );
+        assert!(c.begin_verification(&k, "3").is_none());
+        c.cancel(&k);
+        assert!(!c.request_refresh(&k));
+        assert!(c.begin_verification(&k, "3").is_none());
+    }
+    #[test]
+    fn refresh_never_revives_retired_tokens_or_an_old_room_key() {
+        let mut c = Correlator::default();
+        let k = key(1, "2");
+        c.reserve(k.clone()).unwrap();
+        c.preflight(&k, 0, true);
+        c.mark_join_sent(&k);
+        c.state("1", Some("2"), "session", true);
+        c.server("1", Some("host"), "old-token");
+        let (counter, secret) = c.begin_verification(&k, "3").unwrap();
+        c.verify(&k, counter, &secret, Some("2"), Some("session"), true);
+        assert!(!c.request_refresh(&key(2, "2")));
+        c.server("1", None, "next-token");
+        assert!(!c.request_refresh(&k));
+        assert_eq!(
+            c.server("1", Some("host"), "old-token"),
+            ServerAction::Ignore
+        );
+        assert!(c.begin_verification(&k, "3").is_none());
     }
 }

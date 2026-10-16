@@ -39,6 +39,7 @@ pub struct Room {
     revision: u32,
     pending: Option<(u32, VoiceSecret)>,
     failure: Option<AppError>,
+    refreshes: [Option<Instant>; 2],
     since: Instant,
 }
 pub struct Manager {
@@ -138,6 +139,7 @@ impl Manager {
             revision: 0,
             pending: None,
             failure: None,
+            refreshes: [None; 2],
             since: Instant::now(),
         };
         self.rooms.insert(key.destination_id.clone(), room);
@@ -282,10 +284,12 @@ impl Manager {
                     room.pending = Some((revision, secret));
                     if let Some(generation) = room.voice {
                         room.voice_stopping = true;
-                        room.connection = Connection::Recovering {
-                            attempt: 1,
-                            message: "Updating this room’s voice connection.".into(),
-                        };
+                        if !matches!(room.connection, Connection::CleanupIncomplete { .. }) {
+                            room.connection = Connection::Recovering {
+                                attempt: 1,
+                                message: "Updating this room’s voice connection.".into(),
+                            };
+                        }
                         self.effects.push(Effect::StopVoice {
                             destination_id: key.destination_id,
                             generation,
@@ -301,10 +305,12 @@ impl Manager {
                     room.pending = None;
                     room.voice_stopping = true;
                     room.capture = ControlSnapshot::default().capture;
-                    room.connection = Connection::Recovering {
-                        attempt: 1,
-                        message: "Updating this room’s voice connection.".into(),
-                    };
+                    if !matches!(room.connection, Connection::CleanupIncomplete { .. }) {
+                        room.connection = Connection::Recovering {
+                            attempt: 1,
+                            message: "Updating this room’s voice connection.".into(),
+                        };
+                    }
                     if let Some(generation) = room.voice {
                         self.effects.push(Effect::StopVoice {
                             destination_id: key.destination_id,
@@ -421,6 +427,42 @@ impl Manager {
                 ) =>
             {
                 room.capture = clean_capture(capture)
+            }
+            VoiceStatus::RefreshRequired => {
+                let now = Instant::now();
+                for previous in &mut room.refreshes {
+                    if previous.is_some_and(|at| now.duration_since(at) >= Duration::from_secs(60))
+                    {
+                        *previous = None;
+                    }
+                }
+                let Some(available) = room.refreshes.iter_mut().find(|entry| entry.is_none())
+                else {
+                    self.stop(id, Some(Failure::Connection.error()));
+                    return;
+                };
+                *available = Some(now);
+                if room.connection == Connection::Connected {
+                    room.since = now;
+                }
+                room.voice_stopping = true;
+                room.pending = None;
+                room.capture = ControlSnapshot::default().capture;
+                room.connection = Connection::Recovering {
+                    attempt: room
+                        .refreshes
+                        .iter()
+                        .filter(|entry| entry.is_some())
+                        .count() as u8,
+                    message: "Refreshing this room’s voice transport.".into(),
+                };
+                self.effects.push(Effect::StopVoice {
+                    destination_id: id.into(),
+                    generation,
+                });
+                self.effects.push(Effect::Gateway(GatewayCommand::Refresh {
+                    key: room.key.clone(),
+                }));
             }
             VoiceStatus::Failed { code } => self.stop(id, Some(code.error())),
             VoiceStatus::Stopped => self.stop(id, Some(Failure::Connection.error())),
@@ -861,5 +903,116 @@ mod tests {
         );
         m.voice_exit("discord-1", generation, true);
         assert!(!m.rooms["discord-1"].wanted);
+    }
+    #[test]
+    fn transport_refresh_keeps_identity_and_waits_for_confirmed_worker_exit() {
+        let mut m = Manager::default();
+        let (key, old) = active(&mut m, "discord-1", "1");
+        let (_, peer) = active(&mut m, "discord-2", "2");
+        m.voice_status("discord-1", old, VoiceStatus::RefreshRequired);
+        m.voice_status("discord-1", old, VoiceStatus::RefreshRequired);
+        assert_eq!(m.effects.len(), 2);
+        assert!(
+            matches!(&m.effects[0], Effect::StopVoice { generation, .. } if *generation == old)
+        );
+        assert!(
+            matches!(&m.effects[1], Effect::Gateway(GatewayCommand::Refresh { key: requested }) if requested == &key)
+        );
+        assert!(
+            !m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Gateway(GatewayCommand::Join { .. })))
+        );
+        m.voice_exit("discord-1", old, false);
+        m.gateway_status(
+            1,
+            GatewayStatus::Credentials {
+                key: key.clone(),
+                revision: 2,
+                secret: secret("private-token-canary"),
+            },
+        );
+        assert!(matches!(
+            m.rooms["discord-1"].connection,
+            Connection::CleanupIncomplete { .. }
+        ));
+        m.effects.clear();
+        m.advance(false);
+        assert!(m.effects.is_empty());
+        assert_eq!(m.rooms["discord-1"].voice, Some(old));
+        m.voice_exit("discord-1", old, true);
+        m.advance(false);
+        let new = m.rooms["discord-1"].voice.unwrap();
+        assert_ne!(old, new);
+        assert_eq!(m.rooms["discord-1"].key, key);
+        assert!(
+            matches!(&m.effects[0], Effect::LaunchVoice { revision: 2, generation, key: requested, .. } if *generation == new && requested == &key)
+        );
+        assert_eq!(m.rooms["discord-2"].voice, Some(peer));
+        assert_eq!(m.rooms["discord-2"].connection, Connection::Connected);
+        m.effects.clear();
+        m.voice_status("discord-1", old, VoiceStatus::RefreshRequired);
+        assert!(m.effects.is_empty());
+        m.stop("discord-1", None);
+        m.effects.clear();
+        m.voice_status("discord-1", new, VoiceStatus::RefreshRequired);
+        m.gateway_status(
+            1,
+            GatewayStatus::Credentials {
+                key,
+                revision: 3,
+                secret: secret("private-token-canary"),
+            },
+        );
+        assert!(!m.rooms["discord-1"].wanted);
+        assert!(m.effects.is_empty());
+    }
+    #[test]
+    fn refresh_budget_survives_worker_replacement_and_ends_only_the_failing_room() {
+        let mut m = Manager::default();
+        let (key, mut generation) = active(&mut m, "discord-1", "1");
+        active(&mut m, "discord-2", "2");
+        for revision in 2..=3 {
+            m.voice_status("discord-1", generation, VoiceStatus::RefreshRequired);
+            m.gateway_status(
+                1,
+                GatewayStatus::Credentials {
+                    key: key.clone(),
+                    revision,
+                    secret: secret("private-token-canary"),
+                },
+            );
+            m.voice_exit("discord-1", generation, true);
+            m.advance(false);
+            generation = m.rooms["discord-1"].voice.unwrap();
+            m.voice_status("discord-1", generation, VoiceStatus::Connected);
+            assert!(m.rooms["discord-1"].wanted);
+        }
+        m.effects.clear();
+        m.voice_status("discord-1", generation, VoiceStatus::RefreshRequired);
+        assert!(!m.rooms["discord-1"].wanted);
+        assert!(
+            !m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Gateway(GatewayCommand::Refresh { .. })))
+        );
+        assert_eq!(
+            m.rooms["discord-1"].failure.as_ref().unwrap().code,
+            ErrorCode::ConnectionFailed
+        );
+        assert!(m.rooms["discord-2"].wanted);
+        assert_eq!(m.rooms["discord-2"].connection, Connection::Connected);
+        m.gateway_status(1, GatewayStatus::Left { key: key.clone() });
+        m.voice_exit("discord-1", generation, true);
+        m.advance(false);
+        let (new_key, new_voice) = active(&mut m, "discord-1", "1");
+        assert_ne!(new_key.intent, key.intent);
+        m.voice_status("discord-1", new_voice, VoiceStatus::RefreshRequired);
+        assert!(m.rooms["discord-1"].wanted);
+        assert!(
+            m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Gateway(GatewayCommand::Refresh { .. })))
+        );
     }
 }

@@ -34,6 +34,7 @@ impl fmt::Debug for VoiceSecret {
 pub enum GatewayCommand {
     Init { token_file: PathBuf },
     Join { key: RoomKey },
+    Refresh { key: RoomKey },
     Leave { key: RoomKey },
     Forget { key: RoomKey },
     Stop,
@@ -116,6 +117,7 @@ impl fmt::Debug for VoiceCommand {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VoiceStatus {
     Connected,
+    RefreshRequired,
     Meter { capture: Capture },
     Failed { code: Failure },
     Stopped,

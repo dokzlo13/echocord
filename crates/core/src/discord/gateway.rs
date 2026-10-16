@@ -759,6 +759,10 @@ pub async fn run_worker() -> Result<(), Failure> {
                 tokio::select! {biased;_=stop_rx.changed()=>break,
                     Some(command)=command_rx.recv()=>match command {
                         GatewayCommand::Join {key}=>join(inner.clone(),key).await,
+                        GatewayCommand::Refresh {key}=>{
+                            let requested=inner.lock().await.correlation.request_refresh(&key);
+                            if requested {verify(inner.clone(),key).await;}
+                        },
                         GatewayCommand::Leave {key}=>inner.lock().await.cancel(&key,None),
                         GatewayCommand::Forget {key}=>{let mut i=inner.lock().await;if i.correlation.forget(&key){i.jobs.cancel(&key);i.calls.remove(&key.server_id);i.times.remove(&key.server_id);}},_=>break},
                     _=ping.tick()=>{let (connected,milliseconds)={let runners=manager.runners.lock().await;let runner=runners.values().next();let connected=runner.is_some_and(|r|r.stage==serenity::gateway::ConnectionStage::Connected);(connected,runner.filter(|_|connected).and_then(|r|r.latency.map(|latency|latency.as_secs_f32()*1000.0)))};

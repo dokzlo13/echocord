@@ -2363,7 +2363,7 @@ impl Actor {
                     }
                 }
                 Effect::Gateway(command) => {
-                    if let GatewayCommand::Join { key } = &command
+                    if let GatewayCommand::Join { key } | GatewayCommand::Refresh { key } = &command
                         && !self
                             .discord
                             .rooms

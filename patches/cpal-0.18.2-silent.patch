@@ -1,0 +1,174 @@
+--- a/src/host/wasapi/stream.rs
++++ b/src/host/wasapi/stream.rs
+@@ -622,13 +622,20 @@
+     }
+ 
+     let stream = &run_ctxt.stream;
+-    let scratch_len = if stream.sample_format == SampleFormat::I24 {
+-        stream.max_frames_in_buffer as usize * stream.bytes_per_frame as usize / size_of::<i32>()
+-    } else {
+-        // The scratch buffer won't be used in this case.
+-        0 // Vec::with_capacity(0) does not allocate.
++    // Own aligned storage for silent packets as well as I24 conversion. Never
++    // write into or inspect a driver buffer flagged SILENT. u64 alignment also
++    // covers the F64/I64 sample formats supported by this release.
++    let Some(scratch_bytes) = (stream.max_frames_in_buffer as usize)
++        .checked_mul(stream.bytes_per_frame as usize)
++    else {
++        emit_error(
++            error_callback,
++            Error::with_message(ErrorKind::BackendError, "Capture buffer size overflow"),
++        );
++        return;
+     };
+-    let mut scratch_buffer = vec![0; scratch_len].into_boxed_slice();
++    let scratch_len = scratch_bytes.div_ceil(size_of::<u64>());
++    let mut scratch_buffer = vec![0u64; scratch_len].into_boxed_slice();
+ 
+     loop {
+         match process_commands_and_await_signal(&mut run_ctxt, error_callback) {
+@@ -787,7 +794,7 @@
+     capture_client: Audio::IAudioCaptureClient,
+     data_callback: &mut dyn FnMut(&Data, &InputCallbackInfo),
+     error_callback: &ErrorCallbackArc,
+-    scratch_buffer: &mut [i32],
++    scratch_buffer: &mut [u64],
+ ) -> Result<(), Error> {
+     unsafe {
+         // Get the available data in the shared buffer.
+@@ -801,63 +808,87 @@
+             };
+             let mut qpc_position: u64 = 0;
+             let mut device_position: u64 = 0;
+-            let result = capture_client.GetBuffer(
++            capture_client.GetBuffer(
+                 &mut buffer,
+                 &mut frames_available,
+                 flags.as_mut_ptr(),
+                 Some(&mut device_position),
+                 Some(&mut qpc_position),
+-            );
+-
+-            match result {
+-                // TODO: Can this happen?
+-                Err(e) if e.code() == Audio::AUDCLNT_S_BUFFER_EMPTY => continue,
+-                Err(e) => return Err(Error::from(e)),
+-                Ok(_) => (),
++            )?;
++            // AUDCLNT_S_BUFFER_EMPTY is a successful HRESULT. No packet was
++            // acquired and the remaining output arguments need not be written.
++            if frames_available == 0 {
++                return Ok(());
+             }
+ 
+-            let flags = flags.assume_init();
+-            // The discontinuity flag is undefined on the first GetBuffer after Start,
+-            // where device_position is still 0.
+-            if device_position != 0
+-                && flags & Audio::AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0
+-            {
+-                let _ = try_emit_error(error_callback, ErrorKind::Xrun.into());
+-            }
+-
+-            debug_assert!(!buffer.is_null());
+-
+-            let byte_count = frames_available as usize * stream.bytes_per_frame as usize;
+-            let data = if stream.sample_format == SampleFormat::I24 {
+-                // WASAPI stores i24 in the upper bits
+-                let source_data =
+-                    slice::from_raw_parts(buffer.cast(), byte_count / size_of::<i32>());
+-                // use a scratch buffer since the capture buffer isn't meant to be written
+-                let dst = &mut scratch_buffer[..source_data.len()];
+-                dst.copy_from_slice(source_data);
+-                for sample in dst.iter_mut() {
+-                    // On signed integers, >> is an arithmetic shift,
+-                    // which ensures the correct upper bits get shifted in
+-                    *sample >>= 8;
++            // Every acquired nonempty packet is released, including errors in
++            // size validation or timestamp lookup. Never resize scratch here.
++            let processed = (|| {
++                let flags = flags.assume_init();
++                let byte_count = (frames_available as usize)
++                    .checked_mul(stream.bytes_per_frame as usize)
++                    .ok_or_else(|| {
++                        Error::with_message(ErrorKind::BackendError, "Capture packet size overflow")
++                    })?;
++                if frames_available > stream.max_frames_in_buffer
++                    || byte_count > std::mem::size_of_val(scratch_buffer)
++                    || !byte_count.is_multiple_of(stream.sample_format.sample_size())
++                {
++                    return Err(Error::with_message(
++                        ErrorKind::BackendError,
++                        "Capture packet exceeds its bounded storage",
++                    ));
+                 }
+-
+-                dst.as_mut_ptr().cast()
+-            } else {
+-                buffer.cast()
+-            };
+-
+-            let len = byte_count / stream.sample_format.sample_size();
+-            let data = Data::from_parts(data, len, stream.sample_format);
+-
+-            // The `qpc_position` is in 100 nanosecond units. Convert it to nanoseconds.
+-            let timestamp = input_timestamp(stream, qpc_position)?;
+-            let info = InputCallbackInfo { timestamp };
+-            data_callback(&data, &info);
+-
+-            // Release the buffer.
+-            capture_client
++                // The discontinuity flag is undefined on the first packet.
++                if device_position != 0
++                    && flags & Audio::AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0
++                {
++                    let _ = try_emit_error(error_callback, ErrorKind::Xrun.into());
++                }
++                let silent = flags & Audio::AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
++                let data = if silent {
++                    let dst = slice::from_raw_parts_mut(
++                        scratch_buffer.as_mut_ptr().cast::<u8>(),
++                        byte_count,
++                    );
++                    fill_equilibrium(dst, stream.sample_format);
++                    dst.as_mut_ptr().cast()
++                } else {
++                    if buffer.is_null() {
++                        return Err(Error::with_message(
++                            ErrorKind::BackendError,
++                            "Capture returned a null nonsilent packet",
++                        ));
++                    }
++                    if stream.sample_format == SampleFormat::I24 {
++                        // WASAPI stores i24 in the upper bits. Convert into
++                        // aligned owned scratch without modifying the packet.
++                        let len = byte_count / size_of::<i32>();
++                        let src = slice::from_raw_parts(buffer.cast::<i32>(), len);
++                        let dst = slice::from_raw_parts_mut(
++                            scratch_buffer.as_mut_ptr().cast::<i32>(),
++                            len,
++                        );
++                        for (out, input) in dst.iter_mut().zip(src) {
++                            *out = *input >> 8;
++                        }
++                        dst.as_mut_ptr().cast()
++                    } else {
++                        buffer.cast()
++                    }
++                };
++                let len = byte_count / stream.sample_format.sample_size();
++                let data = Data::from_parts(data, len, stream.sample_format);
++                let timestamp = input_timestamp(stream, qpc_position)?;
++                let info = InputCallbackInfo { timestamp };
++                data_callback(&data, &info);
++                Ok(())
++            })();
++            let released = capture_client
+                 .ReleaseBuffer(frames_available)
+-                .context("Failed to release capture buffer")?;
++                .context("Failed to release capture buffer");
++            processed?;
++            released?;
+         }
+     }
+ }

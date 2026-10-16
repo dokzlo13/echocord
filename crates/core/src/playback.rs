@@ -19,6 +19,8 @@ pub struct RenderObservation {
     pub dropped_frames: u32,
     pub underrun_frames: u32,
     pub callback_frames: u32,
+    #[serde(default)]
+    pub timing: Option<crate::model::TimingObservation>,
 }
 #[derive(Default)]
 pub struct RenderControl {
@@ -74,6 +76,7 @@ impl RenderControl {
         let observed_at_ms =
             crate::audio::clean_observation_time(valid.then_some(measured as f64), now_ms as f64);
         RenderObservation {
+            timing: None,
             observed_at_ms,
             level_dbfs: observed_at_ms.map(|_| {
                 if peak == 0.0 {

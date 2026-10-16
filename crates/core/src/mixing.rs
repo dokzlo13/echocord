@@ -43,6 +43,7 @@ pub fn clamp_mix(mix: &mut [[f32; 2]]) {
 pub struct AudioSnapshot {
     pub observed_at_ms: Option<f64>,
     pub mix_pre_clip: bool,
+    pub limiter_reduction_db: Option<f32>,
     pub revision: u64,
     pub inputs: Vec<InputStrip>,
     pub telemetry: Vec<InputTelemetry>,
@@ -174,6 +175,7 @@ mod native {
             generation: 1,
             sequence: 1,
             body: AudioSnapshot {
+                limiter_reduction_db: None,
                 observed_at_ms: Some(0.0),
                 revision: 1,
                 inputs,
@@ -804,6 +806,7 @@ mod native {
             if Instant::now() >= publish {
                 publish = Instant::now() + Duration::from_millis(100);
                 let _ = statuses.try_send(AudioSnapshot {
+                    limiter_reduction_db: None,
                     observed_at_ms: Some(audio::observation_clock_ms()),
                     mix_pre_clip,
                     revision,

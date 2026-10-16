@@ -710,6 +710,10 @@ struct Actor {
     #[cfg(windows)]
     audio: Option<crate::mixing::AudioHost>,
     audio_failed: bool,
+    #[cfg(any(windows, test))]
+    audio_drift_revision: u64,
+    #[cfg(any(windows, test))]
+    audio_limiter_revision: u64,
     audio_observed_sources: std::collections::BTreeMap<String, String>,
     next_strip: u64,
     config: ControllerConfig,
@@ -750,6 +754,10 @@ impl Actor {
             #[cfg(windows)]
             audio: None,
             audio_failed: false,
+            #[cfg(any(windows, test))]
+            audio_drift_revision: 0,
+            #[cfg(any(windows, test))]
+            audio_limiter_revision: 0,
             audio_observed_sources: std::collections::BTreeMap::new(),
             next_strip: 1,
             config,
@@ -1205,7 +1213,11 @@ impl Actor {
                 )?);
             }
             if let Some(audio) = &self.audio {
-                audio.sources(self.snapshot.inputs.clone());
+                audio.sources(
+                    self.snapshot.inputs.clone(),
+                    self.snapshot.settings.drift_correction,
+                    self.snapshot.settings.mix_limiter,
+                );
             }
         }
         Ok(())
@@ -1268,6 +1280,7 @@ impl Actor {
         self.snapshot.telemetry.inputs.clear();
         self.snapshot.telemetry.mix_observed_at_ms = None;
         self.snapshot.telemetry.mix_pre_clip = false;
+        self.snapshot.telemetry.limiter_reduction_db = None;
         // Network worker remains owned; the dead producer yields paced silence.
         self.publish();
     }
@@ -1299,6 +1312,7 @@ impl Actor {
         if observed_at_ms.is_none() {
             self.snapshot.telemetry.mix_observed_at_ms = None;
             self.snapshot.telemetry.mix_pre_clip = false;
+            self.snapshot.telemetry.limiter_reduction_db = None;
             self.snapshot.telemetry.inputs.clear();
             self.publish();
             return;
@@ -1313,6 +1327,15 @@ impl Actor {
         }
         self.snapshot.telemetry.mix_pre_clip = observation.mix_pre_clip;
         self.snapshot.telemetry.mix_observed_at_ms = observed_at_ms;
+        self.snapshot.telemetry.limiter_reduction_db = if self.snapshot.settings.mix_limiter
+            && observation.revision >= self.audio_limiter_revision
+        {
+            observation
+                .limiter_reduction_db
+                .filter(|value| value.is_finite() && (0.0..=800.0).contains(value))
+        } else {
+            None
+        };
         let mut telemetry = Vec::with_capacity(observation.telemetry.len().min(MAX_INPUTS));
         for mut meter in observation.telemetry.into_iter().take(MAX_INPUTS) {
             let Some(observed) = observation
@@ -1334,9 +1357,13 @@ impl Actor {
             }
             meter.observed_at_ms =
                 crate::audio::clean_observation_time(meter.observed_at_ms, observed_at_ms.unwrap());
-            meter.timing = meter
-                .timing
-                .and_then(|timing| crate::protocol::clean_timing(timing, now));
+            meter.timing = if observation.revision >= self.audio_drift_revision {
+                meter
+                    .timing
+                    .and_then(|timing| crate::protocol::clean_timing(timing, now))
+            } else {
+                None
+            };
             if meter.observed_at_ms.is_none() {
                 meter.level_dbfs = None;
                 meter.pre_clip = false;
@@ -1723,12 +1750,57 @@ impl Actor {
                 self.update_destination_output(index);
             }
             ControlCommand::SetSettings { settings } => {
-                self.snapshot.settings = settings;
+                self.apply_settings(settings);
             }
             _ => return Err(error(ErrorCode::Internal, "Unsupported command.")),
         }
         self.publish();
         self.persist()
+    }
+    fn apply_settings(&mut self, settings: AppSettings) {
+        let drift_changed = settings.drift_correction != self.snapshot.settings.drift_correction;
+        let limiter_changed = settings.mix_limiter != self.snapshot.settings.mix_limiter;
+        self.snapshot.settings = settings;
+        if drift_changed {
+            for meter in &mut self.snapshot.telemetry.inputs {
+                meter.timing = None;
+            }
+            for meter in &mut self.snapshot.telemetry.destinations {
+                meter.timing = None;
+            }
+        }
+        if limiter_changed {
+            self.snapshot.telemetry.limiter_reduction_db = None;
+        }
+        #[cfg(windows)]
+        if drift_changed || limiter_changed {
+            // A settings edit updates existing owners; it never starts a source,
+            // launches a replacement engine or connects any destination.
+            if !self.audio_failed
+                && let Some(audio) = &self.audio
+                && audio.exit.load(std::sync::atomic::Ordering::Acquire) == 0
+            {
+                audio.sources(
+                    self.snapshot.inputs.clone(),
+                    self.snapshot.settings.drift_correction,
+                    self.snapshot.settings.mix_limiter,
+                );
+                let revision = audio.revision();
+                if drift_changed {
+                    self.audio_drift_revision = revision;
+                }
+                if limiter_changed {
+                    self.audio_limiter_revision = revision;
+                }
+            }
+            if drift_changed {
+                for index in 0..self.snapshot.destinations.len() {
+                    if self.snapshot.destinations[index].kind == DestinationKind::Playback {
+                        self.update_destination_output(index);
+                    }
+                }
+            }
+        }
     }
     fn persist(&mut self) -> Result<(), AppError> {
         self.request_preferences_save(false)
@@ -1953,7 +2025,9 @@ impl Actor {
         } else {
             #[cfg(windows)]
             if let Some(runtime) = self.playback.get(&destination.destination_id) {
-                runtime.host.output(output);
+                runtime
+                    .host
+                    .output(output, self.snapshot.settings.drift_correction);
             }
         }
     }
@@ -2027,6 +2101,7 @@ impl Actor {
                 device_id.clone(),
                 output,
                 session_id,
+                self.snapshot.settings.drift_correction,
             )?;
             self.playback.insert(
                 destination_id.into(),
@@ -2177,7 +2252,19 @@ impl Actor {
                         .telemetry
                         .destinations
                         .push(DestinationTelemetry {
-                            timing: None,
+                            timing: value.timing.and_then(|timing| {
+                                matches!(
+                                    self.snapshot.destinations[index].connection,
+                                    Connection::Connected
+                                )
+                                .then(|| {
+                                    crate::protocol::clean_timing(
+                                        timing,
+                                        crate::audio::observation_clock_ms(),
+                                    )
+                                })
+                                .flatten()
+                            }),
                             observed_at_ms: crate::audio::clean_observation_time(
                                 value.observed_at_ms,
                                 crate::audio::observation_clock_ms(),
@@ -3147,6 +3234,7 @@ mod tests {
             restored: false,
         };
         crate::mixing::AudioSnapshot {
+            limiter_reduction_db: None,
             observed_at_ms: Some(0.0),
             revision,
             telemetry: vec![InputTelemetry {
@@ -3162,6 +3250,71 @@ mod tests {
             inputs: vec![input],
             mix_pre_clip: true,
         }
+    }
+
+    #[test]
+    fn processing_changes_wait_for_acknowledged_measurements_and_keep_route_intent() {
+        let mut a = actor();
+        a.snapshot.inputs = audio_observation_fixture(1).inputs;
+        let report = |revision| {
+            let mut report = audio_observation_fixture(revision);
+            report.limiter_reduction_db = Some(6.0);
+            report.telemetry[0].timing = Some(TimingObservation {
+                epoch: format!("1:{revision}:0"),
+                phase: TimingPhase::Running,
+                applied_adjustment_ppm: Some(100.0),
+                queued_frames: Some(720),
+                target_frames: Some(720),
+                capacity_frames: 4096,
+                gap_output_frames: 0,
+                dropped_input_frames: 0,
+                resync_count: 0,
+                last_reset_reason: None,
+                last_reset_at_ms: None,
+                state_observed_at_ms: Some(0.0),
+                audio_observed_at_ms: Some(0.0),
+            });
+            report
+        };
+        let inputs = a.snapshot.inputs.clone();
+        let destinations = a.snapshot.destinations.clone();
+        a.apply_settings(AppSettings {
+            mix_limiter: true,
+            ..a.snapshot.settings.clone()
+        });
+        a.audio_drift_revision = 2;
+        a.audio_limiter_revision = 2;
+        a.accept_audio_observation(report(1), 2);
+        assert_eq!(a.snapshot.telemetry.limiter_reduction_db, None);
+        assert_eq!(a.snapshot.telemetry.inputs[0].timing, None);
+        assert_eq!(a.snapshot.telemetry.inputs[0].level_dbfs, Some(-24.0));
+        // A later fader revision must not starve acknowledged processing facts.
+        a.accept_audio_observation(report(2), 3);
+        assert_eq!(a.snapshot.telemetry.limiter_reduction_db, Some(6.0));
+        assert!(a.snapshot.telemetry.inputs[0].timing.is_some());
+        for enabled in [false, true] {
+            a.apply_settings(AppSettings {
+                mix_limiter: enabled,
+                ..a.snapshot.settings.clone()
+            });
+            assert_eq!(a.snapshot.telemetry.limiter_reduction_db, None);
+        }
+        a.audio_limiter_revision = 4;
+        a.accept_audio_observation(report(2), 4);
+        assert_eq!(a.snapshot.telemetry.limiter_reduction_db, None);
+        a.accept_audio_observation(report(4), 4);
+        assert_eq!(a.snapshot.telemetry.limiter_reduction_db, Some(6.0));
+        a.apply_settings(AppSettings {
+            drift_correction: false,
+            ..a.snapshot.settings.clone()
+        });
+        assert_eq!(a.snapshot.telemetry.inputs[0].timing, None);
+        assert_eq!(a.snapshot.inputs, inputs);
+        assert_eq!(a.snapshot.destinations, destinations);
+        #[cfg(windows)]
+        assert!(a.audio.is_none());
+        a.observe_audio_exit(1);
+        assert_eq!(a.snapshot.telemetry.limiter_reduction_db, None);
     }
 
     #[test]

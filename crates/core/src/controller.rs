@@ -848,11 +848,15 @@ impl Actor {
                     self.snapshot.output.muted = destination.muted;
                 }
             }
-            Err(_) => {
-                self.preferences_error = Some(error(
-                    ErrorCode::Configuration,
-                    "Saved preferences could not be loaded. Select a route again.",
-                ))
+            Err(load_error) => {
+                self.preferences_error = Some(if load_error == Failure::Configuration.error() {
+                    error(
+                        ErrorCode::Configuration,
+                        "Saved preferences could not be loaded. Select a route again.",
+                    )
+                } else {
+                    load_error
+                });
             }
         }
         if let Err(error) = self.sync_audio() {
@@ -1593,10 +1597,22 @@ impl Actor {
             return Ok(());
         }
         let cleared_warning = self.snapshot.preferences_warning.take().is_some();
-        if self.preferences_error.take().is_some() && self.snapshot.bot.status == BotStatus::Ready {
-            self.snapshot.discovery = Discovery::Ready;
-            self.publish();
-        } else if cleared_warning {
+        let cleared_load_error = self.preferences_error.take().is_some_and(|load_error| {
+            if self.snapshot.discovery
+                != (Discovery::Error {
+                    message: load_error.message,
+                })
+            {
+                return false;
+            }
+            self.snapshot.discovery = match self.snapshot.bot.status {
+                BotStatus::Ready => Discovery::Ready,
+                BotStatus::Unconfigured => Discovery::Idle,
+                _ => return false,
+            };
+            true
+        });
+        if cleared_warning || cleared_load_error {
             self.publish();
         }
         Ok(())
@@ -3362,6 +3378,26 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(a.snapshot.discovery, Discovery::Ready));
+    }
+    #[test]
+    fn saving_clears_only_matching_load_error_without_requiring_a_bot() {
+        let mut a = actor();
+        a.preferences_error = Some(newer_preferences());
+        a.event(Event::Unconfigured(a.catalog_epoch));
+        assert!(matches!(a.snapshot.discovery, Discovery::Error { .. }));
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert_eq!(a.snapshot.discovery, Discovery::Idle);
+        a.preferences_error = Some(Failure::Configuration.error());
+        a.snapshot.discovery = Discovery::Error {
+            message: "Different discovery failure".into(),
+        };
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert_eq!(
+            a.snapshot.discovery,
+            Discovery::Error {
+                message: "Different discovery failure".into()
+            }
+        );
     }
     #[test]
     fn saves_only_generic_preferences_and_rejects_secret_destination() {

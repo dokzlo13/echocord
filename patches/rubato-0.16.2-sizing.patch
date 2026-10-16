@@ -22,12 +22,12 @@
 +        // before advancing the position. Keep its size estimate in f64 too.
 +        let start_step = 1.0 / self.resample_ratio;
 +        let end_step = 1.0 / self.target_ratio;
-+        self.needed_input_size = (self.last_index
++        self.needed_input_size = ((self.last_index
 +            + self.chunk_size as f64 * 0.5 * (start_step + end_step)
 +            + 0.5 * (end_step - start_step)
 +            + self.interpolator.len() as f64)
-+            .ceil() as usize
-+            + 1; // Cover floating-point stepping at an integer boundary.
++            .ceil()
++            + 1.0) as usize; // Guard rounding before saturating negative needs to zero.
      }
  }
  

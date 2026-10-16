@@ -77,7 +77,7 @@ On Linux/WSL, for UI/core work without a Windows cross-build toolchain, install 
 
 ## Dependencies and generated files
 
-Commit Cargo/npm lockfiles and use locked installs. `scripts/prepare-opus.py` verifies/materializes the `libopus_sys` cross-build patch; `scripts/prepare-cpal.py` does the same for the Windows silent-capture correction. Bootstrap/check/build prepares both. Never edit a global Cargo registry cache. Patching is Python-only, so Unix `patch` is not a Windows prerequisite. [Patch notes](../patches/README.md) explain scope and removal conditions.
+Commit Cargo/npm lockfiles and use locked installs. `scripts/prepare-opus.py` verifies/materializes the `libopus_sys` cross-build patch; `scripts/prepare-cpal.py` does the same for Windows silent capture, and `scripts/prepare-rubato.py` prepares the variable-ratio input-sizing correction. Bootstrap/check/build prepares all three. Never edit a global Cargo registry cache. Patching is Python-only, so Unix `patch` is not a Windows prerequisite. [Patch notes](../patches/README.md) explain scope and removal conditions.
 
 Rust control types generate `ui/src/generated.ts`; regenerate through the export-bindings command when changing the contract, then run the drift check. Frontend fixture data must remain separate from the production native adapter. Audio samples never pass through frontend IPC.
 

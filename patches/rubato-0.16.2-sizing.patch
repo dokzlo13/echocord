@@ -1,0 +1,33 @@
+--- a/src/asynchro_sinc.rs
++++ b/src/asynchro_sinc.rs
+@@ -630,7 +630,7 @@
+         validate_ratios(resample_ratio, max_resample_ratio_relative)?;
+ 
+         let needed_input_size =
+-            (chunk_size as f64 / resample_ratio).ceil() as usize + interpolator.len() / 2;
++            (chunk_size as f64 / resample_ratio).ceil() as usize + interpolator.len() / 2 + 1;
+         let buffer_channel_length = ((max_resample_ratio_relative + 1.0) * needed_input_size as f64)
+             as usize
+             + 2 * interpolator.len();
+@@ -656,11 +656,16 @@
+     }
+ 
+     fn update_needed_len(&mut self) {
+-        self.needed_input_size = (self.last_index as f32
+-            + self.chunk_size as f32
+-                / (0.5 * self.resample_ratio as f32 + 0.5 * self.target_ratio as f32)
+-            + self.interpolator.len() as f32)
+-            .ceil() as usize;
++        // The processing loop ramps reciprocal ratios, incrementing the step
++        // before advancing the position. Keep its size estimate in f64 too.
++        let start_step = 1.0 / self.resample_ratio;
++        let end_step = 1.0 / self.target_ratio;
++        self.needed_input_size = (self.last_index
++            + self.chunk_size as f64 * 0.5 * (start_step + end_step)
++            + 0.5 * (end_step - start_step)
++            + self.interpolator.len() as f64)
++            .ceil() as usize
++            + 1; // Cover floating-point stepping at an integer boundary.
+     }
+ }
+ 

@@ -49,6 +49,7 @@ def run(*args, capture=False, env=None):
 def prepare():
     run(sys.executable, ROOT / "scripts/prepare-opus.py")
     run(sys.executable, ROOT / "scripts/prepare-cpal.py")
+    run(sys.executable, ROOT / "scripts/prepare-rubato.py")
 
 
 def version(tag=None):

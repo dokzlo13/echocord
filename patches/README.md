@@ -49,3 +49,21 @@ It opens no devices and does not establish driver or physical audio acceptance.
 Remove the override after a released upstream version includes an equivalent
 fix and passes these checks. Source:
 [Microsoft's buffer-flag contract](https://learn.microsoft.com/windows/win32/api/audioclient/ne-audioclient-_audclnt_bufferflags).
+
+## Rubato variable-ratio input sizing
+
+`rubato-0.16.2-sizing.patch` corrects `SincFixedOut` input sizing while its ratio
+ramps. The processing loop advances reciprocal ratios in double precision; the
+original estimator instead averages ratios in single precision and can request
+too few input frames. The patch follows the reciprocal-step calculation from
+[upstream's fix](https://github.com/HEnquist/rubato/pull/137), including its
+increment-first ramp term, and reserves one further frame for floating-point
+rounding at integer boundaries. Construction and reset use the same guard.
+The fixed-input recording-format converter is unchanged.
+
+`scripts/prepare-rubato.py` checks the published archive checksum and the complete
+patched source inventory, using the same exact patcher as the other overrides.
+The original MIT license is retained in `rubato-LICENSE`; release inventories
+identify the patch and preserve the original notices. No Cargo registry source
+is modified. Remove this override after a reviewed upstream version passes the
+required input-bound, reset, ramp, signal and allocation checks with the engine.

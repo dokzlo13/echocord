@@ -216,6 +216,10 @@ def rust_packages(fetcher: Fetcher, notices: Notices, config: dict) -> tuple[lis
             digest = "6f02e8d0327b42d3e2e4ab2119af397344eb9fc54a34bf0ddeaa1277af8681f1"
             candidates = (ROOT / ".cache" / filename,)
             local_patch = "patches/cpal-0.18.2-silent.patch"
+        elif name == "rubato" and version == "0.16.2" and package["source"] is None:
+            digest = "5258099699851cfd0082aeb645feb9c084d9a5e1f1b8d5372086b989fc5e56a1"
+            candidates = (ROOT / ".cache" / filename,)
+            local_patch = "patches/rubato-0.16.2-sizing.patch"
         else:
             raise ValueError(f"Unreviewed non-registry dependency: {key}")
         data = fetcher.get(url, digest, candidates=candidates)

@@ -92,3 +92,21 @@ function against synthetic packet providers, including silent/empty packets,
 sample equilibrium, alignment, bounds and release-on-error. It does not open a
 device. The callback allocation assertion and clock-skew simulations remain
 separate from physical Windows acceptance.
+
+For the longer shared-bus clock-skew baseline, run:
+
+```sh
+cargo test --locked --release -p echocord-core --lib measure_long_session_clock_skew -- --ignored --nocapture
+```
+
+This drives the real bus through 600 virtual seconds with independent readers
+and reports queued, dropped and missing frames. It is intentionally outside the
+normal gate. The current engine bounds queues and isolates peers but does not
+compensate independent audio clocks: a faster reader eventually underruns, and a
+slower reader builds a backlog before dropping frames. A short run can miss the
+latter. Priming a fixed buffer alone cannot correct a lasting rate difference.
+
+Suspension tests cover both producer-first and reader-first resume, including a
+reader paused during a copy. A final performance-counter check rejects a block
+that became stale during the read. No check can rule out a subsequent scheduling
+pause between returning the block and submitting it to the device.

@@ -72,6 +72,8 @@ left/right pattern. Keep playback levels low; avoid feedback loops.
 | Recording formats | For each available 44.1/48/96 kHz mono/stereo endpoint, note negotiated format, channel order, correct pitch and bounds. Mark unavailable hardware cases untested. |
 | Selected application | Only the selected process tree contributes; restart requires explicit reselection; unrelated synthetic producer is excluded. |
 | Two sources | Independent gain/mute/stop, no stale signal after rapid mute/unmute; overload indication agrees with synthetic mix. |
+| Advanced audio | Compare correction on/off over a sustained session using exact selected endpoints. Applied adjustment, queue, recovery counts and freshness agree with observed processing; record audible results separately. Format conversion still works with correction off. |
+| Loud peaks | With low monitoring volume, compare limiter on/off for an overloaded two-source sum and already-loud material whose native samples stay below clipping. The latter can become quieter without an overload warning. Confirm pre-limit overload indication, stereo balance, about 3.7 ms additional processing delay and brief interruptions when toggling. |
 | Independent outputs | Stopping/failing one selected playback device or Discord destination preserves peers. |
 | Discord listener | A coordinated separate listener hears the correct signal in the intended room; local meters alone do not pass this case. |
 | Recovery | Cancel during opening/join, unplug/replug, permission revocation, network loss and sleep/resume have bounded, truthful outcomes without a different source/room. |
@@ -101,12 +103,27 @@ cargo test --locked --release -p echocord-core --lib measure_long_session_clock_
 
 This drives the real bus through 600 virtual seconds with independent readers
 and reports queued, dropped and missing frames. It is intentionally outside the
-normal gate. The current engine bounds queues and isolates peers but does not
-compensate independent audio clocks: a faster reader eventually underruns, and a
-slower reader builds a backlog before dropping frames. A short run can miss the
-latter. Priming a fixed buffer alone cannot correct a lasting rate difference.
+normal gate. This fixture intentionally exercises the raw, uncorrected bus:
+a faster reader eventually underruns, and a slower reader builds a backlog
+before dropping frames. A short run can miss the latter. It provides the baseline
+for the correction path; priming a fixed buffer alone cannot correct a lasting
+rate difference.
 
 Suspension tests cover both producer-first and reader-first resume, including a
 reader paused during a copy. A final performance-counter check rejects a block
 that became stale during the read. No check can rule out a subsequent scheduling
 pause between returning the block and submitting it to the device.
+
+The optional limiter has allocation, reset/toggle, stereo-link, finite-sample,
+fixed-delay and source-edit continuity tests. Its ignored tone/multitone and
+component-throughput measurements run without devices:
+
+```sh
+cargo test --locked --release -p echocord-core --lib limiter::tests:: -- --ignored --nocapture
+```
+
+The sample ceiling applies to the shared mix; interpolation and encoded/physical
+outputs are not a true-peak guarantee. The detector can reduce interpolated peaks
+even when native samples remain below the ceiling. Passing synthetic tones does
+not establish perceptual transparency on arbitrary audio. The envelope is tuned
+for the audible band; sustained sub-20 Hz overload can modulate substantially.

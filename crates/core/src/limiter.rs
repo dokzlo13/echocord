@@ -6,6 +6,8 @@
 //! or reconstructed/codec true-peak guarantee is provided. A detected overload
 //! can briefly lower other audio in the mix, including native samples below the
 //! ceiling whose interpolated peaks exceed it.
+//! The envelope is tuned for the audible band; sustained overload below 20 Hz
+//! can produce substantial gain modulation. It is not a subsonic compressor.
 //!
 //! Ordinary source edits pass once through this fixed delay: resetting on every
 //! fader, mute or source revision would interrupt unaffected peers. The owner

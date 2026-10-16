@@ -20,6 +20,8 @@ Adding a source captures before any output connects. First launch is empty. Rest
 
 Bot configuration validates and encrypts a token locally using Windows DPAPI. Saving it never joins a room. Setup should explain the Discord Developer Portal, bot-only installation and View Channel/Connect/Speak requirements. Unknown permission or transport facts remain unavailable rather than appearing as granted capabilities.
 
+Advanced audio settings provide automatic Sync correction (on by default) and Limit loud peaks (off by default). Correction handles small clock-rate differences at capture/mix and physical-playback crossings; the optional common-mix limiter adds about 3.7 ms and can reduce already-loud material without an overload warning. Both choices persist independently. Detailed timing and recent recovery observations belong in a separate diagnostic sheet, preserving the main cards' simple controls.
+
 ## Constraints and principles
 
 Rust owns PCM, mixing, worker lifetimes, recovery and credentials. The UI is a control surface. Preserve selected identities and independent peers across ordinary faults and edits; expose unconfirmed cleanup honestly.
@@ -30,4 +32,4 @@ The On Air layout uses compact actionable cards, independent list scrolling, ful
 
 ## Status
 
-Version 0.3.0 strengthens bounded Discord recovery, keeps controls usable during faults and moves preference saves off the control thread. Recording conversion, versioned settings migration and direct downloads with offline licenses remain supported. It is AI-generated and AI-maintained software, provided as is without guarantees. Local meters are not listener-delivery proof. Broad native accessibility/scaling, physical recovery, measured listener latency, sustained resource use and long-session reliability remain validation work. Discord participant-audio input, Stage channels, multiple bot identities, a virtual driver and non-Windows audio support are outside current scope.
+Version 0.4.0 adds optional audio processing controls and measured timing diagnostics to bounded Discord recovery, responsive live controls and background preference saving. Recording conversion, versioned settings migration and direct downloads with offline licenses remain supported. It is AI-generated and AI-maintained software, provided as is without guarantees. Local meters are not listener-delivery proof. Broad native accessibility/scaling, physical recovery, measured listener latency, sustained resource use and long-session reliability remain validation work. Discord participant-audio input, Stage channels, multiple bot identities, a virtual driver and non-Windows audio support are outside current scope.

@@ -77,6 +77,8 @@ Avoid sending a playback destination back into a recording input you are capturi
 
 Settings from older releases migrate automatically in memory and are saved in the current format after a successful change. Newer-version files are preserved. Saving runs in the background so disk access does not block live controls. If saving fails, live controls remain applied and Echocord shows a persistent notice with a save retry; those changes are not promised after restarting.
 
+**Advanced audio:** Settings → Advanced → Audio processing contains **Sync correction**, on by default, and **Limit loud peaks**, off by default. Sync correction adjusts small speed differences between audio clocks; turn it off when comparing behavior during troubleshooting. Recording-format conversion still runs when it is off. Limit loud peaks reduces excessive peaks in the shared mix and adds about 3.7 ms of delay. It can also lower loud audio without an overload warning. Changing either switch may briefly interrupt sound. **Sync details** shows the applied adjustments, buffered audio and recent interruptions; these are local observations, not listener latency measurements.
+
 ## Troubleshooting
 
 | Symptom | Check |

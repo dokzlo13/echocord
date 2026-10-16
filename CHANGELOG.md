@@ -4,6 +4,26 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-17
+
+### Audio
+
+- Correct small clock-rate differences between capturing sources, the shared mix and selected playback devices. Sync correction is enabled by default and can be switched off for troubleshooting; recording-format conversion remains automatic.
+- Add optional **Limit loud peaks**, off by default. A stereo-linked limiter reduces overload in the shared mix and adds 176 frames (about 3.7 ms) of delay. It can also lower loud material without an overload warning; the indicator still identifies an excessive source sum.
+- Keep queued audio bounded and discard retained processing history across timing interruptions. Source controls and each destination remain independent.
+- Correct the pinned resampler's variable-ratio input sizing, with actual-read, fractional-boundary and reset regressions.
+
+### Settings and diagnostics
+
+- Put both switches under **Settings → Advanced → Audio processing**, with a separate Sync details view for capturing sources and playing playback devices.
+- Report the adjustment actually applied, buffered audio, recent gaps/discards, recovery reasons and observation age. These observations do not measure hardware clock accuracy or listener latency.
+- Migrate existing preferences to schema 5 with correction on and the limiter off. Preserve independent saved choices; older app versions preserve the newer preferences file instead of overwriting it.
+
+### Builds and validation
+
+- Reuse native Cargo build caches across application/dependency version changes only when compiler, patch and build-policy inputs remain compatible. Releases continue reusing the checked CI executable.
+- Add deterministic signal, timing, lifecycle and allocation checks. These and native synthetic tests do not establish physical device coverage, listener delivery or long-session reliability on other PCs.
+
 ## 0.3.0 — 2026-10-16
 
 ### Reliability

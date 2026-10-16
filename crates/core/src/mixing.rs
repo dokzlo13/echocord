@@ -575,8 +575,53 @@ mod native {
         intent_epoch: u64,
         session_epoch: u64,
     }
+    impl Slot {
+        fn begin_open(&mut self, next_session_epoch: &mut u64) {
+            *next_session_epoch = next_session_epoch
+                .checked_add(1)
+                .expect("capture lifetime exhausted");
+            self.session_epoch = *next_session_epoch;
+            let input = self.desired.as_mut().expect("pending source");
+            self.source = input.source_id.clone();
+            self.cancel = Arc::new(AtomicBool::new(false));
+            self.operation = true;
+            self.deadline = Some(Instant::now() + Duration::from_secs(5));
+            input.phase = InputPhase::Opening;
+        }
+        fn accepts_open(&self, source: &str, intent: u64, session: u64) -> bool {
+            !self.cancel.load(Ordering::Acquire)
+                && self.session_epoch == session
+                && self.intent_epoch == intent
+                && self
+                    .desired
+                    .as_ref()
+                    .is_some_and(|input| active(input) && input.source_id == source)
+        }
+        fn activate(&mut self, mut session: CaptureSession, drift: ProcessingMode) {
+            self.operation = false;
+            self.deadline = None;
+            session.input.configure_clock_correction(
+                drift.enabled,
+                self.session_epoch,
+                drift.epoch,
+            );
+            self.session = Some(session);
+            self.meters.unavailable();
+            if let Some(input) = &mut self.desired {
+                input.phase = InputPhase::Capturing;
+                input.fault = None;
+                input.restored = false;
+            }
+        }
+    }
     enum Completed {
-        Open(String, String, u64, u64, Result<CaptureSession, AppError>),
+        Open(
+            String,
+            String,
+            u64,
+            u64,
+            Box<Result<CaptureSession, AppError>>,
+        ),
         Stopped(String, u64, bool),
     }
     fn retire(id: String, epoch: u64, session: CaptureSession, done: mpsc::SyncSender<Completed>) {
@@ -633,15 +678,7 @@ mod native {
                 && let Some(input) = &mut slot.desired
                 && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
             {
-                *next_session_epoch = next_session_epoch
-                    .checked_add(1)
-                    .expect("capture lifetime exhausted");
-                slot.session_epoch = *next_session_epoch;
-                slot.source = input.source_id.clone();
-                slot.cancel = Arc::new(AtomicBool::new(false));
-                slot.operation = true;
-                slot.deadline = Some(Instant::now() + Duration::from_secs(5));
-                input.phase = InputPhase::Opening;
+                slot.begin_open(next_session_epoch);
                 occupied.push((id.clone(), slot.source.clone()));
                 let source = slot.source.clone();
                 let intent_epoch = slot.intent_epoch;
@@ -658,7 +695,7 @@ mod native {
                         source,
                         intent_epoch,
                         session_epoch,
-                        result,
+                        Box::new(result),
                     ));
                 });
             }
@@ -771,6 +808,105 @@ mod native {
 
     #[cfg(test)]
     #[test]
+    fn disabled_mixer_preserves_real_legacy_capture_samples() {
+        let (session, mut pump) = audio::tests::synchronous_mixer_fixture();
+        let control = session.control.clone();
+        let requested = super::tests::input("fixture", "fixture-source");
+        let mut slots = BTreeMap::from([(
+            "fixture".into(),
+            Slot {
+                source: requested.source_id.clone(),
+                desired: Some(requested),
+                session: Some(session),
+                operation: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                deadline: None,
+                meters: SourceMeters::new("fixture".into()),
+                intent_epoch: 1,
+                session_epoch: 1,
+            },
+        )]);
+        let (done, _completed) = mpsc::sync_channel(1);
+        pump();
+        let (mut mix, clipped) = mix_sources(&mut slots, &done);
+        assert!(!clipped);
+        assert_eq!(mix, [[0.125, -0.25]; 240]);
+        let bus = mix_bus::Bus::test_bus();
+        let mut output = MixOutput::new();
+        output.write(&bus, &mut mix, 5, || 5);
+        assert_eq!(mix, [[0.125, -0.25]; 240]);
+        assert_eq!(output.reduction, None);
+        assert!(control.stop());
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn fault_retry_gets_a_new_actual_lifetime_even_when_parent_intent_is_still_opening() {
+        let requested = super::tests::input("fixture", "fixture-source");
+        let mut parent = RequestHistory::default();
+        let first = parent.update(1, vec![requested.clone()], true, false);
+        let mut slot = Slot {
+            source: requested.source_id.clone(),
+            desired: Some(requested.clone()),
+            session: None,
+            operation: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            deadline: None,
+            meters: SourceMeters::new(requested.strip_id.clone()),
+            intent_epoch: first.sources[0].epoch,
+            session_epoch: 0,
+        };
+        let drift = ProcessingMode {
+            enabled: true,
+            epoch: 1,
+        };
+        let mut nonce = 0;
+        slot.begin_open(&mut nonce);
+        let old_session = slot.session_epoch;
+        let (session, _pump) = audio::tests::synchronous_mixer_fixture_with_correction();
+        slot.activate(session, drift);
+        slot.session
+            .as_ref()
+            .unwrap()
+            .control
+            .simulate_application_exit();
+        let (done, completed) = mpsc::sync_channel(1);
+        let mut slots = BTreeMap::from([("fixture".into(), slot)]);
+        mix_sources(&mut slots, &done);
+        let Completed::Stopped(_, epoch, true) =
+            completed.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("fixture cleanup")
+        };
+        let slot = slots.get_mut("fixture").unwrap();
+        assert_eq!(epoch, old_session);
+        assert_eq!(slot.desired.as_ref().unwrap().phase, InputPhase::Fault);
+        slot.operation = false;
+        let retry = parent.update(2, vec![requested], true, false);
+        assert_eq!(first.sources[0].epoch, retry.sources[0].epoch);
+        slot.desired = Some(retry.sources[0].input.clone());
+        slot.begin_open(&mut nonce);
+        assert_ne!(slot.session_epoch, old_session);
+        assert!(!slot.accepts_open("fixture-source", slot.intent_epoch, old_session));
+        assert!(slot.accepts_open("fixture-source", slot.intent_epoch, slot.session_epoch));
+        assert!(!slot.accepts_open("other-source", slot.intent_epoch, slot.session_epoch));
+        assert!(!slot.accepts_open("fixture-source", slot.intent_epoch + 1, slot.session_epoch));
+        let (session, _pump) = audio::tests::synchronous_mixer_fixture_with_correction();
+        slot.activate(session, drift);
+        let session = slot.session.as_mut().unwrap();
+        assert!(
+            session
+                .input
+                .timing_observation()
+                .unwrap()
+                .epoch
+                .starts_with(&format!("{}:1:", slot.session_epoch))
+        );
+        session.control.stop();
+    }
+
+    #[cfg(test)]
+    #[test]
     fn eight_owned_synthetic_captures_mix_without_steady_allocations() {
         use crate::audio::recording_format::tests::allocations_during;
         struct StopAll(Vec<audio::CaptureControl>);
@@ -787,7 +923,10 @@ mod native {
         for index in 0..MAX_INPUTS {
             // Feed the real capture rings directly, without relying on native
             // thread scheduling. No endpoint, network or physical output opens.
-            let (session, pump) = audio::tests::synchronous_mixer_fixture();
+            let (mut session, pump) = audio::tests::synchronous_mixer_fixture_with_correction();
+            session
+                .input
+                .configure_clock_correction(true, index as u64 + 1, 1);
             pumps.push(pump);
             controls.0.push(session.control.clone());
             let id = format!("fixture-{index}");
@@ -952,12 +1091,22 @@ mod native {
                             slot.deadline = Some(Instant::now() + Duration::from_millis(750));
                             retire(id.clone(), slot.session_epoch, session, done.clone());
                         }
-                    } else if drift_changed && let Some(session) = &mut slot.session {
-                        session.input.configure_clock_correction(
-                            drift.enabled,
-                            slot.session_epoch,
-                            drift.epoch,
-                        );
+                    } else if let Some(session) = &mut slot.session {
+                        if drift_changed {
+                            session.input.configure_clock_correction(
+                                drift.enabled,
+                                slot.session_epoch,
+                                drift.epoch,
+                            );
+                        }
+                        // Parent control can still say Opening while its
+                        // acknowledgement is in flight. A retained native
+                        // session must not regress to Opening after a fader.
+                        if let Some(input) = &mut slot.desired {
+                            input.phase = InputPhase::Capturing;
+                            input.fault = None;
+                            input.restored = false;
+                        }
                     }
                 }
                 for source in update.sources {
@@ -999,6 +1148,7 @@ mod native {
                         }
                     }
                     Completed::Open(id, source, intent_epoch, session_epoch, result) => {
+                        let result = *result;
                         if let Some(slot) = slots.get_mut(&id) {
                             if slot.session_epoch != session_epoch {
                                 if let Ok(session) = result {
@@ -1007,28 +1157,10 @@ mod native {
                                 continue;
                             }
                             match result {
-                                Ok(mut session)
-                                    if !slot.cancel.load(Ordering::Acquire)
-                                        && slot.session_epoch == session_epoch
-                                        && slot.intent_epoch == intent_epoch
-                                        && slot.desired.as_ref().is_some_and(|input| {
-                                            active(input) && input.source_id == source
-                                        }) =>
+                                Ok(session)
+                                    if slot.accepts_open(&source, intent_epoch, session_epoch) =>
                                 {
-                                    slot.operation = false;
-                                    slot.deadline = None;
-                                    session.input.configure_clock_correction(
-                                        drift.enabled,
-                                        session_epoch,
-                                        drift.epoch,
-                                    );
-                                    slot.session = Some(session);
-                                    slot.meters.unavailable();
-                                    if let Some(i) = &mut slot.desired {
-                                        i.phase = InputPhase::Capturing;
-                                        i.fault = None;
-                                        i.restored = false;
-                                    }
+                                    slot.activate(session, drift);
                                 }
                                 Ok(session) => {
                                     slot.deadline =
@@ -1133,7 +1265,7 @@ pub use native::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn input(id: &str, source: &str) -> InputStrip {
+    pub(super) fn input(id: &str, source: &str) -> InputStrip {
         InputStrip {
             strip_id: id.into(),
             source_id: source.into(),

@@ -4,17 +4,14 @@ use std::time::Duration;
 #[cfg(windows)]
 pub(crate) async fn permissions(
     http: &serenity::http::Http,
+    user: serenity::all::UserId,
     guild: serenity::all::GuildId,
     channel: serenity::all::ChannelId,
 ) -> Result<(), Failure> {
     use serenity::all::{Channel, ChannelType, Permissions};
     let work = async {
-        let user = http.get_current_user().await.map_err(classify_rest)?;
         let guild_data = guild.to_partial_guild(http).await.map_err(classify_rest)?;
-        let member = guild_data
-            .member(http, user.id)
-            .await
-            .map_err(classify_rest)?;
+        let member = guild_data.member(http, user).await.map_err(classify_rest)?;
         let Channel::Guild(channel_data) = channel.to_channel(http).await.map_err(classify_rest)?
         else {
             return Err(Failure::Permission);

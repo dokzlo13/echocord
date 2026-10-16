@@ -11,6 +11,9 @@ pub mod worker;
 
 pub mod control;
 
+#[cfg(any(windows, test))]
+mod recovery;
+
 #[cfg(windows)]
 mod permissions;
 

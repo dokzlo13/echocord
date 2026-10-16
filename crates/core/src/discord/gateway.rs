@@ -2,6 +2,7 @@
 use super::{
     correlation::{Correlator, Phase, ServerAction, StateAction},
     protocol::*,
+    recovery::{PermissionSchedule, RefreshRetry, RetryReadiness},
 };
 use crate::protocol::{self, Failure, Frame, Validator};
 use futures::channel::mpsc::UnboundedSender;
@@ -25,7 +26,19 @@ struct Timing {
     started: Instant,
     leaving: Option<Instant>,
     failed_since: Option<Instant>,
-    checking: bool,
+    permissions: PermissionSchedule,
+    verification: RefreshRetry,
+}
+impl Timing {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            leaving: None,
+            failed_since: None,
+            permissions: PermissionSchedule::default(),
+            verification: RefreshRetry::default(),
+        }
+    }
 }
 struct Inner {
     correlation: Correlator,
@@ -41,6 +54,14 @@ struct Inner {
     stops: watch::Sender<bool>,
 }
 impl Inner {
+    fn sender_healthy(&mut self) -> bool {
+        if self.registered && self.sender.as_ref().is_none_or(|sender| sender.is_closed()) {
+            self.fatal(Failure::Connection);
+            false
+        } else {
+            true
+        }
+    }
     fn emit(&self, status: GatewayStatus) {
         if self.statuses.try_send(status).is_err() {
             self.stops.send_replace(true);
@@ -63,6 +84,9 @@ impl Inner {
         self.stops.send_replace(true);
     }
     fn transmit(&mut self, key: &RoomKey, join: bool) -> bool {
+        if !self.sender_healthy() {
+            return false;
+        }
         let eligible = self.correlation.slot(key).is_some_and(|s| {
             if join {
                 s.wanted && s.phase == Phase::Joining && !s.issued
@@ -80,6 +104,7 @@ impl Inner {
                 .unbounded_send(ShardRunnerMessage::Message(body.to_string().into()))
                 .is_err()
         }) {
+            self.fatal(Failure::Connection);
             return false;
         }
         if join {
@@ -285,7 +310,7 @@ async fn spawn_room(
             }
             if let Some(time) = i.times.get_mut(&key.server_id) {
                 if matches!(kind, WorkKind::Permission) {
-                    time.checking = false;
+                    time.permissions.complete(Instant::now());
                 }
                 let since = *time.failed_since.get_or_insert_with(Instant::now);
                 if since.elapsed() > Duration::from_secs(30) {
@@ -307,6 +332,16 @@ async fn verify(inner: Arc<Mutex<Inner>>, key: RoomKey) {
         if !i.connected {
             return;
         }
+        if let Some(time) = i.times.get(&key.server_id) {
+            match time.verification.readiness(Instant::now()) {
+                RetryReadiness::Waiting => return,
+                RetryReadiness::Expired => {
+                    i.cancel(&key, Some(Failure::Connection));
+                    return;
+                }
+                RetryReadiness::Ready => {}
+            }
+        }
         let Some((counter, secret)) = i.correlation.begin_verification(&key, &user.to_string())
         else {
             return;
@@ -321,48 +356,111 @@ async fn verify(inner: Arc<Mutex<Inner>>, key: RoomKey) {
             let (counter, secret, http, user) = request;
             let result = membership(&http, &key, user).await;
             let mut i = inner.lock().await;
-            let Some(slot) = i.correlation.slot(&key) else {
-                return;
-            };
-            if !slot.wanted {
-                return;
-            }
-            if !i.connected || slot.counter != counter {
-                if let Some(slot) = i.correlation.slot_mut(&key) {
-                    slot.verifying = None;
-                }
-                return;
-            }
-            match result {
-                Ok(Some(state))
-                    if state.channel_id.map(|c| c.to_string()).as_deref()
-                        == Some(&key.channel_id)
-                        && state.session_id == secret.session_id
-                        && !state.mute
-                        && !state.suppress
-                        && !state.self_mute =>
-                {
-                    if let Some(revision) = i.correlation.verify(
-                        &key,
-                        counter,
-                        &secret,
-                        Some(&key.channel_id),
-                        Some(&state.session_id),
-                        true,
-                    ) {
-                        i.emit(GatewayStatus::Credentials {
-                            key,
-                            revision,
-                            secret,
-                        });
-                    }
-                }
-                Ok(_) => i.cancel(&key, Some(Failure::Permission)),
-                Err(code) => i.cancel(&key, Some(code)),
-            }
+            i.finish_verification(key, counter, secret, result);
         },
     )
     .await;
+}
+impl Inner {
+    fn finish_permissions(&mut self, key: RoomKey, result: Result<(), Failure>) {
+        if !self.correlation.slot(&key).is_some_and(|slot| slot.wanted) {
+            return;
+        }
+        let Some(time) = self.times.get_mut(&key.server_id) else {
+            return;
+        };
+        time.permissions.complete(Instant::now());
+        match result {
+            Ok(()) => {
+                time.failed_since = None;
+                self.emit(GatewayStatus::Health {
+                    key,
+                    recovering: false,
+                });
+            }
+            Err(Failure::Connection) => {
+                let since = *time.failed_since.get_or_insert_with(Instant::now);
+                if since.elapsed() > Duration::from_secs(30) {
+                    self.cancel(&key, Some(Failure::Connection));
+                } else {
+                    self.emit(GatewayStatus::Health {
+                        key,
+                        recovering: true,
+                    });
+                }
+            }
+            Err(code) => self.cancel(&key, Some(code)),
+        }
+    }
+    fn finish_verification(
+        &mut self,
+        key: RoomKey,
+        counter: u64,
+        secret: VoiceSecret,
+        result: Result<Option<VoiceState>, Failure>,
+    ) {
+        let Some(slot) = self.correlation.slot(&key) else {
+            return;
+        };
+        if !slot.wanted || slot.verifying != Some(counter) {
+            return;
+        }
+        if !self.connected || slot.counter != counter {
+            self.correlation
+                .slot_mut(&key)
+                .expect("matched slot")
+                .verifying = None;
+            return;
+        }
+        let refreshing = slot.revision > 0;
+        match result {
+            Ok(Some(state))
+                if state.channel_id.map(|c| c.to_string()).as_deref() == Some(&key.channel_id)
+                    && state.session_id == secret.session_id
+                    && !state.mute
+                    && !state.suppress
+                    && !state.self_mute =>
+            {
+                if let Some(revision) = self.correlation.verify(
+                    &key,
+                    counter,
+                    &secret,
+                    Some(&key.channel_id),
+                    Some(&state.session_id),
+                    true,
+                ) {
+                    if let Some(time) = self.times.get_mut(&key.server_id) {
+                        time.verification.succeeded();
+                    }
+                    self.emit(GatewayStatus::Credentials {
+                        key,
+                        revision,
+                        secret,
+                    });
+                }
+            }
+            Err(Failure::Connection) if refreshing => {
+                self.correlation
+                    .slot_mut(&key)
+                    .expect("matched slot")
+                    .verifying = None;
+                if self
+                    .times
+                    .get_mut(&key.server_id)
+                    .is_some_and(|time| time.verification.failed(Instant::now()))
+                {
+                    self.emit(GatewayStatus::Health {
+                        key,
+                        recovering: true,
+                    });
+                } else {
+                    self.cancel(&key, Some(Failure::Connection));
+                }
+            }
+            Ok(_) => self.cancel(&key, Some(Failure::Permission)),
+            Err(code) => self.cancel(&key, Some(code)),
+        }
+    }
 }
 async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
     let request = {
@@ -375,15 +473,7 @@ async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
             i.emit(GatewayStatus::Left { key });
             return;
         }
-        i.times.insert(
-            key.server_id.clone(),
-            Timing {
-                started: Instant::now(),
-                leaving: None,
-                failed_since: None,
-                checking: false,
-            },
-        );
+        i.times.insert(key.server_id.clone(), Timing::new());
         (i.http.clone(), i.user)
     };
     spawn_room(inner.clone(), key.clone(), WorkKind::Initial, async move {
@@ -406,7 +496,7 @@ async fn join(inner: Arc<Mutex<Inner>>, key: RoomKey) {
                 slot.counter
             };
             let result = async {
-                super::permissions::permissions(&http, guild, channel).await?;
+                super::permissions::permissions(&http, user, guild, channel).await?;
                 membership(&http, &key, user).await
             }
             .await;
@@ -518,11 +608,10 @@ async fn maintenance(inner: Arc<Mutex<Inner>>) {
                 let Some(time) = i.times.get_mut(&key.server_id) else {
                     continue;
                 };
-                if time.checking {
+                if !time.permissions.begin(Instant::now()) {
                     continue;
                 }
-                time.checking = true;
-                (i.http.clone(), key.clone())
+                (i.http.clone(), i.user, key.clone())
             };
             let inner = inner.clone();
             spawn_room(
@@ -530,46 +619,18 @@ async fn maintenance(inner: Arc<Mutex<Inner>>) {
                 key.clone(),
                 WorkKind::Permission,
                 async move {
-                    let (http, key) = request;
+                    let (http, user, key) = request;
                     let result = super::permissions::permissions(
                         &http,
+                        user,
                         GuildId::new(protocol::discord_id(&key.server_id).expect("valid")),
                         serenity::all::ChannelId::new(
                             protocol::discord_id(&key.channel_id).expect("valid"),
                         ),
                     )
                     .await;
-                    // No more than one check per room every five seconds.
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let mut i = inner.lock().await;
-                    if !i.correlation.slot(&key).is_some_and(|s| s.wanted) {
-                        return;
-                    }
-                    let Some(time) = i.times.get_mut(&key.server_id) else {
-                        return;
-                    };
-                    time.checking = false;
-                    match result {
-                        Ok(()) => {
-                            time.failed_since = None;
-                            i.emit(GatewayStatus::Health {
-                                key,
-                                recovering: false,
-                            });
-                        }
-                        Err(Failure::Connection) => {
-                            let since = *time.failed_since.get_or_insert_with(Instant::now);
-                            if since.elapsed() > Duration::from_secs(30) {
-                                i.cancel(&key, Some(Failure::Connection));
-                            } else {
-                                i.emit(GatewayStatus::Health {
-                                    key,
-                                    recovering: true,
-                                });
-                            }
-                        }
-                        Err(code) => i.cancel(&key, Some(code)),
-                    }
+                    // Apply the result immediately; only the next request waits.
+                    inner.lock().await.finish_permissions(key, result);
                 },
             )
             .await;
@@ -703,6 +764,7 @@ pub async fn run_worker() -> Result<(), Failure> {
                     _=ping.tick()=>{let (connected,milliseconds)={let runners=manager.runners.lock().await;let runner=runners.values().next();let connected=runner.is_some_and(|r|r.stage==serenity::gateway::ConnectionStage::Connected);(connected,runner.filter(|_|connected).and_then(|r|r.latency.map(|latency|latency.as_secs_f32()*1000.0)))};
                     let mut i=inner.lock().await;
                     if i.registered {
+                        if !i.sender_healthy() {continue;}
                         if !connected {i.connected=false;let since=*recovering.get_or_insert_with(Instant::now);i.emit(GatewayStatus::Recovery {active:true});if since.elapsed()>Duration::from_secs(35){i.fatal(Failure::Connection);}}
                         else if recovering.take().is_some() {i.connected=true;i.emit(GatewayStatus::Recovery {active:false});let keys=i.correlation.slots.values().filter(|s|!s.wanted&&s.issued&&!s.left()).map(|s|s.key.clone()).collect::<Vec<_>>();for key in keys {i.transmit(&key,false);}}
                     }
@@ -778,6 +840,207 @@ mod tests {
             channel_id: "2".into(),
         }
     }
+    fn verified_room(i: &mut Inner, key: &RoomKey) {
+        i.correlation.reserve(key.clone()).unwrap();
+        i.correlation.preflight(key, 0, true);
+        i.correlation.mark_join_sent(key);
+        i.correlation.state(
+            &key.server_id,
+            Some(&key.channel_id),
+            "fixture-session",
+            true,
+        );
+        i.correlation
+            .server(&key.server_id, Some("fixture-endpoint"), "fixture-token");
+        let (counter, secret) = i.correlation.begin_verification(key, "3").unwrap();
+        assert_eq!(
+            i.correlation.verify(
+                key,
+                counter,
+                &secret,
+                Some(&key.channel_id),
+                Some("fixture-session"),
+                true
+            ),
+            Some(1)
+        );
+        i.times.insert(key.server_id.clone(), Timing::new());
+    }
+    fn membership_fixture(channel: &str) -> VoiceState {
+        serde_json::from_value(serde_json::json!({
+            "guild_id": "1", "channel_id": channel, "user_id": "3",
+            "session_id": "fixture-session", "deaf": false, "mute": false,
+            "self_deaf": true, "self_mute": false, "self_video": false, "suppress": false
+        }))
+        .unwrap()
+    }
+    #[tokio::test]
+    async fn closed_registered_sender_fails_the_cohort_without_trusting_shard_stage() {
+        for transmit in [false, true] {
+            let (inner, receiver, mut statuses) = inner();
+            let mut i = inner.lock().await;
+            let key = key();
+            verified_room(&mut i, &key);
+            drop(receiver);
+            assert!(!if transmit {
+                i.transmit(&key, false)
+            } else {
+                i.sender_healthy()
+            });
+            assert!(!i.connected);
+            assert!(!i.correlation.slot(&key).unwrap().wanted);
+            assert!(*i.stops.borrow());
+            assert!(matches!(
+                statuses.try_recv(),
+                Ok(GatewayStatus::Failed {
+                    code: Failure::Connection
+                })
+            ));
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn permission_denial_applies_immediately_while_transient_errors_get_grace() {
+        let (inner, _receiver, mut statuses) = inner();
+        let mut i = inner.lock().await;
+        let key = key();
+        verified_room(&mut i, &key);
+        let now = Instant::now();
+        i.finish_permissions(key.clone(), Err(Failure::Connection));
+        assert!(i.correlation.slot(&key).unwrap().wanted);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::Health {
+                recovering: true,
+                ..
+            })
+        ));
+        assert!(
+            !i.times
+                .get_mut(&key.server_id)
+                .unwrap()
+                .permissions
+                .begin(now)
+        );
+        i.finish_permissions(key.clone(), Err(Failure::Permission));
+        assert_eq!(Instant::now(), now);
+        assert!(!i.correlation.slot(&key).unwrap().wanted);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::RoomFailed {
+                code: Failure::Permission,
+                ..
+            })
+        ));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn credential_refresh_retries_transient_reads_and_keeps_the_membership_fence() {
+        let (inner, _receiver, mut statuses) = inner();
+        let mut i = inner.lock().await;
+        let key = key();
+        verified_room(&mut i, &key);
+        let mut peer = key.clone();
+        peer.server_id = "4".into();
+        peer.destination_id = "discord-2".into();
+        verified_room(&mut i, &peer);
+        i.correlation
+            .server(&key.server_id, Some("next-endpoint"), "next-token");
+        let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
+        i.finish_verification(
+            key.clone(),
+            counter,
+            secret.clone(),
+            Err(Failure::Connection),
+        );
+        assert!(i.correlation.slot(&key).unwrap().wanted);
+        assert!(i.correlation.slot(&key).unwrap().verifying.is_none());
+        assert_eq!(i.correlation.slot(&key).unwrap().revision, 1);
+        assert_eq!(
+            i.times[&key.server_id]
+                .verification
+                .readiness(Instant::now()),
+            RetryReadiness::Waiting
+        );
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::Health {
+                recovering: true,
+                ..
+            })
+        ));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
+        i.finish_verification(
+            key.clone(),
+            counter,
+            secret,
+            Ok(Some(membership_fixture("2"))),
+        );
+        assert_eq!(i.correlation.slot(&key).unwrap().revision, 2);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::Credentials { revision: 2, .. })
+        ));
+        assert_eq!(i.correlation.slot(&peer).unwrap().revision, 1);
+        assert!(i.correlation.slot(&peer).unwrap().wanted);
+
+        i.correlation
+            .server(&key.server_id, Some("third-endpoint"), "third-token");
+        let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
+        i.finish_verification(
+            key.clone(),
+            counter,
+            secret,
+            Ok(Some(membership_fixture("99"))),
+        );
+        assert!(!i.correlation.slot(&key).unwrap().wanted);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::RoomFailed {
+                code: Failure::Permission,
+                ..
+            })
+        ));
+        assert!(i.correlation.slot(&peer).unwrap().wanted);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn credential_retry_cannot_survive_deadline_or_resurrect_cancelled_intent() {
+        let (inner, _receiver, mut statuses) = inner();
+        let mut i = inner.lock().await;
+        let key = key();
+        verified_room(&mut i, &key);
+        i.correlation
+            .server(&key.server_id, Some("next-endpoint"), "next-token");
+        let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
+        i.finish_verification(key.clone(), counter, secret, Err(Failure::Connection));
+        let _ = statuses.try_recv();
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let (counter, secret) = i.correlation.begin_verification(&key, "3").unwrap();
+        i.finish_verification(
+            key.clone(),
+            counter,
+            secret.clone(),
+            Err(Failure::Connection),
+        );
+        assert!(!i.correlation.slot(&key).unwrap().wanted);
+        assert!(matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::RoomFailed {
+                code: Failure::Connection,
+                ..
+            })
+        ));
+        i.finish_verification(
+            key.clone(),
+            counter,
+            secret,
+            Ok(Some(membership_fixture("2"))),
+        );
+        assert!(!i.correlation.slot(&key).unwrap().wanted);
+        assert!(!matches!(
+            statuses.try_recv(),
+            Ok(GatewayStatus::Credentials { .. })
+        ));
+    }
     #[tokio::test]
     async fn cancelled_generic_sender_cannot_replay_a_join_after_registration() {
         let (inner, mut receiver, _) = inner();
@@ -850,15 +1113,9 @@ mod tests {
             i.correlation.reserve(key.clone()).unwrap();
             i.correlation.preflight(&key, 0, true);
             i.correlation.mark_join_sent(&key);
-            i.times.insert(
-                key.server_id.clone(),
-                Timing {
-                    started: Instant::now(),
-                    leaving: None,
-                    failed_since: None,
-                    checking: true,
-                },
-            );
+            let mut timing = Timing::new();
+            assert!(timing.permissions.begin(Instant::now()));
+            i.times.insert(key.server_id.clone(), timing);
             for intent in 2..14 {
                 let mut cancelled = key.clone();
                 cancelled.intent = intent;
@@ -870,9 +1127,15 @@ mod tests {
             panic!("over-budget work must not execute")
         })
         .await;
-        let i = inner.lock().await;
+        let mut i = inner.lock().await;
         assert!(i.correlation.slot(&key).unwrap().wanted);
-        assert!(!i.times[&key.server_id].checking);
+        assert!(
+            i.times
+                .get_mut(&key.server_id)
+                .unwrap()
+                .permissions
+                .begin(Instant::now() + Duration::from_secs(5))
+        );
         assert!(matches!(
             statuses.try_recv(),
             Ok(GatewayStatus::Health {

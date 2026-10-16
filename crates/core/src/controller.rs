@@ -1334,6 +1334,9 @@ impl Actor {
             }
             meter.observed_at_ms =
                 crate::audio::clean_observation_time(meter.observed_at_ms, observed_at_ms.unwrap());
+            meter.timing = meter
+                .timing
+                .and_then(|timing| crate::protocol::clean_timing(timing, now));
             if meter.observed_at_ms.is_none() {
                 meter.level_dbfs = None;
                 meter.pre_clip = false;

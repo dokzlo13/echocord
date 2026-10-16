@@ -73,7 +73,7 @@ Run `python scripts/dev.py --help` for the complete command list; substitute `py
 
 Do not run frontend builds and app builds concurrently in the same checkout: both update `ui/dist`. Parallel workers should use isolated checkouts/targets and distinct preview ports. The Makefile and shell wrappers are conveniences around the same build entry point.
 
-On Linux/WSL, for UI/core work without a Windows cross-build toolchain, install Rustup, Node, Python and a native C linker, run `python scripts/prepare-opus.py`, `python scripts/prepare-cpal.py`, `npm --prefix ui ci`, and `python scripts/dev.py browser-install`, then `check --portable`. Native Windows core tests still require MSVC even with `--portable`. On Linux, Playwright may also need distribution browser libraries; use its documented `install --with-deps chromium` setup on a suitable development machine.
+On Linux/WSL, for UI/core work without a Windows cross-build toolchain, install Rustup, Node, Python and a native C linker, run `python scripts/prepare-opus.py`, `python scripts/prepare-cpal.py`, `python scripts/prepare-rubato.py`, `npm --prefix ui ci`, and `python scripts/dev.py browser-install`, then `check --portable`. Native Windows core tests still require MSVC even with `--portable`. On Linux, Playwright may also need distribution browser libraries; use its documented `install --with-deps chromium` setup on a suitable development machine.
 
 ## Dependencies and generated files
 

@@ -24,7 +24,6 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 
 ### Scope
 
-- Adaptive drift correction, performance presets, surround input and a mix limiter remain deferred. Synthetic limiter comparisons exposed modulation and post-transient ducking; no unvalidated audio processing or speculative tuning controls are enabled.
 - Automated recovery and signal fixtures do not establish physical device compatibility, listener delivery or multi-hour stability. Windows 11 x64 and the existing runtime requirements remain unchanged.
 
 ## 0.2.0 — 2026-10-16
@@ -54,7 +53,7 @@ Notable user-facing changes are recorded here. Versions follow [Semantic Version
 
 - Windows 11 x64, unsigned; Microsoft WebView2 and Visual C++ v14 x64 runtimes are still required.
 - Recording conversion is covered by synthetic signal, timing, allocation and Windows format-descriptor tests. Physical device compatibility, Discord listener delivery and multi-hour stability are separate manual checks, not guarantees from CI.
-- Surround input, adaptive clock-drift correction, performance presets and a mix limiter remain deferred. A capture cleanup timeout still stops the shared audio worker safely.
+- A capture cleanup timeout stops the shared audio worker safely.
 
 ## 0.1.0 — 2026-10-11
 

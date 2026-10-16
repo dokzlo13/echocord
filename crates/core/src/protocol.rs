@@ -240,11 +240,126 @@ fn clean_level(level: Option<f32>) -> Option<f32> {
         .map(|v| v.clamp(-160.0, 0.0))
 }
 
+/// Bound independently observed timing facts at the worker/public boundary.
+/// Invalid measurements stay unavailable; publication does not renew their age.
+#[cfg(any(windows, test))]
+pub(crate) fn clean_timing(
+    mut timing: crate::model::TimingObservation,
+    now_ms: f64,
+) -> Option<crate::model::TimingObservation> {
+    use crate::{audio::clean_observation_time, model::TimingPhase};
+    const MAX_SAFE_COUNTER: u64 = 9_007_199_254_740_991;
+    if timing.epoch.is_empty()
+        || timing.epoch.len() > 96
+        || !timing
+            .epoch
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b':' || byte == b'-')
+        || timing.capacity_frames == 0
+        || timing.capacity_frames > 65_536
+    {
+        return None;
+    }
+    timing.state_observed_at_ms = clean_observation_time(timing.state_observed_at_ms, now_ms);
+    timing.audio_observed_at_ms = clean_observation_time(timing.audio_observed_at_ms, now_ms);
+    timing.last_reset_at_ms = clean_observation_time(timing.last_reset_at_ms, now_ms);
+    timing.applied_adjustment_ppm = timing
+        .applied_adjustment_ppm
+        .filter(|ppm| ppm.is_finite() && ppm.abs() <= 2_000.0);
+    timing.queued_frames = timing
+        .queued_frames
+        .filter(|frames| *frames <= timing.capacity_frames);
+    timing.target_frames = timing
+        .target_frames
+        .filter(|frames| *frames <= timing.capacity_frames);
+    if timing.phase == TimingPhase::Off {
+        timing.applied_adjustment_ppm = None;
+        timing.target_frames = None;
+    }
+    if timing.audio_observed_at_ms.is_none() {
+        timing.applied_adjustment_ppm = None;
+        timing.queued_frames = None;
+    }
+    if timing.state_observed_at_ms.is_none() {
+        timing.target_frames = None;
+        timing.last_reset_reason = None;
+        timing.last_reset_at_ms = None;
+    }
+    timing.gap_output_frames = timing.gap_output_frames.min(MAX_SAFE_COUNTER);
+    timing.dropped_input_frames = timing.dropped_input_frames.min(MAX_SAFE_COUNTER);
+    timing.resync_count = timing.resync_count.min(MAX_SAFE_COUNTER);
+    Some(timing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::discord::protocol::{GatewayCommand as Command, VoiceStatus as Status};
     use std::io::Cursor;
+
+    fn timing_fixture() -> crate::model::TimingObservation {
+        use crate::model::{TimingObservation, TimingPhase, TimingResetReason};
+        TimingObservation {
+            epoch: "18446744073709551615:2:3".into(),
+            phase: TimingPhase::Running,
+            applied_adjustment_ppm: Some(-123.5),
+            queued_frames: Some(720),
+            target_frames: Some(960),
+            capacity_frames: 4096,
+            gap_output_frames: 480,
+            dropped_input_frames: 240,
+            resync_count: 1,
+            last_reset_reason: Some(TimingResetReason::Starved),
+            last_reset_at_ms: Some(2.0),
+            state_observed_at_ms: Some(3.0),
+            audio_observed_at_ms: Some(4.0),
+        }
+    }
+
+    #[test]
+    fn timing_keeps_exact_epochs_and_independent_measurement_ages() {
+        let original = timing_fixture();
+        assert_eq!(
+            clean_timing(original.clone(), 100.0),
+            Some(original.clone())
+        );
+        let json = serde_json::to_value(&original).unwrap();
+        assert_eq!(json["epoch"], "18446744073709551615:2:3");
+        let mut timing = original.clone();
+        timing.state_observed_at_ms = Some(100.0);
+        let cleaned = clean_timing(timing, 100.0).unwrap();
+        assert_eq!(cleaned.audio_observed_at_ms, Some(4.0));
+        let mut timing = original;
+        timing.audio_observed_at_ms = Some(200.0);
+        let cleaned = clean_timing(timing, 100.0).unwrap();
+        assert_eq!(cleaned.audio_observed_at_ms, None);
+        assert_eq!(cleaned.queued_frames, None);
+        assert_eq!(cleaned.applied_adjustment_ppm, None);
+        assert_eq!(cleaned.target_frames, Some(960));
+    }
+
+    #[test]
+    fn timing_rejects_invalid_values_and_bypassed_adjustment_without_fabricating_zero() {
+        let mut timing = timing_fixture();
+        timing.applied_adjustment_ppm = Some(f64::NAN);
+        timing.queued_frames = Some(4097);
+        timing.gap_output_frames = u64::MAX;
+        let cleaned = clean_timing(timing, 100.0).unwrap();
+        assert_eq!(cleaned.applied_adjustment_ppm, None);
+        assert_eq!(cleaned.queued_frames, None);
+        assert_eq!(cleaned.gap_output_frames, 9_007_199_254_740_991);
+        let mut timing = timing_fixture();
+        timing.phase = crate::model::TimingPhase::Off;
+        let cleaned = clean_timing(timing, 100.0).unwrap();
+        assert_eq!(cleaned.applied_adjustment_ppm, None);
+        assert_eq!(cleaned.target_frames, None);
+        assert_eq!(cleaned.queued_frames, Some(720));
+        for epoch in ["".into(), "private-path".into(), "0".repeat(97)] {
+            let mut timing = timing_fixture();
+            timing.epoch = epoch;
+            assert!(clean_timing(timing, 100.0).is_none());
+        }
+    }
 
     #[test]
     fn both_meter_levels_are_sanitized_and_roundtrip_as_nullable_scalars() {

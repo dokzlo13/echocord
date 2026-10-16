@@ -9,6 +9,8 @@
 use crate::model::{AppError, Capture, CapturePhase, RecordingSource};
 #[path = "application.rs"]
 pub mod application;
+#[cfg(any(windows, test))]
+mod recording_format;
 use rtrb::Consumer;
 #[cfg(any(windows, test))]
 use rtrb::{Producer, RingBuffer};
@@ -608,6 +610,20 @@ struct CaptureWriter {
 #[cfg(any(windows, test))]
 impl CaptureWriter {
     fn write<T: Copy>(&mut self, data: &[T], channels: u16, convert: impl Fn(T) -> f32) {
+        let fence = (
+            self.shared.input_epoch.load(Ordering::Acquire),
+            self.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+        );
+        self.write_fenced(data, channels, convert, fence);
+    }
+
+    fn write_fenced<T: Copy>(
+        &mut self,
+        data: &[T],
+        channels: u16,
+        convert: impl Fn(T) -> f32,
+        fence: (u64, u64),
+    ) {
         if !matches!(
             self.shared.status.load(Ordering::Acquire),
             RUNNING | OPENING
@@ -620,7 +636,10 @@ impl CaptureWriter {
             if !matches!(
                 self.shared.status.load(Ordering::Acquire),
                 RUNNING | OPENING
-            ) {
+            ) || self.shared.input_epoch.load(Ordering::Acquire) != fence.0
+                || self.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT != fence.1
+            {
+                self.partial_left = None;
                 return;
             }
             let sample = convert(raw);
@@ -635,6 +654,10 @@ impl CaptureWriter {
             }
             let output = self.shared.output.load(Ordering::Acquire);
             let generation = output >> GENERATION_SHIFT;
+            if generation != fence.1 || self.shared.input_epoch.load(Ordering::Acquire) != fence.0 {
+                self.partial_left = None;
+                return;
+            }
             let (samples, exposed_ns, frame_generation) = if channels == 1 {
                 ([sample; 2], now, generation)
             } else if let Some((left, exposed_ns, generation)) = self.partial_left.take() {
@@ -652,7 +675,7 @@ impl CaptureWriter {
                     samples,
                     exposed_ns,
                     generation: frame_generation,
-                    input_epoch: self.shared.input_epoch.load(Ordering::Acquire),
+                    input_epoch: fence.0,
                 })
                 .is_ok()
             {
@@ -668,6 +691,72 @@ impl CaptureWriter {
             self.shared
                 .peak_bits
                 .store(peak.to_bits(), Ordering::Release);
+        }
+    }
+}
+
+/// The native callback owns the converter and writer together. A discontinuity
+/// invalidates both queued output and un-emitted filter/staging history.
+#[cfg(any(windows, test))]
+struct RecordingWriter {
+    writer: CaptureWriter,
+    resampler: Option<recording_format::RecordingResampler>,
+    channels: u16,
+    fence: (u64, u64),
+}
+
+#[cfg(any(windows, test))]
+impl RecordingWriter {
+    fn new(writer: CaptureWriter, rate: u32, channels: u16) -> Option<Self> {
+        if !matches!(channels, 1 | 2) {
+            return None;
+        }
+        let resampler = if rate == SAMPLE_RATE {
+            None
+        } else {
+            Some(recording_format::RecordingResampler::new(rate, channels)?)
+        };
+        let fence = (
+            writer.shared.input_epoch.load(Ordering::Acquire),
+            writer.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+        );
+        Some(Self {
+            writer,
+            resampler,
+            channels,
+            fence,
+        })
+    }
+
+    fn write<T: Copy>(&mut self, data: &[T], convert: impl Fn(T) -> f32) {
+        let shared = &self.writer.shared;
+        if !matches!(shared.status.load(Ordering::Acquire), RUNNING | OPENING) {
+            return;
+        }
+        let fence = (
+            shared.input_epoch.load(Ordering::Acquire),
+            shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+        );
+        if fence != self.fence {
+            if let Some(resampler) = &mut self.resampler {
+                resampler.reset();
+            }
+            self.writer.partial_left = None;
+            self.fence = fence;
+        }
+        if let Some(resampler) = &mut self.resampler {
+            let writer = &mut self.writer;
+            match resampler.write(data, convert, |samples| {
+                writer.write_fenced(samples, 2, |s| s, fence)
+            }) {
+                Ok(true) => writer.shared.pre_clip.store(true, Ordering::Release),
+                Ok(false) => {}
+                Err(_) => writer.shared.fail(FAILED),
+            }
+        } else {
+            // Keep the existing 48 kHz path free of filtering or staging delay.
+            self.writer
+                .write_fenced(data, self.channels, convert, fence);
         }
     }
 }
@@ -800,8 +889,8 @@ mod windows {
         let configs = device.supported_input_configs().map_err(|_| {
             error("Cannot inspect the selected recording device's supported formats.")
         })?;
-        // Explicitly supported rate only: no default configuration or resampling.
-        // Prefer stereo, then f32. Conversion happens directly on callback slices.
+        // Negotiate only on the explicitly selected endpoint. Prefer the engine
+        // rate; the two reviewed fallback rates use our bounded converter.
         Ok(select_config(configs))
     }
 
@@ -828,9 +917,14 @@ mod windows {
                     1 => 1,
                     _ => return None,
                 };
-                range
-                    .try_with_sample_rate(SAMPLE_RATE)
-                    .map(|config| ((channel_rank, rank), config))
+                recording_format::RECORDING_RATES
+                    .iter()
+                    .enumerate()
+                    .find_map(|(rate_rank, &rate)| {
+                        range
+                            .try_with_sample_rate(rate)
+                            .map(|config| ((rate_rank, channel_rank, rank), config))
+                    })
             })
             .min_by_key(|(rank, _)| *rank)
             .map(|(_, config)| config)
@@ -853,10 +947,20 @@ mod windows {
                 .name()
                 .to_owned();
             let (available, detail) = match supported_config(&device) {
-                Ok(Some(_)) => (true, Some("48 kHz mono/stereo recording".into())),
+                Ok(Some(config)) => (
+                    true,
+                    Some(if config.sample_rate() == SAMPLE_RATE {
+                        "48 kHz mono/stereo recording".into()
+                    } else {
+                        format!(
+                            "{} kHz recording · converted to 48 kHz",
+                            f64::from(config.sample_rate()) / 1000.0
+                        )
+                    }),
+                ),
                 Ok(None) => (
                     false,
-                    Some("Requires a supported 48 kHz mono/stereo PCM format.".into()),
+                    Some("Requires 44.1, 48 or 96 kHz mono/stereo PCM.".into()),
                 ),
                 Err(_) => (
                     false,
@@ -892,7 +996,7 @@ mod windows {
             .find(|device| device.id().ok().as_ref() == Some(&id))
             .ok_or_else(|| error("The selected recording device is unavailable."))?;
         let config = supported_config(&device)?.ok_or_else(|| error(
-            "The selected recording device does not support 48 kHz mono/stereo PCM. Configure it for 48 kHz and retry.",
+            "The selected recording device requires 44.1, 48 or 96 kHz mono/stereo PCM. Change its Windows format and retry.",
         ))?;
         let (writer, session) = pipeline(Arc::new(SystemClock(Instant::now())));
         let stream = match config.sample_format() {
@@ -908,7 +1012,7 @@ mod windows {
             SampleFormat::U64 => build::<u64>(&device, config, writer),
             _ => return Err(error("The selected recording format is unsupported.")),
         }
-        .map_err(|_| error("Cannot open the selected recording device at 48 kHz."))?;
+        .map_err(|_| error("Cannot open the selected recording device's supported PCM format."))?;
         stream
             .play()
             .map_err(|_| error("Cannot start the selected recording device."))?;
@@ -935,17 +1039,23 @@ mod windows {
     fn build<T>(
         device: &cpal::Device,
         config: SupportedStreamConfig,
-        mut writer: CaptureWriter,
+        writer: CaptureWriter,
     ) -> Result<cpal::Stream, cpal::Error>
     where
         T: SizedSample + Copy,
         f32: cpal::FromSample<T>,
     {
         let shared = writer.shared.clone();
-        let channels = config.channels();
+        let mut writer = RecordingWriter::new(writer, config.sample_rate(), config.channels())
+            .ok_or_else(|| {
+                cpal::Error::with_message(
+                    cpal::ErrorKind::UnsupportedConfig,
+                    "Unsupported recording conversion",
+                )
+            })?;
         device.build_input_stream::<T, _, _>(
             config.config(),
-            move |data, _| writer.write(data, channels, |sample| sample.to_sample::<f32>()),
+            move |data, _| writer.write(data, |sample| sample.to_sample::<f32>()),
             move |failure| report_error(&shared, failure.kind()),
             None,
         )
@@ -956,6 +1066,7 @@ mod windows {
         // WASAPI reports discontinuity and continues handing off capture data.
         if kind == cpal::ErrorKind::Xrun {
             shared.record_xrun();
+            shared.input_epoch.fetch_add(1, Ordering::AcqRel);
             return;
         }
         let status = match kind {
@@ -1070,6 +1181,116 @@ mod tests {
         feed(&mut writer, 10, 0.1, -0.1);
         assert_eq!(frames(&mut session.input, 10), vec![[0.1, -0.1]; 10]);
         assert_eq!(session.control.snapshot().dropped_frames, 100);
+    }
+
+    #[test]
+    fn recording_48k_bypasses_filter_and_preserves_fragmented_stereo() {
+        let (writer, mut session, _) = setup();
+        let mut recording = RecordingWriter::new(writer, 48_000, 2).unwrap();
+        assert!(recording.resampler.is_none());
+        recording.write(&[0.125], |s| s);
+        recording.write(&[-0.25, 0.5, -0.75], |s| s);
+        assert_eq!(
+            frames(&mut session.input, 2),
+            [[0.125, -0.25], [0.5, -0.75]]
+        );
+        assert_eq!(session.control.snapshot().underrun_frames, 0);
+    }
+
+    #[test]
+    fn converted_recording_discontinuity_and_mute_discard_pending_audio() {
+        for rate in [44_100, 48_000, 96_000] {
+            for mute in [false, true] {
+                let (writer, mut session, _) = setup();
+                let mut recording = RecordingWriter::new(writer, rate, 2).unwrap();
+                recording.write(&[0.75; 1025], |s| s);
+                if mute {
+                    session.control.set_output(100, true);
+                    session.control.set_output(100, false);
+                } else {
+                    recording
+                        .writer
+                        .shared
+                        .input_epoch
+                        .fetch_add(1, Ordering::AcqRel);
+                }
+                recording.write(&[0.0; 2048], |s| s);
+                let mut actual = [[9.0; 2]; 240];
+                session.input.drain_frames(&mut actual);
+                assert_eq!(actual, [[0.0; 2]; 240]);
+                assert_eq!(session.control.snapshot().underrun_frames, 0);
+                assert!(session.control.snapshot().dropped_frames > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn discontinuity_during_conversion_cannot_stamp_old_samples_as_new() {
+        use std::cell::Cell;
+        for rate in [44_100, 48_000, 96_000] {
+            for mute in [false, true] {
+                let (writer, mut session, _) = setup();
+                let mut recording = RecordingWriter::new(writer, rate, 2).unwrap();
+                let shared = recording.writer.shared.clone();
+                let remaining = Cell::new(7u32);
+                recording.write(&[0.75; 2048], |s| {
+                    let next = remaining.get().saturating_sub(1u32);
+                    remaining.set(next);
+                    if next == 0 {
+                        remaining.set(u32::MAX);
+                        if mute {
+                            session.control.set_output(100, true);
+                            session.control.set_output(100, false);
+                        } else {
+                            shared.input_epoch.fetch_add(1, Ordering::AcqRel);
+                        }
+                    }
+                    s
+                });
+                recording.write(&[0.0; 2048], |s| s);
+                let mut actual = [[9.0; 2]; 240];
+                session.input.drain_frames(&mut actual);
+                assert_eq!(actual, [[0.0; 2]; 240]);
+                assert_eq!(session.control.snapshot().underrun_frames, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn converted_recording_queue_remains_bounded_and_stop_rejects_input() {
+        for rate in [44_100, 96_000] {
+            let (writer, mut session, _) = setup();
+            let mut recording = RecordingWriter::new(writer, rate, 1).unwrap();
+            let data = vec![0.25; rate as usize];
+            recording.write(&data, |s| s);
+            assert_eq!(
+                session.control.snapshot().queued_frames as usize,
+                QUEUE_FRAMES
+            );
+            assert!(session.control.snapshot().dropped_frames > 40_000);
+            let mut drained = [[0.0; 2]; QUEUE_FRAMES];
+            session.input.drain_frames(&mut drained);
+            assert_eq!(session.control.snapshot().queued_frames, 0);
+            recording.write(&[0.25; 1024], |s| s);
+            assert!(session.control.snapshot().queued_frames > 0);
+            assert!(session.control.stop());
+            session.input.drain_frames(&mut drained);
+            assert!(drained.iter().all(|frame| *frame == [0.0; 2]));
+            let pushed = recording.writer.shared.pushed.load(Ordering::Acquire);
+            recording.write(&data, |s| s);
+            assert_eq!(
+                recording.writer.shared.pushed.load(Ordering::Acquire),
+                pushed
+            );
+        }
+    }
+
+    #[test]
+    fn resampled_recording_retains_native_clipping_indication() {
+        let (writer, session, _) = setup();
+        let mut recording = RecordingWriter::new(writer, 96_000, 1).unwrap();
+        recording.write(&[1.5; 128], |s| s);
+        assert!(session.control.take_pre_clip());
     }
 
     #[cfg(windows)]
@@ -1905,7 +2126,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn capture_format_selection_requires_supported_48k_mono_or_stereo() {
+    fn capture_format_selection_prefers_48k_and_accepts_reviewed_fallbacks() {
         use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfigRange};
         let range = |channels, min, max, format| {
             SupportedStreamConfigRange::new(
@@ -1917,7 +2138,7 @@ mod tests {
             )
         };
         let rejected = [
-            range(2, 44_100, 44_100, SampleFormat::F32),
+            range(2, 32_000, 32_000, SampleFormat::F32),
             range(6, 48_000, 48_000, SampleFormat::F32),
             range(2, 48_000, 48_000, SampleFormat::DsdU8),
         ];
@@ -1935,6 +2156,21 @@ mod tests {
             windows::select_config([range(1, 48_000, 48_000, SampleFormat::U16)].into_iter())
                 .unwrap();
         assert_eq!(mono.channels(), 1);
+        for rate in [44_100, 96_000] {
+            let selected =
+                windows::select_config([range(2, rate, rate, SampleFormat::F32)].into_iter())
+                    .unwrap();
+            assert_eq!(selected.sample_rate(), rate);
+        }
+        let selected = windows::select_config(
+            [
+                range(2, 96_000, 96_000, SampleFormat::F32),
+                range(1, 44_100, 44_100, SampleFormat::I16),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(selected.sample_rate(), 44_100);
     }
 
     #[cfg(windows)]

@@ -13,6 +13,8 @@ pub mod application;
 pub(crate) mod link;
 #[cfg(any(windows, test))]
 pub(crate) mod recording_format;
+#[cfg(any(windows, test))]
+mod source_link;
 use rtrb::Consumer;
 #[cfg(any(windows, test))]
 use rtrb::{Producer, RingBuffer};
@@ -44,6 +46,8 @@ const STOPPED: u8 = 0;
 const OPENING: u8 = 1;
 const RUNNING: u8 = 2;
 const MISSING: u8 = 3;
+#[cfg(any(windows, test))]
+const TIMING_UNSUPPORTED: u8 = 9;
 #[cfg(any(windows, test))]
 const FAILED: u8 = 4;
 const DENIED: u8 = 5;
@@ -238,6 +242,13 @@ impl CaptureControl {
                 ),
             ),
             #[cfg(any(windows, test))]
+            TIMING_UNSUPPORTED => (
+                CapturePhase::Error,
+                Some(
+                    "This input's callback timing is unsupported with Clock correction. Turn it off in Advanced audio, then capture again.",
+                ),
+            ),
+            #[cfg(any(windows, test))]
             CLEANUP_FAILED => (
                 CapturePhase::Error,
                 Some(
@@ -280,7 +291,9 @@ impl CaptureControl {
                 dropped_frames: count(shared.dropped.load(Ordering::Relaxed)),
                 underrun_frames: count(shared.underrun.load(Ordering::Relaxed)),
                 queued_frames: if status == RUNNING || status == OPENING {
-                    pushed.saturating_sub(popped).min(QUEUE_FRAMES as u64) as u32
+                    pushed
+                        .saturating_sub(popped)
+                        .min(shared.queue_capacity as u64) as u32
                 } else {
                     0
                 },
@@ -373,6 +386,10 @@ struct Shared {
     status: AtomicU8,
     output: AtomicU64,
     input_epoch: AtomicU64,
+    processing_epoch: AtomicU64,
+    #[cfg(any(windows, test))]
+    correction_enabled: AtomicBool,
+    queue_capacity: usize,
     #[cfg(any(windows, test))]
     native_clock: link::ClockPublication,
     peak_bits: AtomicU32,
@@ -444,6 +461,7 @@ struct Frame {
     exposed_ns: u64,
     generation: u64,
     input_epoch: u64,
+    processing_epoch: u64,
 }
 
 /// Nonseekable, unknown-length stereo f32-LE PCM. The mutex makes the rtrb
@@ -463,6 +481,8 @@ struct Reader {
     frames_left: usize,
     next_quantum_ns: Option<u64>,
     position: u64,
+    #[cfg(any(windows, test))]
+    correction: Option<source_link::SourceLink>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -531,7 +551,7 @@ impl Reader {
                 if self.frames_left == 0 {
                     break;
                 }
-                let (samples, output) = self.next_frame(shared, &mut pop_budget);
+                let (samples, output, _) = self.next_frame(shared, &mut pop_budget);
                 self.pending_peak = ReaderPeak {
                     value: samples[0].abs().max(samples[1].abs()),
                     ns: shared.clock.now(),
@@ -572,7 +592,7 @@ impl Reader {
         Ok(written)
     }
 
-    fn next_frame(&mut self, shared: &Shared, budget: &mut usize) -> ([f32; 2], u64) {
+    fn next_frame(&mut self, shared: &Shared, budget: &mut usize) -> ([f32; 2], u64, bool) {
         while *budget > 0 {
             let Ok(frame) = self.consumer.pop() else {
                 break;
@@ -582,6 +602,7 @@ impl Reader {
             let output = shared.output.load(Ordering::Acquire);
             if shared.clock.now().saturating_sub(frame.exposed_ns) > MAX_AGE_NS
                 || frame.input_epoch != shared.input_epoch.load(Ordering::Acquire)
+                || frame.processing_epoch != shared.processing_epoch.load(Ordering::Acquire)
                 || frame.generation != output >> GENERATION_SHIFT
                 || output & MUTED != 0
             {
@@ -589,7 +610,11 @@ impl Reader {
                 continue;
             }
             let gain = f32::from_bits(output as u32);
-            return ([frame.samples[0] * gain, frame.samples[1] * gain], output);
+            return (
+                [frame.samples[0] * gain, frame.samples[1] * gain],
+                output,
+                true,
+            );
         }
         // Intentional mute is not an underrun. Muted reads still
         // drain old queued frames instead of leaving audio to replay later.
@@ -597,11 +622,11 @@ impl Reader {
         if output & MUTED == 0 {
             shared.underrun.fetch_add(1, Ordering::Relaxed);
         }
-        ([0.0; 2], output)
+        ([0.0; 2], output, false)
     }
 
     fn discard_queue(&mut self, shared: &Shared) {
-        for _ in 0..QUEUE_FRAMES {
+        for _ in 0..shared.queue_capacity {
             if self.consumer.pop().is_err() {
                 break;
             }
@@ -612,18 +637,59 @@ impl Reader {
 }
 
 impl LivePcm {
+    #[cfg(any(windows, test))]
+    pub(crate) fn configure_clock_correction(&mut self, enabled: bool, lifetime: u64, mode: u64) {
+        let reader = self.reader.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(correction) = &mut reader.correction {
+            correction.configure(
+                enabled,
+                lifetime,
+                mode,
+                &mut reader.consumer,
+                &self.owner.shared,
+            );
+            reader.pending_pos = FRAME_BYTES;
+            reader.output_peak = None;
+        }
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn timing_observation(&mut self) -> Option<crate::model::TimingObservation> {
+        self.reader
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .correction
+            .as_ref()
+            .map(|link| link.snapshot())
+    }
     /// The shared mixer owns pacing. This bounded drain never waits for a source.
     pub fn drain_frames(&mut self, frames: &mut [[f32; 2]]) {
+        let _ = self.drain_frames_observed(frames);
+    }
+    pub(crate) fn drain_frames_observed(&mut self, frames: &mut [[f32; 2]]) -> bool {
         let shared = &self.owner.shared;
         let reader = self.reader.get_mut().unwrap_or_else(|e| e.into_inner());
-        let mut budget = QUEUE_FRAMES;
+        #[cfg(any(windows, test))]
+        if let Some(correction) = &mut reader.correction
+            && correction.enabled()
+        {
+            return correction.drain(&mut reader.consumer, shared, frames);
+        }
+        let mut fresh = false;
+        let mut budget = shared.queue_capacity;
         for frame in frames {
             *frame = if matches!(shared.status.load(Ordering::Acquire), RUNNING | OPENING) {
-                reader.next_frame(shared, &mut budget).0
+                let (samples, _, observed) = reader.next_frame(shared, &mut budget);
+                fresh |= observed;
+                samples
             } else {
                 [0.0; 2]
             };
         }
+        #[cfg(any(windows, test))]
+        if let Some(correction) = &mut reader.correction {
+            correction.legacy_observed(reader.consumer.slots(), fresh);
+        }
+        fresh
     }
 }
 
@@ -665,11 +731,13 @@ struct CaptureWriter {
     shared: Arc<Shared>,
     // A backend normally supplies whole input frames, but retain an unmatched
     // left sample across callbacks rather than swap channels on fragmentation.
-    partial_left: Option<(f32, u64, u64)>,
+    partial_left: Option<(f32, u64, u64, u64)>,
     rate_estimator: link::RateEstimator,
     packet_sizes: link::PacketSizes,
     native_position: u64,
     native_epoch: u64,
+    oversized_history: u32,
+    oversized_consecutive: u8,
 }
 
 #[cfg(any(windows, test))]
@@ -681,7 +749,10 @@ impl CaptureWriter {
         frames: usize,
         native_rate: u32,
         timestamp_ns: Option<u64>,
-    ) {
+    ) -> bool {
+        if frames == 0 || native_rate == 0 {
+            return false;
+        }
         let now = self.shared.clock.now();
         let epoch = self.shared.input_epoch.load(Ordering::Acquire);
         if epoch != self.native_epoch {
@@ -695,14 +766,42 @@ impl CaptureWriter {
             self.rate_estimator
                 .observe(timestamp, self.native_position, native_rate)
         });
-        let packet = self.packet_sizes.observe(frames, native_rate);
+        let normalized = (frames as u128 * 48_000).div_ceil(u128::from(native_rate));
+        let oversized = normalized > 1440;
+        // A first large endpoint buffer must not poison the normal period
+        // envelope for the following sixteen callbacks.
+        let packet = if oversized {
+            self.packet_sizes.maximum().max(240)
+        } else {
+            self.packet_sizes.observe(frames, native_rate)
+        };
         self.shared.native_clock.publish(rate, packet, now, epoch);
         self.native_position = self.native_position.saturating_add(frames as u64);
+        if !self.shared.correction_enabled.load(Ordering::Acquire) {
+            self.oversized_history = 0;
+            self.oversized_consecutive = 0;
+            return true;
+        }
+        self.oversized_history = (self.oversized_history << 1) | u32::from(oversized);
+        self.oversized_consecutive = if oversized {
+            self.oversized_consecutive.saturating_add(1)
+        } else {
+            0
+        };
+        if oversized {
+            self.shared.input_epoch.fetch_add(1, Ordering::AcqRel);
+            if self.oversized_consecutive >= 3 || self.oversized_history.count_ones() >= 8 {
+                self.shared.fail(TIMING_UNSUPPORTED);
+            }
+            return false;
+        }
+        true
     }
     fn write<T: Copy>(&mut self, data: &[T], channels: u16, convert: impl Fn(T) -> f32) {
         let fence = (
             self.shared.input_epoch.load(Ordering::Acquire),
             self.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+            self.shared.processing_epoch.load(Ordering::Acquire),
         );
         self.write_fenced(data, channels, convert, fence, None);
     }
@@ -712,7 +811,7 @@ impl CaptureWriter {
         data: &[T],
         channels: u16,
         convert: impl Fn(T) -> f32,
-        fence: (u64, u64),
+        fence: (u64, u64, u64),
         original_exposure_ns: Option<u64>,
     ) {
         if !matches!(
@@ -730,6 +829,7 @@ impl CaptureWriter {
                 RUNNING | OPENING
             ) || self.shared.input_epoch.load(Ordering::Acquire) != fence.0
                 || self.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT != fence.1
+                || self.shared.processing_epoch.load(Ordering::Acquire) != fence.2
             {
                 self.partial_left = None;
                 return;
@@ -746,19 +846,34 @@ impl CaptureWriter {
             }
             let output = self.shared.output.load(Ordering::Acquire);
             let generation = output >> GENERATION_SHIFT;
-            if generation != fence.1 || self.shared.input_epoch.load(Ordering::Acquire) != fence.0 {
+            if generation != fence.1
+                || self.shared.input_epoch.load(Ordering::Acquire) != fence.0
+                || self.shared.processing_epoch.load(Ordering::Acquire) != fence.2
+            {
                 self.partial_left = None;
                 return;
             }
-            let (samples, exposed_ns, frame_generation) = if channels == 1 {
-                ([sample; 2], exposed_ns, generation)
-            } else if let Some((left, exposed_ns, generation)) = self.partial_left.take() {
-                ([left, sample], exposed_ns, generation)
+            let (samples, exposed_ns, frame_generation, frame_processing) = if channels == 1 {
+                ([sample; 2], exposed_ns, generation, fence.2)
+            } else if let Some((left, exposed_ns, generation, processing)) =
+                self.partial_left.take()
+            {
+                ([left, sample], exposed_ns, generation, processing)
             } else {
-                self.partial_left = Some((sample, exposed_ns, generation));
+                self.partial_left = Some((sample, exposed_ns, generation, fence.2));
                 continue;
             };
-            if output & MUTED != 0 || frame_generation != generation {
+            if output & MUTED != 0 || frame_generation != generation || frame_processing != fence.2
+            {
+                continue;
+            }
+            let limit = if self.shared.correction_enabled.load(Ordering::Acquire) {
+                self.shared.queue_capacity
+            } else {
+                QUEUE_FRAMES
+            };
+            if self.shared.queue_capacity - self.producer.slots() >= limit {
+                self.shared.dropped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             if self
@@ -768,6 +883,7 @@ impl CaptureWriter {
                     exposed_ns,
                     generation: frame_generation,
                     input_epoch: fence.0,
+                    processing_epoch: fence.2,
                 })
                 .is_ok()
             {
@@ -794,7 +910,7 @@ struct RecordingWriter {
     writer: CaptureWriter,
     resampler: Option<recording_format::RecordingResampler>,
     channels: u16,
-    fence: (u64, u64),
+    fence: (u64, u64, u64),
     pending_right: bool,
     discard_right: bool,
 }
@@ -813,6 +929,7 @@ impl RecordingWriter {
         let fence = (
             writer.shared.input_epoch.load(Ordering::Acquire),
             writer.shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+            writer.shared.processing_epoch.load(Ordering::Acquire),
         );
         Some(Self {
             writer,
@@ -832,6 +949,7 @@ impl RecordingWriter {
         let fence = (
             shared.input_epoch.load(Ordering::Acquire),
             shared.output.load(Ordering::Acquire) >> GENERATION_SHIFT,
+            shared.processing_epoch.load(Ordering::Acquire),
         );
         if fence != self.fence {
             // Mute does not change the native stream's sample position. If an
@@ -879,11 +997,28 @@ impl RecordingWriter {
 
 #[cfg(any(windows, test))]
 fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
-    let (producer, consumer) = RingBuffer::new(QUEUE_FRAMES);
+    pipeline_inner(clock, QUEUE_FRAMES, None)
+}
+#[cfg(any(windows, test))]
+fn physical_pipeline(clock: Arc<dyn Clock>) -> Result<(CaptureWriter, CaptureSession), AppError> {
+    let correction = source_link::SourceLink::new()
+        .map_err(|message| AppError::new(crate::model::ErrorCode::CaptureFailed, message))?;
+    Ok(pipeline_inner(clock, link::CAPACITY, Some(correction)))
+}
+#[cfg(any(windows, test))]
+fn pipeline_inner(
+    clock: Arc<dyn Clock>,
+    capacity: usize,
+    correction: Option<source_link::SourceLink>,
+) -> (CaptureWriter, CaptureSession) {
+    let (producer, consumer) = RingBuffer::new(capacity);
     let shared = Arc::new(Shared {
         status: AtomicU8::new(OPENING),
         output: AtomicU64::new(u64::from(1.0_f32.to_bits())),
         input_epoch: AtomicU64::new(0),
+        processing_epoch: AtomicU64::new(0),
+        correction_enabled: AtomicBool::new(false),
+        queue_capacity: capacity,
         native_clock: link::ClockPublication::default(),
         peak_bits: AtomicU32::new(u32::MAX),
         pre_clip: AtomicBool::new(false),
@@ -914,6 +1049,8 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
             packet_sizes: link::PacketSizes::default(),
             native_position: 0,
             native_epoch: 0,
+            oversized_history: 0,
+            oversized_consecutive: 0,
         },
         CaptureSession {
             input: LivePcm {
@@ -926,6 +1063,7 @@ fn pipeline(clock: Arc<dyn Clock>) -> (CaptureWriter, CaptureSession) {
                     frames_left: 0,
                     next_quantum_ns: None,
                     position: 0,
+                    correction,
                 }),
                 owner: owner.clone(),
             },
@@ -1119,7 +1257,7 @@ mod windows {
         let config = supported_config(&device)?.ok_or_else(|| error(
             "The selected recording device requires 44.1, 48 or 96 kHz mono/stereo PCM. Change its Windows format and retry.",
         ))?;
-        let (writer, session) = pipeline(Arc::new(SystemClock(Instant::now())));
+        let (writer, session) = physical_pipeline(Arc::new(SystemClock(Instant::now())))?;
         let stream = match config.sample_format() {
             SampleFormat::F32 => build::<f32>(&device, config, writer),
             SampleFormat::I16 => build::<i16>(&device, config, writer),
@@ -1185,9 +1323,12 @@ mod windows {
                     .flatten()
                     .and_then(|duration| u64::try_from(duration.as_nanos()).ok());
                 if data.len().is_multiple_of(channels) {
-                    writer
+                    if !writer
                         .writer
-                        .observe_native_packet(data.len() / channels, rate, timestamp);
+                        .observe_native_packet(data.len() / channels, rate, timestamp)
+                    {
+                        return;
+                    }
                 }
                 writer.write(data, |sample| sample.to_sample::<f32>());
             },
@@ -1252,6 +1393,124 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Weak;
     use symphonia_core::io::{MediaSourceStream, ReadBytes, SeekBuffered};
+
+    fn physical_setup() -> (CaptureWriter, CaptureSession, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock::default());
+        let (writer, session) = physical_pipeline(clock.clone()).unwrap();
+        session
+            .control
+            .owner
+            .shared
+            .status
+            .store(RUNNING, Ordering::Release);
+        (writer, session, clock)
+    }
+
+    #[test]
+    fn correction_exact_pull_rejects_an_invalid_final_frame_with_unchanged_fence() {
+        let (mut writer, mut session, clock) = physical_setup();
+        session.input.configure_clock_correction(true, 1, 1);
+        assert!(writer.observe_native_packet(480, 48_000, Some(1)));
+        let mut sizing = link::Link::new(link::Direction::Capture, 240).unwrap();
+        let link::Plan::Pull { input_frames } = sizing.plan(1920, 240, 480, None, 0) else {
+            panic!()
+        };
+        let processing = writer.shared.processing_epoch.load(Ordering::Acquire);
+        for index in 0..1920 {
+            writer
+                .producer
+                .push(Frame {
+                    samples: [0.25, -0.5],
+                    exposed_ns: if index + 1 == input_frames { 1 } else { 0 },
+                    generation: 0,
+                    input_epoch: 0,
+                    processing_epoch: processing,
+                })
+                .unwrap();
+        }
+        writer.shared.pushed.store(1920, Ordering::Release);
+        let mut output = [[9.0; 2]; 240];
+        assert!(!session.input.drain_frames_observed(&mut output));
+        assert_eq!(output, [[0.0; 2]; 240]);
+        assert_eq!(writer.shared.input_epoch.load(Ordering::Acquire), 0);
+        assert_eq!(
+            writer.shared.processing_epoch.load(Ordering::Acquire),
+            processing
+        );
+        assert_eq!(
+            writer.shared.popped.load(Ordering::Acquire),
+            input_frames as u64
+        );
+        assert_eq!(
+            writer.shared.dropped.load(Ordering::Acquire),
+            input_frames as u64
+        );
+        assert_eq!(
+            session
+                .input
+                .timing_observation()
+                .unwrap()
+                .dropped_input_frames,
+            input_frames as u64
+        );
+        clock.ns.store(5_000_000, Ordering::Release);
+        assert!(session.input.drain_frames_observed(&mut output));
+    }
+
+    #[test]
+    fn off_uses_legacy_capacity_and_switching_modes_discards_pending_content() {
+        let (mut writer, mut session, clock) = physical_setup();
+        session.input.configure_clock_correction(false, 1, 0);
+        feed(&mut writer, link::CAPACITY, 0.25, -0.5);
+        assert_eq!(
+            session.control.snapshot().queued_frames,
+            QUEUE_FRAMES as u32
+        );
+        let mut output = [[0.0; 2]; 240];
+        assert!(session.input.drain_frames_observed(&mut output));
+        assert_eq!(output, [[0.25, -0.5]; 240]);
+        session.input.configure_clock_correction(true, 1, 1);
+        assert!(!session.input.drain_frames_observed(&mut output));
+        assert_eq!(output, [[0.0; 2]; 240]);
+        clock.ns.store(5_000_000, Ordering::Release);
+        feed(&mut writer, 1440, 0.0, 0.0);
+        assert!(session.input.drain_frames_observed(&mut output));
+        assert!(output.iter().all(|frame| *frame == [0.0; 2]));
+        session.input.configure_clock_correction(false, 1, 2);
+        assert_eq!(session.control.snapshot().queued_frames, 0);
+        clock.ns.store(10_000_000, Ordering::Release);
+        feed(&mut writer, 240, 0.125, -0.25);
+        assert!(session.input.drain_frames_observed(&mut output));
+        assert_eq!(output, [[0.125, -0.25]; 240]);
+    }
+
+    #[test]
+    fn oversized_native_packets_do_not_poison_normal_reserve_or_run_silently_forever() {
+        let (mut writer, mut session, _clock) = physical_setup();
+        session.input.configure_clock_correction(true, 1, 1);
+        assert!(!writer.observe_native_packet(4800, 48_000, Some(1)));
+        assert!(writer.observe_native_packet(480, 48_000, Some(100_000_001)));
+        assert_eq!(writer.packet_sizes.maximum(), 480);
+        assert_eq!(writer.shared.status.load(Ordering::Acquire), RUNNING);
+        for packet in 0..8 {
+            assert!(!writer.observe_native_packet(
+                1920,
+                48_000,
+                Some(200_000_000 + packet * 50_000_000)
+            ));
+            if packet < 6 {
+                assert!(writer.observe_native_packet(
+                    480,
+                    48_000,
+                    Some(240_000_000 + packet * 50_000_000)
+                ));
+            }
+        }
+        assert_eq!(
+            writer.shared.status.load(Ordering::Acquire),
+            TIMING_UNSUPPORTED
+        );
+    }
 
     #[test]
     fn native_clock_counts_packets_before_nominal_conversion_and_never_per_emitted_frame() {
@@ -1365,6 +1624,43 @@ pub(crate) mod tests {
                 writer.write(&[0.125, -0.25], 2, |sample| sample);
             }
         })
+    }
+
+    /// Full physical-capture correction path on a deterministic callback clock.
+    /// Source mute/gain remain the mixer's post-processing controls.
+    pub(crate) fn synchronous_mixer_fixture_with_correction() -> (CaptureSession, impl FnMut()) {
+        let (mut writer, mut session, clock) = physical_setup();
+        session.input.configure_clock_correction(true, 1, 1);
+        let data: [f32; QUANTUM_FRAMES * 2] =
+            std::array::from_fn(|index| if index % 2 == 0 { 0.125 } else { -0.25 });
+        (session, move || {
+            let now = clock.ns.fetch_add(QUANTUM_NS, Ordering::Relaxed) + QUANTUM_NS;
+            if writer.observe_native_packet(QUANTUM_FRAMES, 48_000, Some(now)) {
+                writer.write(&data, 2, |sample| sample);
+            }
+        })
+    }
+
+    #[test]
+    fn actual_capture_correction_and_callback_metadata_allocate_nothing_after_construction() {
+        let (mut session, mut pump) = synchronous_mixer_fixture_with_correction();
+        let mut output = [[0.0; 2]; 240];
+        let count = recording_format::tests::allocations_during(|| {
+            for _ in 0..2000 {
+                pump();
+                session.input.drain_frames(&mut output);
+            }
+        });
+        assert_eq!(count, 0);
+        assert!(
+            output
+                .iter()
+                .all(|frame| (frame[0] - 0.125).abs() < 0.0001 && (frame[1] + 0.25).abs() < 0.0001)
+        );
+        let timing = session.input.timing_observation().unwrap();
+        assert_eq!(timing.phase, crate::model::TimingPhase::Running);
+        assert_eq!(timing.gap_output_frames, 0);
+        assert_eq!(timing.dropped_input_frames, 0);
     }
 
     #[test]

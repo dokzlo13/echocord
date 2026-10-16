@@ -508,7 +508,7 @@ mod native {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<CaptureSession, AppError> {
         let target = Target::selected(id)?;
-        let (writer, session) = pipeline(Arc::new(SystemClock(Instant::now())));
+        let (writer, session) = physical_pipeline(Arc::new(SystemClock(Instant::now())))?;
         let shared = writer.shared.clone();
         let (ready, result) = std::sync::mpsc::sync_channel(1);
         let worker = std::thread::Builder::new()
@@ -702,23 +702,23 @@ mod native {
         // Capture QPC belongs to the packet's first native frame. Arrival time
         // remains the independent queue-exposure/stall clock. Invalid native
         // timestamps do not become invented rate observations.
-        let timestamp = (flags
-            & windows::Win32::Media::Audio::AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32
-            == 0)
+        let timestamp = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR.0 as u32 == 0)
             .then(|| qpc_position.checked_mul(100))
             .flatten();
-        writer.observe_native_packet(frames as usize, 48_000, timestamp);
-        // For SILENT, the pointer may be null and is never dereferenced.
-        let samples = &mut scratch[..frames as usize * 2];
-        if silent {
-            samples.fill(0.0);
-        } else {
-            for (index, sample) in samples.iter_mut().enumerate() {
-                // SAFETY: non-null packet has frames*8 initialized bytes until ReleaseBuffer.
-                *sample = unsafe { data.add(index * 4).cast::<f32>().read_unaligned() };
+        let accepted = writer.observe_native_packet(frames as usize, 48_000, timestamp);
+        if accepted {
+            // For SILENT, the pointer may be null and is never dereferenced.
+            let samples = &mut scratch[..frames as usize * 2];
+            if silent {
+                samples.fill(0.0);
+            } else {
+                for (index, sample) in samples.iter_mut().enumerate() {
+                    // SAFETY: non-null packet has frames*8 initialized bytes until ReleaseBuffer.
+                    *sample = unsafe { data.add(index * 4).cast::<f32>().read_unaligned() };
+                }
             }
+            writer.write(samples, 2, |sample| sample);
         }
-        writer.write(samples, 2, |sample| sample);
         // Observe release errors in the normal path; the guard still handles every early return.
         let frames = packet.1;
         std::mem::forget(packet);

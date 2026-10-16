@@ -621,7 +621,8 @@ fn mixing_suite() -> ProbeResult<()> {
     };
     let mut inputs = vec![source("first", &first)?, source("second", &second)?];
     let host = AudioHost::launch(std::env::current_exe()?)?;
-    host.sources(inputs.clone());
+    // This coordinated native probe retains its original unprocessed baseline.
+    host.sources(inputs.clone(), false, false);
     let wait = |predicate: &dyn Fn(&echocord_core::mixing::AudioSnapshot) -> bool| -> ProbeResult<echocord_core::mixing::AudioSnapshot> {
         let until = Instant::now() + Duration::from_secs(8);
         while Instant::now() < until {
@@ -675,7 +676,7 @@ fn mixing_suite() -> ProbeResult<()> {
         "unselected application leaked into the mix",
     )?;
     inputs[0].muted = true;
-    host.sources(inputs.clone());
+    host.sources(inputs.clone(), false, false);
     let muted_meter = wait(&|s| {
         s.inputs.first().is_some_and(|i| i.muted)
             && s.telemetry
@@ -694,7 +695,7 @@ fn mixing_suite() -> ProbeResult<()> {
     )?;
     inputs[0].muted = false;
     inputs[0].gain_db = Some(-12.0412);
-    host.sources(inputs.clone());
+    host.sources(inputs.clone(), false, false);
     wait(&|s| {
         s.inputs
             .iter()
@@ -745,15 +746,15 @@ fn mixing_suite() -> ProbeResult<()> {
     )?;
     inputs.remove(1);
     inputs[0].phase = InputPhase::Stopped;
-    host.sources(inputs.clone());
+    host.sources(inputs.clone(), false, false);
     wait(&|s| s.inputs.len() == 1 && s.inputs[0].phase == InputPhase::Stopped)?;
     inputs[0].phase = InputPhase::Opening;
-    host.sources(inputs.clone());
+    host.sources(inputs.clone(), false, false);
     wait(&|s| s.inputs.len() == 1 && s.inputs[0].phase == InputPhase::Capturing)?;
     // Rapid remove/add of the same physical source must serialize retirement.
-    host.sources(Vec::new());
+    host.sources(Vec::new(), false, false);
     inputs[0].strip_id = "replacement".into();
-    host.sources(inputs.clone());
+    host.sources(inputs.clone(), false, false);
     wait(&|s| {
         s.inputs.len() == 1
             && s.inputs[0].strip_id == "replacement"
@@ -867,6 +868,7 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         device_id.into(),
         output(0.25, false),
         1,
+        false,
     )?;
     let wait = |host: &PlaybackHost,
                 predicate: &dyn Fn(&playback::PlaybackSnapshot) -> bool|
@@ -907,7 +909,7 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         (47000.0..49000.0).contains(&rate),
         "native playback test producer clock drifted",
     )?;
-    host.output(output(0.00425, false));
+    host.output(output(0.00425, false), false);
     wait(&host, &|s| {
         s.observation.level_dbfs.is_some_and(|v| v < -80.0)
     })?;
@@ -917,14 +919,14 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         quiet.root_left > 0.000002 && quiet.root_left < live.root_left * 0.04,
         "precise playback gain was not observed",
     )?;
-    host.output(output(0.5, true));
+    host.output(output(0.5, true), false);
     wait(&host, &|s| s.observation.level_dbfs == Some(-96.0))?;
     let _ = measure(&mut observer, 200)?;
     require(
         measure(&mut observer, 400)?.peak < 0.0000001,
         "playback mute failed",
     )?;
-    host.output(output(0.5, false));
+    host.output(output(0.5, false), false);
     wait(&host, &|s| {
         s.observation.level_dbfs.is_some_and(|v| v > -55.0)
     })?;
@@ -940,6 +942,7 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         "wasapi:missing-owned-fixture".into(),
         output(1.0, false),
         1,
+        false,
     )?;
     let until = Instant::now() + Duration::from_secs(5);
     while missing.exit.load(Ordering::Acquire) == 0 && Instant::now() < until {
@@ -977,6 +980,7 @@ fn playback_suite(device_id: &str) -> ProbeResult<()> {
         device_id.into(),
         output(0.25, false),
         2,
+        false,
     )?;
     wait(&restarted, &|s| {
         s.connection == Connection::Connected && s.observation.level_dbfs.is_some()

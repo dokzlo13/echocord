@@ -158,13 +158,14 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
   }, []);
   const snapshot = view.snapshot;
   const warning = snapshot?.preferencesWarning;
+  const hasSaveWarning = Boolean(warning);
   const saving = view.pending.includes(
     JSON.stringify({ type: "retry-preferences" }),
   );
   const previousWarning = useRef(false);
   const [saveAnnouncement, setSaveAnnouncement] = useState("");
   useEffect(() => {
-    if (warning)
+    if (hasSaveWarning)
       setSaveAnnouncement(
         "Changes apply now, but are not saved for next time.",
       );
@@ -178,8 +179,8 @@ export function App({ adapter }: { adapter: ControlAdapter }) {
         target?.focus();
       });
     }
-    previousWarning.current = Boolean(warning);
-  }, [warning]);
+    previousWarning.current = hasSaveWarning;
+  }, [hasSaveWarning]);
   const retrySave = async () => {
     setSaveAnnouncement("");
     await adapter.dispatch({ type: "retry-preferences" });

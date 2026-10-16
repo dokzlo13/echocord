@@ -384,6 +384,9 @@ pub struct ControlSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub preferences_warning: Option<AppError>,
+    /// A bounded background writer is saving the latest live setup.
+    #[serde(default)]
+    pub preferences_saving: bool,
     #[serde(default)]
     pub telemetry: MixTelemetry,
     pub revision: u32,
@@ -413,6 +416,7 @@ struct ControlEventKey<'a> {
     destinations: &'a [DestinationStrip],
     settings: &'a AppSettings,
     preferences_warning: &'a Option<AppError>,
+    preferences_saving: bool,
     sources: &'a [RecordingSource],
     servers: &'a [Server],
     selection: &'a Selection,
@@ -439,6 +443,7 @@ impl ControlSnapshot {
             destinations,
             settings,
             preferences_warning,
+            preferences_saving,
             sources,
             servers,
             selection,
@@ -468,6 +473,7 @@ impl ControlSnapshot {
             destinations,
             settings,
             preferences_warning,
+            preferences_saving: *preferences_saving,
             sources,
             servers,
             selection,
@@ -499,6 +505,7 @@ impl Default for ControlSnapshot {
             destinations: Vec::new(),
             settings: AppSettings::default(),
             preferences_warning: None,
+            preferences_saving: false,
             telemetry: MixTelemetry::default(),
             revision: 0,
             session_id: 0,

@@ -200,7 +200,7 @@ pub async fn run_worker() -> Result<(), Failure> {
             _=stop_rx.changed()=>break,
             _=event_rx.changed()=>break,
             changed=output_rx.changed()=>{if changed.is_err(){break;} let output=output_rx.borrow_and_update().clone();if let Some(capture)=&capture {capture.set_linear_output(output.volume_linear.unwrap_or(output.volume_percent as f32/100.0),output.muted);}},
-            _=tick.tick()=>{if let Some(capture)=&capture {let _=statuses.try_send(VoiceStatus::Meter {capture:protocol::clean_capture(capture.snapshot())});}}
+            _=tick.tick()=>{if let Some(capture)=&capture {let (snapshot, observed_at_ms)=capture.snapshot_with_observation();let _=statuses.try_send(VoiceStatus::Meter {capture:protocol::clean_capture(snapshot), observed_at_ms});}}
         }
     }
     // Decide before cleanup emits its own End/Disconnect events. Explicit Stop

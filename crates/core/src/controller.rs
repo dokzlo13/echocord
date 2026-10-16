@@ -130,7 +130,7 @@ fn busy() -> AppError {
 fn cleanup_error() -> AppError {
     error(
         ErrorCode::CleanupIncomplete,
-        "Engine exit could not be confirmed. Quit and restart the application.",
+        "Engine exit could not be confirmed. Choose Quit from the tray, then reopen Echocord.",
     )
 }
 
@@ -704,6 +704,7 @@ struct Actor {
     #[cfg(windows)]
     audio: Option<crate::mixing::AudioHost>,
     audio_failed: bool,
+    audio_observed_sources: std::collections::BTreeMap<String, String>,
     next_strip: u64,
     config: ControllerConfig,
     snapshot: ControlSnapshot,
@@ -743,6 +744,7 @@ impl Actor {
             #[cfg(windows)]
             audio: None,
             audio_failed: false,
+            audio_observed_sources: std::collections::BTreeMap::new(),
             next_strip: 1,
             config,
             snapshot: ControlSnapshot::default(),
@@ -759,6 +761,20 @@ impl Actor {
         }
     }
     fn publish(&mut self) {
+        self.snapshot.telemetry.clock_ms = crate::audio::observation_clock_ms();
+        self.snapshot.telemetry.inputs.retain(|meter| {
+            self.snapshot.inputs.iter().any(|input| {
+                input.strip_id == meter.strip_id
+                    && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                    && self.audio_observed_sources.get(&input.strip_id) == Some(&input.source_id)
+            })
+        });
+        self.audio_observed_sources.retain(|id, source| {
+            self.snapshot
+                .inputs
+                .iter()
+                .any(|input| &input.strip_id == id && &input.source_id == source)
+        });
         self.snapshot.selection.source_id = self
             .snapshot
             .inputs
@@ -798,6 +814,7 @@ impl Actor {
             self.snapshot.capture = ControlSnapshot::default().capture;
         }
         self.snapshot.telemetry.gateway_ping_ms = self.discord.ping;
+        self.snapshot.telemetry.gateway_observed_at_ms = self.discord.ping_observed_at_ms;
         self.snapshot.telemetry.output_level_dbfs = self.snapshot.capture.output_level_dbfs;
         self.snapshot.telemetry.queued_frames = self.snapshot.capture.queued_frames;
         self.snapshot.telemetry.dropped_frames = self.snapshot.capture.dropped_frames;
@@ -1229,25 +1246,87 @@ impl Actor {
                     ));
                 }
                 self.snapshot.telemetry.inputs.clear();
+                self.snapshot.telemetry.mix_observed_at_ms = None;
+                self.snapshot.telemetry.mix_pre_clip = false;
                 // Network worker remains owned; the dead producer yields paced silence.
                 self.publish();
             } else if let Some(observation) = audio.snapshot() {
-                for observed in observation.inputs {
-                    if let Some(input) = self.snapshot.inputs.iter_mut().find(|i| {
-                        i.strip_id == observed.strip_id && i.source_id == observed.source_id
-                    }) && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
-                    {
-                        input.phase = observed.phase;
-                        input.fault = observed.fault;
-                        input.restored = observed.restored;
-                    }
-                }
-                self.snapshot.telemetry.mix_pre_clip = observation.mix_pre_clip;
-                self.snapshot.telemetry.inputs = observation.telemetry;
-                self.publish();
+                let expected_revision = audio.revision();
+                self.accept_audio_observation(observation, expected_revision);
             }
         }
     }
+    #[cfg(any(windows, test))]
+    fn accept_audio_observation(
+        &mut self,
+        observation: crate::mixing::AudioSnapshot,
+        expected_revision: u64,
+    ) {
+        let now = crate::audio::observation_clock_ms();
+        let observed_at_ms = crate::audio::clean_observation_time(observation.observed_at_ms, now);
+        if observation.revision == expected_revision {
+            for observed in &observation.inputs {
+                if let Some(input) = self.snapshot.inputs.iter_mut().find(|input| {
+                    input.strip_id == observed.strip_id && input.source_id == observed.source_id
+                }) && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+                {
+                    input.phase = observed.phase.clone();
+                    input.fault = observed.fault.clone();
+                    input.restored = observed.restored;
+                }
+            }
+        }
+        if observed_at_ms.is_none() {
+            self.snapshot.telemetry.mix_observed_at_ms = None;
+            self.snapshot.telemetry.mix_pre_clip = false;
+            self.snapshot.telemetry.inputs.clear();
+            self.publish();
+            return;
+        }
+        if self
+            .snapshot
+            .telemetry
+            .mix_observed_at_ms
+            .is_some_and(|old| observed_at_ms.unwrap() < old)
+        {
+            return;
+        }
+        self.snapshot.telemetry.mix_pre_clip = observation.mix_pre_clip;
+        self.snapshot.telemetry.mix_observed_at_ms = observed_at_ms;
+        let mut telemetry = Vec::with_capacity(observation.telemetry.len().min(MAX_INPUTS));
+        for mut meter in observation.telemetry.into_iter().take(MAX_INPUTS) {
+            let Some(observed) = observation
+                .inputs
+                .iter()
+                .find(|input| input.strip_id == meter.strip_id)
+            else {
+                continue;
+            };
+            if !self.snapshot.inputs.iter().any(|input| {
+                input.strip_id == observed.strip_id
+                    && input.source_id == observed.source_id
+                    && matches!(input.phase, InputPhase::Opening | InputPhase::Capturing)
+            }) {
+                continue;
+            }
+            meter.observed_at_ms =
+                crate::audio::clean_observation_time(meter.observed_at_ms, observed_at_ms.unwrap());
+            if meter.observed_at_ms.is_none() {
+                meter.level_dbfs = None;
+                meter.pre_clip = false;
+            }
+            meter.level_dbfs = meter
+                .level_dbfs
+                .filter(|level| level.is_finite())
+                .map(|level| level.clamp(-96.0, 0.0));
+            self.audio_observed_sources
+                .insert(observed.strip_id.clone(), observed.source_id.clone());
+            telemetry.push(meter);
+        }
+        self.snapshot.telemetry.inputs = telemetry;
+        self.publish();
+    }
+
     fn source_for_add(
         &self,
         source_id: &str,
@@ -2071,12 +2150,22 @@ impl Actor {
                         .telemetry
                         .destinations
                         .push(DestinationTelemetry {
-                            observed_at_ms: None,
+                            observed_at_ms: crate::audio::clean_observation_time(
+                                value.observed_at_ms,
+                                crate::audio::observation_clock_ms(),
+                            ),
                             gateway_observed_at_ms: None,
                             destination_id: id.clone(),
                             session_id: runtime.session_id,
                             level_dbfs: value
                                 .level_dbfs
+                                .filter(|_| {
+                                    crate::audio::clean_observation_time(
+                                        value.observed_at_ms,
+                                        crate::audio::observation_clock_ms(),
+                                    )
+                                    .is_some()
+                                })
                                 .filter(|v| v.is_finite())
                                 .map(|v| v.clamp(-96.0, 0.0)),
                             queued_frames: value.queued_frames,
@@ -2100,7 +2189,7 @@ impl Actor {
                             Connection::CleanupIncomplete { .. }
                         )
                     {
-                        self.snapshot.destinations[index].connection = Connection::CleanupIncomplete { message: "Playback output cleanup could not be confirmed. Restart Echocord.".into() };
+                        self.snapshot.destinations[index].connection = Connection::CleanupIncomplete { message: "Playback output cleanup could not be confirmed. Choose Quit from the tray, then reopen Echocord.".into() };
                         changed = true;
                     }
                 } else if exit == 1 {
@@ -3012,6 +3101,67 @@ mod tests {
         actor.snapshot.discovery = Discovery::Ready;
         actor.snapshot.session_id = 4;
         actor
+    }
+
+    #[test]
+    fn control_publications_preserve_origins_and_pending_faders_do_not_starve_meters() {
+        let mut a = actor();
+        let input = InputStrip {
+            strip_id: "input-1".into(),
+            source_id: "fixture-source".into(),
+            display_name: "Fixture".into(),
+            kind: SourceKind::Recording,
+            detail: None,
+            phase: InputPhase::Capturing,
+            fault: None,
+            gain_db: Some(-6.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        };
+        a.snapshot.inputs.push(input.clone());
+        let report = |source: &InputStrip, revision| crate::mixing::AudioSnapshot {
+            observed_at_ms: Some(0.0),
+            revision,
+            inputs: vec![source.clone()],
+            mix_pre_clip: true,
+            telemetry: vec![InputTelemetry {
+                observed_at_ms: Some(0.0),
+                strip_id: source.strip_id.clone(),
+                level_dbfs: Some(-24.0),
+                pre_clip: false,
+                dropped_frames: 1,
+                underrun_frames: 2,
+                queued_frames: 240,
+            }],
+        };
+        let mut old_control = input.clone();
+        old_control.phase = InputPhase::Fault;
+        old_control.fault = Some(Failure::Capture.error());
+        for expected in 2..30 {
+            a.accept_audio_observation(report(&old_control, 1), expected);
+            assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Capturing);
+            assert_eq!(a.snapshot.telemetry.inputs[0].level_dbfs, Some(-24.0));
+        }
+        let before = a.snapshot.telemetry.clone();
+        for muted in [true, false, true] {
+            a.command(ControlCommand::SetMuted { muted }).unwrap();
+            assert_eq!(a.snapshot.telemetry.inputs, before.inputs);
+            assert_eq!(
+                a.snapshot.telemetry.mix_observed_at_ms,
+                before.mix_observed_at_ms
+            );
+        }
+        a.snapshot.inputs[0].source_id = "replacement".into();
+        a.publish();
+        assert!(a.snapshot.telemetry.inputs.is_empty());
+        a.accept_audio_observation(report(&input, 30), 30);
+        assert!(a.snapshot.telemetry.inputs.is_empty());
+        let current = a.snapshot.inputs[0].clone();
+        a.snapshot.inputs[0].phase = InputPhase::Stopped;
+        a.accept_audio_observation(report(&current, 31), 31);
+        assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Stopped);
+        assert!(a.snapshot.telemetry.inputs.is_empty());
     }
 
     fn await_preferences(actor: &mut Actor) {
@@ -4054,8 +4204,10 @@ mod tests {
         peer.muted = true;
         let peer = peer.clone();
         assert_eq!(peer.colour_slot, 1);
+        a.audio_observed_sources
+            .insert(peer.strip_id.clone(), peer.source_id.clone());
         a.snapshot.telemetry.inputs.push(InputTelemetry {
-            observed_at_ms: None,
+            observed_at_ms: Some(0.0),
             strip_id: peer.strip_id.clone(),
             level_dbfs: Some(-21.0),
             pre_clip: false,

@@ -38,6 +38,16 @@ pub fn clamp_mix(mix: &mut [[f32; 2]]) {
     }
 }
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AudioSnapshot {
+    pub observed_at_ms: Option<f64>,
+    pub mix_pre_clip: bool,
+    pub revision: u64,
+    pub inputs: Vec<InputStrip>,
+    pub telemetry: Vec<InputTelemetry>,
+}
+
 /// Retain identifiers and meter hold state between 5 ms blocks. Owned telemetry
 /// is cloned only for the 100 ms publication boundary.
 #[cfg(any(windows, test))]
@@ -65,6 +75,7 @@ impl SourceMeters {
         let held = self.held.get_or_insert((-96.0, false));
         held.0 = held.0.max(level);
         held.1 |= pre_clip;
+        self.latest.observed_at_ms = Some(crate::audio::observation_clock_ms());
         self.latest.level_dbfs = Some(held.0);
         self.latest.pre_clip = held.1;
         self.latest.dropped_frames = dropped;
@@ -76,6 +87,7 @@ impl SourceMeters {
     }
     fn unavailable(&mut self) {
         self.held = None;
+        self.latest.observed_at_ms = None;
         self.latest.level_dbfs = None;
         self.latest.pre_clip = false;
         self.latest.dropped_frames = 0;
@@ -114,13 +126,6 @@ mod native {
             inputs: Vec<InputStrip>,
         },
         Stop,
-    }
-    #[derive(Clone, Default, Serialize, Deserialize)]
-    pub struct AudioSnapshot {
-        pub mix_pre_clip: bool,
-        pub revision: u64,
-        pub inputs: Vec<InputStrip>,
-        pub telemetry: Vec<InputTelemetry>,
     }
     #[cfg(test)]
     #[test]
@@ -167,6 +172,7 @@ mod native {
             generation: 1,
             sequence: 1,
             body: AudioSnapshot {
+                observed_at_ms: Some(0.0),
                 revision: 1,
                 inputs,
                 telemetry,
@@ -324,7 +330,9 @@ mod native {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
-                .filter(|s| s.revision == self.revision.load(Ordering::Acquire))
+        }
+        pub fn revision(&self) -> u64 {
+            self.revision.load(Ordering::Acquire)
         }
         pub fn stop(&self) {
             request_stop(&self.mailbox);
@@ -345,8 +353,8 @@ mod native {
     }
     fn failure() -> AppError {
         AppError::new(
-            ErrorCode::CaptureFailed,
-            "The native audio worker is unavailable. Restart Echocord.",
+            ErrorCode::EngineStopped,
+            "The native audio worker is unavailable. Choose Quit from the tray, then reopen Echocord.",
         )
     }
 
@@ -456,11 +464,7 @@ mod native {
             ) {
                 input.phase = InputPhase::Fault;
                 input.fault = Some(AppError::new(
-                    if capture.phase == CapturePhase::Missing {
-                        ErrorCode::InvalidSelection
-                    } else {
-                        ErrorCode::CaptureFailed
-                    },
+                    session.control.failure_code(),
                     capture
                         .message
                         .unwrap_or_else(|| "Capture stopped. Select the source again.".into()),
@@ -476,17 +480,70 @@ mod native {
             let mut frames = [[0.0; 2]; 240];
             session.input.drain_frames(&mut frames);
             let level = sum_source(&mut mix, &frames, input.gain_db, input.muted);
-            slot.meters.observe(
-                level,
-                session.control.take_pre_clip(),
-                capture.dropped_frames,
-                capture.underrun_frames,
-                capture.queued_frames,
-            );
+            let pre_clip = session.control.take_pre_clip();
+            if capture.level_dbfs.is_some() {
+                slot.meters.observe(
+                    level,
+                    pre_clip,
+                    capture.dropped_frames,
+                    capture.underrun_frames,
+                    capture.queued_frames,
+                );
+            } else {
+                slot.meters.unavailable();
+                slot.meters.latest.dropped_frames = capture.dropped_frames;
+                slot.meters.latest.underrun_frames = capture.underrun_frames;
+                slot.meters.latest.queued_frames = capture.queued_frames;
+            }
         }
         let pre_clip = mix.iter().flatten().any(|sample| sample.abs() >= 1.0);
         clamp_mix(&mut mix);
         (mix, pre_clip)
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn exited_application_becomes_an_invalid_selection_without_opening_a_device() {
+        let session = audio::bus_capture(|frames| frames.fill([0.0; 2]));
+        session.control.simulate_application_exit();
+        let input = InputStrip {
+            strip_id: "fixture".into(),
+            source_id: "app:42:0000000000000001".into(),
+            display_name: "Owned fixture".into(),
+            kind: SourceKind::Application,
+            detail: None,
+            phase: InputPhase::Capturing,
+            fault: None,
+            gain_db: Some(0.0),
+            muted: false,
+            colour_slot: 0,
+            restored: false,
+        };
+        let mut slots = BTreeMap::from([(
+            "fixture".into(),
+            Slot {
+                source: input.source_id.clone(),
+                desired: Some(input),
+                session: Some(session),
+                operation: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                deadline: None,
+                meters: SourceMeters::new("fixture".into()),
+            },
+        )]);
+        let (done, completed) = mpsc::sync_channel(1);
+        mix_sources(&mut slots, &done);
+        let failed = slots["fixture"].desired.as_ref().unwrap();
+        assert_eq!(failed.phase, InputPhase::Fault);
+        assert_eq!(
+            failed.fault.as_ref().unwrap().code,
+            ErrorCode::InvalidSelection
+        );
+        assert_eq!(failed.source_id, "app:42:0000000000000001");
+        assert!(matches!(
+            completed.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Completed::Stopped(_, true)
+        ));
     }
 
     #[cfg(test)]
@@ -740,6 +797,7 @@ mod native {
             if Instant::now() >= publish {
                 publish = Instant::now() + Duration::from_millis(100);
                 let _ = statuses.try_send(AudioSnapshot {
+                    observed_at_ms: Some(audio::observation_clock_ms()),
                     mix_pre_clip,
                     revision,
                     inputs: slots.values().filter_map(|s| s.desired.clone()).collect(),

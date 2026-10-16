@@ -82,6 +82,8 @@ pub enum GatewayStatus {
         key: RoomKey,
     },
     Ping {
+        #[serde(default)]
+        observed_at_ms: Option<f64>,
         milliseconds: Option<f32>,
     },
     Failed {
@@ -118,8 +120,14 @@ impl fmt::Debug for VoiceCommand {
 pub enum VoiceStatus {
     Connected,
     RefreshRequired,
-    Meter { capture: Capture },
-    Failed { code: Failure },
+    Meter {
+        capture: Capture,
+        #[serde(default)]
+        observed_at_ms: Option<f64>,
+    },
+    Failed {
+        code: Failure,
+    },
     Stopped,
 }
 

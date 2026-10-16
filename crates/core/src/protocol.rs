@@ -270,7 +270,10 @@ mod tests {
                 version: VERSION,
                 generation: 1,
                 sequence: 1,
-                body: Status::Meter { capture },
+                body: Status::Meter {
+                    capture,
+                    observed_at_ms: None,
+                },
             };
             let encoded = encode(&frame).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&encoded).unwrap();

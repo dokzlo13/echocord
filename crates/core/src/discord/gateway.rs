@@ -772,7 +772,9 @@ pub async fn run_worker() -> Result<(), Failure> {
                         if !connected {i.connected=false;let since=*recovering.get_or_insert_with(Instant::now);i.emit(GatewayStatus::Recovery {active:true});if since.elapsed()>Duration::from_secs(35){i.fatal(Failure::Connection);}}
                         else if recovering.take().is_some() {i.connected=true;i.emit(GatewayStatus::Recovery {active:false});let keys=i.correlation.slots.values().filter(|s|!s.wanted&&s.issued&&!s.left()).map(|s|s.key.clone()).collect::<Vec<_>>();for key in keys {i.transmit(&key,false);}}
                     }
-                    let _=statuses.try_send(GatewayStatus::Ping {milliseconds});}
+                    // This timestamps an observation of Serenity's cached RTT, not a new heartbeat ACK.
+                    let observed_at_ms=milliseconds.map(|_|crate::audio::observation_clock_ms());
+                    let _=statuses.try_send(GatewayStatus::Ping {milliseconds,observed_at_ms});}
                 }
             }
             {

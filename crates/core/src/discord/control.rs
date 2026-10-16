@@ -31,6 +31,7 @@ pub struct Room {
     pub session_id: u32,
     pub connection: Connection,
     pub capture: Capture,
+    pub observed_at_ms: Option<f64>,
     pub wanted: bool,
     pub joined: bool,
     pub voice: Option<u32>,
@@ -47,6 +48,7 @@ pub struct Manager {
     pub gateway: GatewaySnapshot,
     pub gateway_alive: bool,
     pub ping: Option<f32>,
+    pub ping_observed_at_ms: Option<f64>,
     pub effects: Vec<Effect>,
     next_intent: u64,
     next_voice: u32,
@@ -63,6 +65,7 @@ impl Default for Manager {
             gateway: GatewaySnapshot::default(),
             gateway_alive: false,
             ping: None,
+            ping_observed_at_ms: None,
             effects: Vec::new(),
             next_intent: 1,
             next_voice: 1,
@@ -131,6 +134,7 @@ impl Manager {
                 stage: ConnectStage::Checking,
             },
             capture: ControlSnapshot::default().capture,
+            observed_at_ms: None,
             wanted: true,
             joined: false,
             voice: None,
@@ -201,6 +205,7 @@ impl Manager {
             room.connection = Connection::Disconnecting;
         }
         room.capture = ControlSnapshot::default().capture;
+        room.observed_at_ms = None;
         if let Some(generation) = room.voice {
             self.effects.push(Effect::StopVoice {
                 destination_id: id.into(),
@@ -252,8 +257,19 @@ impl Manager {
                     );
                 }
             }
-            GatewayStatus::Ping { milliseconds } if !self.failed && !self.stopping => {
+            GatewayStatus::Ping {
+                milliseconds,
+                observed_at_ms,
+            } if !self.failed && !self.stopping => {
+                self.ping_observed_at_ms = crate::audio::clean_observation_time(
+                    observed_at_ms,
+                    crate::audio::observation_clock_ms(),
+                );
                 self.ping = milliseconds.filter(|n| n.is_finite() && (0.0..=60_000.0).contains(n));
+                if self.ping.is_none() || self.ping_observed_at_ms.is_none() {
+                    self.ping = None;
+                    self.ping_observed_at_ms = None;
+                }
             }
             GatewayStatus::Failed { code } => self.gateway_failed(code),
             GatewayStatus::Stopped if !self.stopping => self.gateway_failed(Failure::Connection),
@@ -305,6 +321,7 @@ impl Manager {
                     room.pending = None;
                     room.voice_stopping = true;
                     room.capture = ControlSnapshot::default().capture;
+                    room.observed_at_ms = None;
                     if !matches!(room.connection, Connection::CleanupIncomplete { .. }) {
                         room.connection = Connection::Recovering {
                             attempt: 1,
@@ -354,7 +371,7 @@ impl Manager {
             }
             GatewayStatus::CleanupIncomplete { key } => {
                 if let Some(room) = self.current_mut(&key) {
-                    room.connection=Connection::CleanupIncomplete {message:"Discord has not confirmed this room’s departure. Stop all Discord rooms to reset the gateway.".into()};
+                    room.connection=Connection::CleanupIncomplete {message:"Discord has not confirmed this room’s departure. Disconnect each Discord destination to reset the gateway.".into()};
                 }
             }
             _ => {}
@@ -372,6 +389,7 @@ impl Manager {
         self.failed = true;
         self.ready = false;
         self.ping = None;
+        self.ping_observed_at_ms = None;
         self.gateway.phase = GatewayPhase::Error;
         self.gateway.message = Some(code.error().message);
         let ids = self.rooms.keys().cloned().collect::<Vec<_>>();
@@ -397,6 +415,7 @@ impl Manager {
         self.ready = false;
         self.stopping = false;
         self.ping = None;
+        self.ping_observed_at_ms = None;
         if !self.failed {
             let uncertain = self.rooms.values().any(|r| r.joined && !r.remote_left);
             self.gateway.phase = if uncertain {
@@ -420,13 +439,22 @@ impl Manager {
                 room.since = Instant::now();
                 room.connection = Connection::Connected;
             }
-            VoiceStatus::Meter { capture }
-                if matches!(
-                    room.connection,
-                    Connection::Connected | Connection::Recovering { .. }
-                ) =>
+            VoiceStatus::Meter {
+                capture,
+                observed_at_ms,
+            } if matches!(
+                room.connection,
+                Connection::Connected | Connection::Recovering { .. }
+            ) =>
             {
-                room.capture = clean_capture(capture)
+                room.observed_at_ms = crate::audio::clean_observation_time(
+                    observed_at_ms,
+                    crate::audio::observation_clock_ms(),
+                );
+                room.capture = clean_capture(capture);
+                if room.observed_at_ms.is_none() {
+                    room.capture.output_level_dbfs = None;
+                }
             }
             VoiceStatus::RefreshRequired => {
                 let now = Instant::now();
@@ -448,6 +476,7 @@ impl Manager {
                 room.voice_stopping = true;
                 room.pending = None;
                 room.capture = ControlSnapshot::default().capture;
+                room.observed_at_ms = None;
                 room.connection = Connection::Recovering {
                     attempt: room
                         .refreshes
@@ -485,6 +514,7 @@ impl Manager {
         }
         room.voice = None;
         room.capture = ControlSnapshot::default().capture;
+        room.observed_at_ms = None;
         if room.wanted && !room.voice_stopping && room.pending.is_none() {
             self.stop(id, Some(Failure::Connection.error()));
         }
@@ -607,8 +637,10 @@ impl Manager {
             });
             let capture = active.map(|r| &r.capture);
             let measured = DestinationTelemetry {
-                observed_at_ms: None,
-                gateway_observed_at_ms: None,
+                observed_at_ms: active.and_then(|room| room.observed_at_ms),
+                gateway_observed_at_ms: active
+                    .filter(|room| room.wanted)
+                    .and(self.ping_observed_at_ms),
                 destination_id: d.destination_id.clone(),
                 session_id: d.session_id,
                 level_dbfs: capture.and_then(|c| c.output_level_dbfs),
@@ -702,6 +734,51 @@ mod tests {
         m.voice_status(id, generation, VoiceStatus::Connected);
         m.effects.clear();
         (key, generation)
+    }
+
+    #[test]
+    fn room_and_gateway_measurements_keep_independent_origins_across_publication() {
+        let mut manager = Manager::default();
+        let (_, generation) = active(&mut manager, "discord-1", "1");
+        let mut capture = ControlSnapshot::default().capture;
+        capture.phase = CapturePhase::Running;
+        capture.output_level_dbfs = Some(-24.0);
+        manager.voice_status(
+            "discord-1",
+            generation,
+            VoiceStatus::Meter {
+                capture,
+                observed_at_ms: Some(0.0),
+            },
+        );
+        let ping_at = crate::audio::observation_clock_ms();
+        manager.gateway_status(
+            manager.gateway.generation,
+            GatewayStatus::Ping {
+                milliseconds: Some(42.0),
+                observed_at_ms: Some(ping_at),
+            },
+        );
+        let mut snapshot = ControlSnapshot::default();
+        snapshot.destinations.push(destination("discord-1", "1"));
+        manager.publish(&mut snapshot);
+        let measured = snapshot.telemetry.destinations[0].clone();
+        assert_eq!(measured.observed_at_ms, Some(0.0));
+        assert_eq!(measured.gateway_observed_at_ms, Some(ping_at));
+        for _ in 0..10 {
+            manager.publish(&mut snapshot);
+            assert_eq!(snapshot.telemetry.destinations[0], measured);
+        }
+        manager.gateway_status(
+            manager.gateway.generation,
+            GatewayStatus::Ping {
+                milliseconds: Some(10.0),
+                observed_at_ms: Some(f64::NAN),
+            },
+        );
+        assert_eq!(manager.ping, None);
+        assert_eq!(manager.ping_observed_at_ms, None);
+        assert_eq!(manager.rooms["discord-1"].observed_at_ms, Some(0.0));
     }
     #[test]
     fn concurrent_rooms_share_one_gateway_and_stop_requires_both_receipts() {

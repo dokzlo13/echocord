@@ -46,10 +46,36 @@ const MISSING: u8 = 3;
 const FAILED: u8 = 4;
 const DENIED: u8 = 5;
 const ROUTE_CHANGED: u8 = 6;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const APPLICATION_EXITED: u8 = 7;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const CLEANUP_FAILED: u8 = 8;
+
+pub(crate) fn observation_clock_ms() -> f64 {
+    #[cfg(windows)]
+    let milliseconds = crate::mix_bus::now_ms() as f64;
+    #[cfg(not(windows))]
+    let milliseconds = {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            * 1000.0
+    };
+    milliseconds.min(9_007_199_254_740_991.0)
+}
+
+/// Accept only finite JS-safe milliseconds from the shared clock. One ms of
+/// tolerance covers integer clock quantization; future measurements stay absent.
+pub(crate) fn clean_observation_time(value: Option<f64>, now_ms: f64) -> Option<f64> {
+    value.filter(|value| {
+        value.is_finite()
+            && (0.0..=9_007_199_254_740_991.0).contains(value)
+            && now_ms.is_finite()
+            && *value <= now_ms + 1.0
+    })
+}
 
 /// PCM and its independently cloneable control handle. Capture opens only in
 /// `start_capture`; enumeration never opens a stream.
@@ -65,6 +91,18 @@ pub struct CaptureControl {
 }
 
 impl CaptureControl {
+    #[cfg(all(windows, test))]
+    pub(crate) fn simulate_application_exit(&self) {
+        self.owner.shared.fail(APPLICATION_EXITED);
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn failure_code(&self) -> crate::model::ErrorCode {
+        match self.owner.shared.status.load(Ordering::Acquire) {
+            APPLICATION_EXITED | MISSING => crate::model::ErrorCode::InvalidSelection,
+            CLEANUP_FAILED => crate::model::ErrorCode::CleanupIncomplete,
+            _ => crate::model::ErrorCode::CaptureFailed,
+        }
+    }
     /// Idempotently cancel reads and reject future callback frames, then release
     /// the native stream. CPAL stream destruction can join its native thread;
     /// the parent engine-process exit deadline remains the shutdown guarantee.
@@ -168,6 +206,10 @@ impl CaptureControl {
     /// peak held for at most 200 ms over completed post-gain reader frames.
     /// Counts are stereo frames and saturate at u32::MAX. Occupancy is approximate.
     pub fn snapshot(&self) -> Capture {
+        self.snapshot_with_observation().0
+    }
+
+    pub(crate) fn snapshot_with_observation(&self) -> (Capture, Option<f64>) {
         let shared = &self.owner.shared;
         let status = shared.status.load(Ordering::Acquire);
         let (phase, message) = match status {
@@ -186,17 +228,19 @@ impl CaptureControl {
                 CapturePhase::Error,
                 Some("The capture route changed. Select the recording device again."),
             ),
-            #[cfg(windows)]
+            #[cfg(any(windows, test))]
             APPLICATION_EXITED => (
-                CapturePhase::Error,
+                CapturePhase::Missing,
                 Some(
                     "The selected application exited. Refresh sources and select its new instance.",
                 ),
             ),
-            #[cfg(windows)]
+            #[cfg(any(windows, test))]
             CLEANUP_FAILED => (
                 CapturePhase::Error,
-                Some("Application capture cleanup did not finish. Disconnect and reconnect."),
+                Some(
+                    "Capture cleanup did not finish. Choose Quit from the tray, then reopen Echocord.",
+                ),
             ),
             _ => (
                 CapturePhase::Error,
@@ -205,39 +249,42 @@ impl CaptureControl {
         };
         let peak_bits = shared.peak_bits.load(Ordering::Acquire);
         let level_dbfs = if status == RUNNING && peak_bits != u32::MAX {
-            let peak = if shared
+            if shared
                 .clock
                 .now()
                 .saturating_sub(shared.last_callback_ns.load(Ordering::Acquire))
                 <= METER_AGE_NS
             {
-                f32::from_bits(peak_bits)
+                Some(peak_dbfs(f32::from_bits(peak_bits)))
             } else {
-                0.0
-            };
-            Some(peak_dbfs(peak))
+                None
+            }
         } else {
             None
         };
         let popped = shared.popped.load(Ordering::Acquire);
         let pushed = shared.pushed.load(Ordering::Acquire);
-        Capture {
-            phase,
-            level_dbfs,
-            output_level_dbfs: if status == RUNNING {
-                shared.output_meter.level(shared)
-            } else {
-                None
+        let output = if status == RUNNING {
+            shared.output_meter.observation(shared)
+        } else {
+            None
+        };
+        (
+            Capture {
+                phase,
+                level_dbfs,
+                output_level_dbfs: output.map(|(level, _)| level),
+                message: message.map(str::to_owned),
+                dropped_frames: count(shared.dropped.load(Ordering::Relaxed)),
+                underrun_frames: count(shared.underrun.load(Ordering::Relaxed)),
+                queued_frames: if status == RUNNING || status == OPENING {
+                    pushed.saturating_sub(popped).min(QUEUE_FRAMES as u64) as u32
+                } else {
+                    0
+                },
             },
-            message: message.map(str::to_owned),
-            dropped_frames: count(shared.dropped.load(Ordering::Relaxed)),
-            underrun_frames: count(shared.underrun.load(Ordering::Relaxed)),
-            queued_frames: if status == RUNNING || status == OPENING {
-                pushed.saturating_sub(popped).min(QUEUE_FRAMES as u64) as u32
-            } else {
-                0
-            },
-        }
+            output.map(|(_, observed)| observed),
+        )
     }
 }
 
@@ -262,29 +309,35 @@ struct OutputMeter {
     sequence: AtomicU64,
     peak_bits: AtomicU32,
     peak_ns: AtomicU64,
+    completed_ns: AtomicU64,
+    observed_at_ms: AtomicU64,
     output: AtomicU64,
 }
 
 impl OutputMeter {
-    fn publish(&self, peak: ReaderPeak) {
+    fn publish(&self, peak: ReaderPeak, completed_ns: Option<u64>) {
         self.sequence.fetch_add(1, Ordering::SeqCst);
         self.peak_bits.store(peak.value.to_bits(), Ordering::SeqCst);
         self.peak_ns.store(peak.ns, Ordering::SeqCst);
+        if let Some(completed) = completed_ns {
+            self.completed_ns.store(completed, Ordering::SeqCst);
+            self.observed_at_ms
+                .store(observation_clock_ms().floor() as u64, Ordering::SeqCst);
+        }
         self.output.store(peak.output, Ordering::SeqCst);
         self.sequence.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn level(&self, shared: &Shared) -> Option<f32> {
+    fn observation(&self, shared: &Shared) -> Option<(f32, f64)> {
         let output = shared.output.load(Ordering::Acquire);
-        if output & MUTED != 0 {
-            return Some(SILENCE_DBFS);
-        }
         let sequence = self.sequence.load(Ordering::SeqCst);
         if sequence == 0 || sequence & 1 != 0 {
             return None;
         }
         let peak = f32::from_bits(self.peak_bits.load(Ordering::SeqCst));
         let ns = self.peak_ns.load(Ordering::SeqCst);
+        let completed = self.completed_ns.load(Ordering::SeqCst);
+        let observed_at_ms = self.observed_at_ms.load(Ordering::SeqCst);
         let observed_output = self.output.load(Ordering::SeqCst);
         if sequence != self.sequence.load(Ordering::SeqCst)
             || output != observed_output
@@ -292,11 +345,9 @@ impl OutputMeter {
         {
             return None;
         }
-        Some(if shared.clock.now().saturating_sub(ns) <= METER_AGE_NS {
-            peak_dbfs(peak)
-        } else {
-            SILENCE_DBFS
-        })
+        let now = shared.clock.now();
+        (now.saturating_sub(ns) <= METER_AGE_NS && now.saturating_sub(completed) <= METER_AGE_NS)
+            .then(|| (peak_dbfs(peak), observed_at_ms as f64))
     }
 }
 
@@ -459,6 +510,7 @@ impl Reader {
         }
         let limit = buf.len().min(QUANTUM_FRAMES * FRAME_BYTES);
         let mut written = 0;
+        let mut completed = false;
         // Even if the producer keeps filling during discard, a read examines
         // at most one queue capacity. No drain-until-empty callback race.
         let mut pop_budget = QUEUE_FRAMES;
@@ -492,6 +544,7 @@ impl Reader {
             self.pending_pos += n;
             written += n;
             if self.pending_pos == FRAME_BYTES {
+                completed = true;
                 let peak = self.pending_peak;
                 if peak.output == shared.output.load(Ordering::Acquire)
                     && self.output_peak.is_none_or(|held| {
@@ -505,7 +558,11 @@ impl Reader {
             }
         }
         if let Some(peak) = self.output_peak {
-            shared.output_meter.publish(peak);
+            let now = shared.clock.now();
+            shared.output_meter.publish(
+                peak,
+                (completed && now.saturating_sub(peak.ns) <= METER_AGE_NS).then_some(now),
+            );
         }
         self.position = self.position.saturating_add(written as u64);
         Ok(written)
@@ -1197,6 +1254,63 @@ mod tests {
     }
 
     #[test]
+    fn application_exit_and_unconfirmed_cleanup_have_distinct_retry_policy() {
+        let (writer, session, _) = setup();
+        writer.shared.fail(APPLICATION_EXITED);
+        assert_eq!(session.control.snapshot().phase, CapturePhase::Missing);
+        assert_eq!(
+            session.control.failure_code(),
+            crate::model::ErrorCode::InvalidSelection
+        );
+        let (writer, session, _) = setup();
+        writer.shared.fail(CLEANUP_FAILED);
+        assert_eq!(
+            session.control.failure_code(),
+            crate::model::ErrorCode::CleanupIncomplete
+        );
+        assert!(
+            session
+                .control
+                .snapshot()
+                .message
+                .unwrap()
+                .contains("Quit from the tray")
+        );
+    }
+
+    #[test]
+    fn reader_observation_origin_is_stable_until_real_handoff_and_stale_is_unavailable() {
+        let (mut writer, mut session, clock) = setup();
+        feed(&mut writer, 2, 0.25, -0.5);
+        frames(&mut session.input, 1);
+        let first = session.control.snapshot_with_observation();
+        assert!(first.1.is_some());
+        assert_eq!(session.control.snapshot_with_observation().1, first.1);
+        session.input.read_exact(&mut [0; 1]).unwrap();
+        assert_eq!(session.control.snapshot_with_observation().1, first.1);
+        clock.ns.store(METER_AGE_NS + 1, Ordering::Relaxed);
+        let stale = session.control.snapshot_with_observation();
+        assert_eq!(stale.0.level_dbfs, None);
+        assert_eq!(stale.0.output_level_dbfs, None);
+        assert_eq!(stale.1, None);
+    }
+
+    #[test]
+    fn observation_times_reject_nonfinite_negative_future_and_unsafe_values() {
+        for time in [
+            f64::NAN,
+            f64::INFINITY,
+            -1.0,
+            1000.0,
+            9_007_199_254_740_992.0,
+        ] {
+            assert_eq!(clean_observation_time(Some(time), 10.0), None);
+        }
+        assert_eq!(clean_observation_time(Some(0.0), 10.0), Some(0.0));
+        assert_eq!(clean_observation_time(Some(10.0), 10.0), Some(10.0));
+    }
+
+    #[test]
     fn discontinuity_epoch_discards_queued_previous_signal() {
         let (mut writer, mut session, _) = setup();
         feed(&mut writer, 100, 0.9, -0.9);
@@ -1687,10 +1801,7 @@ mod tests {
         feed(&mut writer, 960, 0.5, -0.25);
         session.control.set_output(25, true);
         feed(&mut writer, 960, 0.75, -0.5);
-        assert_eq!(
-            session.control.snapshot().output_level_dbfs,
-            Some(SILENCE_DBFS)
-        );
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
         assert_eq!(session.control.snapshot().queued_frames, 960);
         assert!(
             (session.control.snapshot().level_dbfs.unwrap() - 20.0 * 0.75_f32.log10()).abs()
@@ -1778,10 +1889,7 @@ mod tests {
         assert_eq!(session.control.snapshot().output_level_dbfs, Some(0.0));
         frames(&mut session.input, 1);
         clock.ns.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(
-            session.control.snapshot().output_level_dbfs,
-            Some(SILENCE_DBFS)
-        );
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
         feed(&mut writer, 1, -0.25, 0.125);
         frames(&mut session.input, 1);
         assert_eq!(
@@ -1842,10 +1950,7 @@ mod tests {
         session.input.read_exact(&mut [0; 1]).unwrap();
         clock.ns.store(METER_AGE_NS + 1, Ordering::Relaxed);
         session.input.read_exact(&mut [0; 7]).unwrap();
-        assert_eq!(
-            session.control.snapshot().output_level_dbfs,
-            Some(SILENCE_DBFS)
-        );
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
     }
 
     #[test]
@@ -1855,10 +1960,7 @@ mod tests {
         frames(&mut session.input, 1);
         session.input.read_exact(&mut [0; 3]).unwrap();
         session.control.set_output(100, true);
-        assert_eq!(
-            session.control.snapshot().output_level_dbfs,
-            Some(SILENCE_DBFS)
-        );
+        assert_eq!(session.control.snapshot().output_level_dbfs, None);
         session.control.set_output(100, false);
         assert_eq!(session.control.snapshot().output_level_dbfs, None);
         session.input.read_exact(&mut [0; 5]).unwrap();
@@ -1895,7 +1997,7 @@ mod tests {
         session.control.set_output(255, false);
         assert_eq!(frames(&mut session.input, 1), vec![[0.5, -1.0]]);
         clock.ns.store(METER_AGE_NS + 1, Ordering::Relaxed);
-        assert_eq!(session.control.snapshot().level_dbfs, Some(-96.0));
+        assert_eq!(session.control.snapshot().level_dbfs, None);
     }
 
     #[test]

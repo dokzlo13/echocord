@@ -12,6 +12,8 @@ use std::sync::{
 const MUTED: u64 = 1 << 32;
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RenderObservation {
+    #[serde(default)]
+    pub observed_at_ms: Option<f64>,
     pub level_dbfs: Option<f32>,
     pub queued_frames: u32,
     pub dropped_frames: u32,
@@ -67,10 +69,14 @@ impl RenderControl {
             && sequence == self.meter_sequence.load(SeqCst)
             && output == self.output.load(SeqCst)
             && !self.stopped.load(SeqCst)
-            && !self.failed.load(SeqCst);
+            && !self.failed.load(SeqCst)
+            && now_ms.saturating_sub(measured) <= 200;
+        let observed_at_ms =
+            crate::audio::clean_observation_time(valid.then_some(measured as f64), now_ms as f64);
         RenderObservation {
-            level_dbfs: valid.then(|| {
-                if now_ms.saturating_sub(measured) > 200 || peak == 0.0 {
+            observed_at_ms,
+            level_dbfs: observed_at_ms.map(|_| {
+                if peak == 0.0 {
                     -96.0
                 } else {
                     (20.0 * peak.log10()).max(-96.0)
@@ -192,6 +198,23 @@ pub use native::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn callback_timestamp_is_not_refreshed_by_status_polling() {
+        let bus = Bus::test_bus();
+        let control = Arc::new(RenderControl::default());
+        control.set_output(1.0, false);
+        let mut renderer = Renderer::attach(&bus, control.clone());
+        bus.write(&[[0.25, -0.5]; 240], 100);
+        renderer.render(&bus, &mut [0.0; 480], 100, |sample| sample);
+        assert_eq!(control.snapshot(150).observed_at_ms, Some(100.0));
+        assert_eq!(control.snapshot(200).observed_at_ms, Some(100.0));
+        assert_eq!(control.snapshot(301).observed_at_ms, None);
+        assert_eq!(control.snapshot(301).level_dbfs, None);
+        bus.write(&[[0.0; 2]; 240], 302);
+        renderer.render(&bus, &mut [0.0; 480], 302, |sample| sample);
+        assert_eq!(control.snapshot(302).observed_at_ms, Some(302.0));
+        assert_eq!(control.snapshot(302).level_dbfs, Some(-96.0));
+    }
     #[test]
     fn independent_callbacks_apply_precise_gain_mute_and_do_not_replay_at_attach() {
         let bus = Bus::test_bus();

@@ -290,6 +290,141 @@ mod tests {
         bus.read(&mut cursor, &mut frames, 3);
         assert_eq!(frames, [[0.1, -0.2]; 240]);
     }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct SimulatedReader {
+        cursor: u64,
+        last_sample: u64,
+        hash: u64,
+        received: u64,
+        dropped: u64,
+        underrun: u64,
+        max_queued: u32,
+        final_queued: u32,
+        stale_silence_callbacks: u32,
+    }
+
+    // A virtual-clock harness for the real Bus implementation. It models a
+    // 5 ms writer, independent 10 ms readers, deterministic scheduling jitter,
+    // clock skew, a 60 ms producer stall and an optional 80 ms reader stall.
+    // This exercises transport policy, not Windows scheduling or audibility.
+    fn simulate(skew_ppm: i64, producer_stall: bool, reader_stall: bool) -> [SimulatedReader; 2] {
+        let bus = bus();
+        let mut readers = std::array::from_fn(|_| SimulatedReader::default());
+        let mut next_writer = 0;
+        let mut writer_tick = 0u64;
+        let mut next_reader = [10_000_000u64; 2];
+        let periods = [
+            (10_000_000_000_000i64 / (1_000_000 + skew_ppm)) as u64,
+            10_000_000,
+        ];
+        let mut sample = 0u64;
+        let mut reader_paused = false;
+        loop {
+            let now = next_writer.min(next_reader[0]).min(next_reader[1]);
+            if now > 60_000_000_000 {
+                break;
+            }
+            if now == next_writer {
+                if !producer_stall || !(5_000_000_000..5_060_000_000).contains(&now) {
+                    let frames: [[f32; 2]; 240] = std::array::from_fn(|_| {
+                        sample += 1;
+                        // Exact integer markers are valid finite Bus samples;
+                        // opposite channels detect tearing and channel swaps.
+                        [sample as f32, -(sample as f32)]
+                    });
+                    bus.write(&frames, now / 1_000_000);
+                }
+                writer_tick += 1;
+                next_writer = writer_tick * 5_000_000
+                    + if writer_tick.is_multiple_of(13) {
+                        2_000_000
+                    } else {
+                        0
+                    };
+            }
+            for index in 0..2 {
+                if now != next_reader[index] {
+                    continue;
+                }
+                if index == 0 && reader_stall && !reader_paused && now >= 10_000_000_000 {
+                    next_reader[index] += 80_000_000;
+                    reader_paused = true;
+                    continue;
+                }
+                let reader = &mut readers[index];
+                let mut frames = [[0.0; 2]; 480];
+                let stats = bus.read_counted(&mut reader.cursor, &mut frames, now / 1_000_000);
+                reader.dropped += u64::from(stats.dropped_frames);
+                reader.underrun += u64::from(stats.underrun_frames);
+                reader.max_queued = reader.max_queued.max(stats.queued_frames);
+                reader.final_queued = stats.queued_frames;
+                assert!(stats.queued_frames as usize <= CAPACITY);
+                assert!(reader.cursor <= bus.cursor());
+                if producer_stall && (5_045_000_000..5_060_000_000).contains(&now) {
+                    assert!(frames.iter().all(|frame| *frame == [0.0; 2]));
+                    reader.stale_silence_callbacks += 1;
+                }
+                for frame in frames {
+                    assert_eq!(frame[0], -frame[1]);
+                    if frame[0] != 0.0 {
+                        let marker = frame[0] as u64;
+                        assert!(marker > reader.last_sample, "overdue samples replayed");
+                        reader.last_sample = marker;
+                        reader.hash = reader.hash.wrapping_mul(16_777_619) ^ marker;
+                        reader.received += 1;
+                    }
+                }
+                next_reader[index] += periods[index];
+            }
+        }
+        for reader in &mut readers {
+            // Compare reader lag at the same virtual instant, rather than at
+            // different last-callback phases within the writer's 5 ms block.
+            reader.final_queued = (bus.cursor() - reader.cursor).min(CAPACITY as u64) as u32;
+            assert!(
+                reader.last_sample > sample - CAPACITY as u64,
+                "reader did not recover"
+            );
+        }
+        readers
+    }
+
+    #[test]
+    fn independent_clocks_keep_transport_bounded_but_do_not_eliminate_drift() {
+        let nominal = simulate(0, false, false);
+        for skew in [100, 500] {
+            let faster = simulate(skew, false, false);
+            let slower = simulate(-skew, false, false);
+            assert_eq!(faster[1], nominal[1]);
+            assert_eq!(slower[1], nominal[1]);
+            assert!(faster[0].underrun > nominal[0].underrun);
+            assert!(
+                slower[0].final_queued > nominal[0].final_queued,
+                "skew {skew}, slower {:?}, nominal {:?}",
+                slower[0],
+                nominal[0]
+            );
+            assert!(slower[0].max_queued as usize <= CAPACITY);
+        }
+    }
+
+    #[test]
+    fn scheduling_stalls_recover_without_replay_or_affecting_peer_readers() {
+        let baseline = simulate(500, true, false);
+        let paused = simulate(500, true, true);
+        assert_eq!(
+            baseline[1], paused[1],
+            "one reader's pause affected its peer"
+        );
+        assert!(paused[0].dropped > baseline[0].dropped);
+        assert!(
+            paused
+                .iter()
+                .all(|reader| reader.stale_silence_callbacks > 0)
+        );
+        assert!(paused.iter().all(|reader| reader.received > 2_000_000));
+    }
     #[test]
     fn concurrent_overwrite_never_tears_stereo_frames() {
         use std::sync::{

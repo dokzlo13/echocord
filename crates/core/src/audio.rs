@@ -764,7 +764,7 @@ impl RecordingWriter {
         }
         // Track the complete delivered slice, even if a concurrent generation
         // change makes the fenced writer reject its remaining samples.
-        if self.channels == 2 && data.len() % 2 != 0 {
+        if self.channels == 2 && !data.len().is_multiple_of(2) {
             self.pending_right = !self.pending_right;
         }
         if let Some(resampler) = &mut self.resampler {

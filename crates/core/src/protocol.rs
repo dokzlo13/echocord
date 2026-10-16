@@ -67,10 +67,13 @@ impl Failure {
                 "Application capture is unavailable or stopped unexpectedly. Use a recording input or another running application.",
             ),
             Self::SourceExited => (
-                ErrorCode::CaptureFailed,
+                ErrorCode::InvalidSelection,
                 "The selected application exited or is unavailable. Refresh sources and select its new instance.",
             ),
-            Self::Connection => (ErrorCode::ConnectionFailed, "The voice connection ended."),
+            Self::Connection => (
+                ErrorCode::ConnectionFailed,
+                "The voice connection ended. Press Connect to retry.",
+            ),
             Self::Protocol => (ErrorCode::Internal, "The engine protocol failed."),
         };
         AppError {

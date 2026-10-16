@@ -869,7 +869,14 @@ impl Actor {
             self.audio_failed = true;
             for input in &mut self.snapshot.inputs {
                 input.phase = InputPhase::Fault;
-                input.fault = Some(error.clone());
+                input.fault = Some(AppError::new(
+                    if error.code == ErrorCode::CleanupIncomplete {
+                        ErrorCode::CleanupIncomplete
+                    } else {
+                        ErrorCode::EngineStopped
+                    },
+                    "The audio engine could not start. Quit Echocord from the tray icon, then open it again.",
+                ));
             }
         }
         self.refresh();
@@ -1130,8 +1137,8 @@ impl Actor {
     fn sync_audio(&mut self) -> Result<(), AppError> {
         if self.audio_failed {
             return Err(error(
-                ErrorCode::CaptureFailed,
-                "The audio worker stopped. Restart Echocord.",
+                ErrorCode::EngineStopped,
+                "The audio engine stopped. Quit Echocord from the tray icon, then open it again.",
             ));
         }
         #[cfg(windows)]
@@ -1183,9 +1190,9 @@ impl Actor {
                         if exit == 2 {
                             ErrorCode::CleanupIncomplete
                         } else {
-                            ErrorCode::CaptureFailed
+                            ErrorCode::EngineStopped
                         },
-                        "The audio worker stopped. Restart Echocord.",
+                        "The audio engine stopped. Quit Echocord from the tray icon, then open it again.",
                     ));
                 }
                 self.snapshot.telemetry.inputs.clear();
@@ -1300,13 +1307,11 @@ impl Actor {
                 ControlCommand::AddSource { .. }
                     | ControlCommand::ReplaceSource { .. }
                     | ControlCommand::StartCapture { .. }
-                    | ControlCommand::SetSourceGain { .. }
-                    | ControlCommand::SetSourceMuted { .. }
             )
         {
             return Err(error(
-                ErrorCode::CaptureFailed,
-                "The audio worker stopped. Restart Echocord.",
+                ErrorCode::EngineStopped,
+                "The audio engine stopped. Quit Echocord from the tray icon, then open it again.",
             ));
         }
         match command {
@@ -1430,7 +1435,9 @@ impl Actor {
                         error(ErrorCode::InvalidSelection, "This source no longer exists.")
                     })?;
                 input.muted = muted;
-                self.sync_audio()?;
+                if !self.audio_failed {
+                    self.sync_audio()?;
+                }
             }
             ControlCommand::SetSourceGain { strip_id, gain_db } => {
                 if !crate::mixing::valid_gain(gain_db) {
@@ -1448,7 +1455,9 @@ impl Actor {
                         error(ErrorCode::InvalidSelection, "This source no longer exists.")
                     })?;
                 input.gain_db = gain_db;
-                self.sync_audio()?;
+                if !self.audio_failed {
+                    self.sync_audio()?;
+                }
             }
             ControlCommand::AddDestination {
                 server_id,
@@ -4184,9 +4193,25 @@ mod tests {
                 strip_id: "input-1".into(),
             },
         ] {
-            assert!(a.command(command).is_err());
+            assert_eq!(
+                a.command(command).unwrap_err().code,
+                ErrorCode::EngineStopped
+            );
             assert_eq!(a.snapshot, before);
         }
+        a.command(ControlCommand::SetSourceGain {
+            strip_id: "input-1".into(),
+            gain_db: Some(-12.0),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetSourceMuted {
+            strip_id: "input-1".into(),
+            muted: true,
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.inputs[0].phase, InputPhase::Fault);
+        assert_eq!(a.snapshot.inputs[0].gain_db, Some(-12.0));
+        assert!(a.snapshot.inputs[0].muted);
         a.command(ControlCommand::StopCapture {
             strip_id: "input-1".into(),
         })

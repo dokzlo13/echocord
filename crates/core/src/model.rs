@@ -92,6 +92,7 @@ pub enum ErrorCode {
     Authentication,
     PermissionDenied,
     CaptureFailed,
+    EngineStopped,
     ConnectionFailed,
     CleanupIncomplete,
     Internal,

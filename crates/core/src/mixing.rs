@@ -454,7 +454,11 @@ mod native {
             ) {
                 input.phase = InputPhase::Fault;
                 input.fault = Some(AppError::new(
-                    ErrorCode::CaptureFailed,
+                    if capture.phase == CapturePhase::Missing {
+                        ErrorCode::InvalidSelection
+                    } else {
+                        ErrorCode::CaptureFailed
+                    },
                     capture
                         .message
                         .unwrap_or_else(|| "Capture stopped. Select the source again.".into()),

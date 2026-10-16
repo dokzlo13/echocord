@@ -484,7 +484,7 @@ mod native {
             }
             if Instant::now() >= deadline {
                 return Err(error(
-                    "Application capture activation timed out. Reconnect and retry.",
+                    "Application capture activation timed out. Press Capture to retry.",
                 ));
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -498,7 +498,7 @@ mod native {
         } else {
             AppError::new(
                 ErrorCode::CleanupIncomplete,
-                "Native capture cleanup did not finish. Restart Echocord.",
+                "Native capture cleanup did not finish. Quit Echocord from the tray icon, then open it again.",
             )
         }
     }
@@ -555,7 +555,7 @@ mod native {
                 Err(_) if Instant::now() >= deadline => {
                     return Err(stopped_opening(
                         &session,
-                        error("Application capture opening timed out. Reconnect and retry."),
+                        error("Application capture opening timed out. Press Capture to retry."),
                     ));
                 }
                 Err(_) => {}

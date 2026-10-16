@@ -571,7 +571,10 @@ impl Manager {
             && !self.stopping
             && self.rooms.values().all(|r| !r.wanted)
             && self.rooms.values().all(|r| {
-                r.remote_left || matches!(r.connection, Connection::CleanupIncomplete { .. })
+                // A leave during gateway recovery cannot be sent immediately.
+                // Keep its original deadline so a resume can retransmit it;
+                // an early CleanupIncomplete notification is not that deadline.
+                r.remote_left || now.duration_since(r.since) >= Duration::from_secs(12)
             })
         {
             self.stopping = true;
@@ -847,6 +850,86 @@ mod tests {
         ));
         m.voice_exit("discord-1", one, true);
         assert_eq!(m.advance(false).len(), 1);
+    }
+    #[test]
+    fn disconnect_during_gateway_recovery_waits_for_leave_confirmation_without_rejoining() {
+        let mut m = Manager::default();
+        let (key, generation) = active(&mut m, "discord-1", "1");
+        m.gateway_status(1, GatewayStatus::Recovery { active: true });
+        m.stop("discord-1", None);
+        let since = m.rooms["discord-1"].since;
+        m.gateway_status(1, GatewayStatus::CleanupIncomplete { key: key.clone() });
+        m.voice_exit("discord-1", generation, true);
+        m.stop("discord-1", None);
+        assert_eq!(m.rooms["discord-1"].since, since);
+        m.effects.clear();
+        assert!(m.advance(false).is_empty());
+        assert!(
+            !m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::StopGateway))
+        );
+        // The gateway can now use its existing resume-time leave retransmit.
+        m.gateway_status(1, GatewayStatus::Recovery { active: false });
+        m.gateway_status(1, GatewayStatus::Ready);
+        assert!(!m.rooms["discord-1"].wanted);
+        assert!(
+            !m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Gateway(GatewayCommand::Join { .. })))
+        );
+        m.gateway_status(1, GatewayStatus::Left { key });
+        assert_eq!(
+            m.advance(false),
+            vec![("discord-1".into(), Connection::Disconnected)]
+        );
+        assert!(
+            m.effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::StopGateway))
+        );
+    }
+    #[test]
+    fn unconfirmed_leave_resets_gateway_after_original_deadline_but_not_with_a_live_peer() {
+        for with_peer in [false, true] {
+            let mut m = Manager::default();
+            let (key, generation) = active(&mut m, "discord-1", "1");
+            if with_peer {
+                active(&mut m, "discord-2", "2");
+            }
+            m.gateway_status(1, GatewayStatus::Recovery { active: true });
+            m.stop("discord-1", None);
+            m.gateway_status(1, GatewayStatus::CleanupIncomplete { key });
+            m.voice_exit("discord-1", generation, true);
+            m.rooms.get_mut("discord-1").unwrap().since = Instant::now() - Duration::from_secs(11);
+            m.effects.clear();
+            m.advance(false);
+            assert!(
+                !m.effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::StopGateway))
+            );
+            m.rooms.get_mut("discord-1").unwrap().since = Instant::now() - Duration::from_secs(12);
+            m.stop("discord-1", None);
+            m.advance(false);
+            assert_eq!(
+                m.effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::StopGateway)),
+                !with_peer
+            );
+            if with_peer {
+                assert!(m.rooms["discord-2"].wanted);
+                assert_eq!(m.rooms["discord-2"].connection, Connection::Connected);
+            } else {
+                m.gateway_exit(1, true);
+                m.advance(false);
+                m.effects.clear();
+                m.gateway_status(1, GatewayStatus::Ready);
+                assert!(m.rooms.is_empty());
+                assert!(m.effects.is_empty());
+            }
+        }
     }
     #[test]
     fn private_credentials_never_enter_public_snapshot_or_control_key() {

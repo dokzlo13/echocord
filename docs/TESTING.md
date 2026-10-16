@@ -83,4 +83,8 @@ when actually measured. Do not expose credentials, server identifiers, user
 paths or private audio in public reports. One PC provides one environment's
 evidence; missing hardware is an explicit gap, not a simulated hardware pass.
 
-The scope and deferred investigations are recorded in [the 0.2 decisions](EPOCH-0.2.md).
+The source-extracted CPAL packet fixture exercises the actual patched capture
+function against synthetic packet providers, including silent/empty packets,
+sample equilibrium, alignment, bounds and release-on-error. It does not open a
+device. The callback allocation assertion and clock-skew simulations remain
+separate from physical Windows acceptance.

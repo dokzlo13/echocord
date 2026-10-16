@@ -30,6 +30,8 @@ Four destinations may be configured in total, including at most three playback d
 
 Application capture selects an exact process identity and its process tree. A restarted process requires selection again; executable-name matching, PID reuse, default microphones and broad desktop fallback are not acceptable substitutes. Recording endpoints are selected explicitly and support 44.1/48/96 kHz mono/stereo PCM. The 48 kHz path is direct; other supported rates use a preallocated sinc converter. Native discontinuities and mute generations fence retained conversion history and queued samples.
 
+Recording negotiation prefers 48 kHz, then 44.1 kHz, then 96 kHz, with mono/stereo only. Conversion stages 128 native frames at a time, sanitizes non-finite samples before filtering and preserves sample alignment across callback boundaries. The pinned CPAL correction treats Windows packets marked silent as correctly represented silence without reading their payload. Playback uses Windows conversion through CPAL; it does not add a second application resampler. See [dependency patch scope](../patches/README.md).
+
 Source gain and mix-only mute are independent. Source meters observe post-gain audio before source mute, so muted activity remains visible; original application playback is unaffected by the mix-only mute. Sources sum into a bounded native mix with clipping/overload indication. Destination gain/mute applies to each reader independently. There is no implicit monitor, routing matrix, recording-file feature, or normalization/DSP chain.
 
 ## State, cancellation and recovery
@@ -38,11 +40,15 @@ Commands target stable source/destination IDs. Session and worker generations fe
 
 Ordinary source/output failures are contained. A gateway reset stops its Discord cohort while capture and local playback remain independent. Disconnect/Quit cancels retry intent. Recovery never silently changes the selected source, device, server, or room.
 
+A capture open/cleanup deadline remains a whole-audio-worker failure boundary: native destructors cannot be safely abandoned. The parent retains process ownership and reports the failure; output readers produce paced silence after the producer becomes stale. Replacing that policy requires confirmed old-owner exit, generation fencing and fresh-audio recovery tests.
+
 ## Persistence and credentials
 
 Preferences store explicit identities, gain/mute and ordinary settings under a versioned schema. Restore setup reopens recording inputs; applications wait for Capture against their exact saved identity. Every output restores idle. Unknown future preference versions are preserved rather than overwritten.
 
 The loader checks the version envelope before schema deserialization, applies ordered migrations, validates the final bounded state and normalizes runtime fields. Loading does not write files. Additive settings have defaults; semantic schema changes require a new migration and historical-fixture coverage. Live mutation succeeds independently of saving: a failed write publishes `preferencesWarning`, while `RetryPreferences` saves the current setup without replaying a control action. Only successful persistence clears that warning.
+
+The current settings schema is version 4, with explicit transitions from versions 0–3. Final route/identity/gain validation follows migration. Future versions, malformed version declarations and oversized existing files are preserved; serialized output is also checked against the file budget before replacing the previous valid file. Atomic writes retain the last valid setup on failure.
 
 The bot token is encrypted with Windows current-user DPAPI. It stays backend-owned and is omitted from snapshots and diagnostics. Token validation or saving never joins voice. The UI token field is ephemeral; replacement is restricted while relevant Discord lifetimes remain active.
 

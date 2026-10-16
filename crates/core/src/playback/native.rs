@@ -121,11 +121,46 @@ fn build<T>(
 where
     T: SizedSample + cpal::FromSample<f32> + Copy,
 {
-    let mut renderer = Renderer::attach(mapping.bus(), control.clone());
+    let mut renderer = Renderer::attach(mapping.bus(), control.clone()).map_err(|message| {
+        cpal::Error::with_message(cpal::ErrorKind::UnsupportedConfig, message)
+    })?;
+    let native_rate = config.sample_rate();
+    let mut frequency = 0;
+    if unsafe { windows_sys::Win32::System::Performance::QueryPerformanceFrequency(&mut frequency) }
+        == 0
+        || frequency <= 0
+    {
+        return Err(cpal::Error::with_message(
+            cpal::ErrorKind::BackendError,
+            "Playback clock is unavailable",
+        ));
+    }
+    let now_ns = move || {
+        let mut value = 0;
+        if unsafe { windows_sys::Win32::System::Performance::QueryPerformanceCounter(&mut value) }
+            == 0
+            || value < 0
+        {
+            return 0;
+        }
+        (value as u128 * 1_000_000_000 / frequency as u128).min(u64::MAX as u128) as u64
+    };
     device.build_output_stream(
         config.config(),
-        move |data: &mut [T], _| {
-            renderer.render(mapping.bus(), data, mix_bus::now_ms(), T::from_sample)
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+            let playback = info.timestamp().playback;
+            let timestamp = (playback != cpal::StreamInstant::ZERO)
+                .then(|| u64::try_from(playback.as_nanos()).ok())
+                .flatten();
+            renderer.render_clocked(
+                mapping.bus(),
+                data,
+                now_ns(),
+                timestamp,
+                native_rate,
+                now_ns,
+                T::from_sample,
+            );
         },
         move |_| {
             control.failed.store(true, SeqCst);
@@ -136,8 +171,11 @@ where
 
 #[derive(Serialize, Deserialize)]
 enum Command {
-    Init { device_id: String, output: Output },
-    Output(Output),
+    Init {
+        device_id: String,
+        controls: PlaybackControls,
+    },
+    Output(PlaybackControls),
     Stop,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -146,10 +184,12 @@ pub struct PlaybackSnapshot {
     pub observation: RenderObservation,
 }
 struct Mailbox {
-    output: Option<Output>,
+    controls: PlaybackControls,
+    pending: bool,
     stopped: Option<Instant>,
 }
 pub struct PlaybackHost {
+    session: u32,
     mailbox: Arc<(Mutex<Mailbox>, Condvar)>,
     snapshot: Arc<Mutex<Option<PlaybackSnapshot>>>,
     pub exit: Arc<AtomicU8>,
@@ -162,13 +202,15 @@ impl PlaybackHost {
         device_id: String,
         output: Output,
         generation: u32,
+        drift_enabled: bool,
     ) -> Result<Self, AppError> {
         let inherited = bus
             .inheritable()
             .map_err(|_| unavailable("Cannot share the audio mix with this output."))?;
         let mailbox = Arc::new((
             Mutex::new(Mailbox {
-                output: None,
+                controls: PlaybackControls::new(output, drift_enabled),
+                pending: false,
                 stopped: None,
             }),
             Condvar::new(),
@@ -178,6 +220,7 @@ impl PlaybackHost {
         let process_id = Arc::new(AtomicU32::new(0));
         let opened = Arc::new(AtomicBool::new(false));
         let owner = Self {
+            session: generation,
             mailbox: mailbox.clone(),
             snapshot: snapshot.clone(),
             exit: exit.clone(),
@@ -212,7 +255,8 @@ impl PlaybackHost {
                 if state.stopped.is_some() {
                     return;
                 }
-                let output = state.output.take().unwrap_or(output);
+                let controls = state.controls.clone();
+                state.pending = false;
                 drop(state);
                 let mut sequence = 1;
                 if protocol::write(
@@ -221,7 +265,10 @@ impl PlaybackHost {
                         version: protocol::VERSION,
                         generation,
                         sequence,
-                        body: Command::Init { device_id, output },
+                        body: Command::Init {
+                            device_id,
+                            controls,
+                        },
                     },
                 )
                 .is_err()
@@ -231,14 +278,15 @@ impl PlaybackHost {
                 }
                 loop {
                     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    while state.output.is_none() && state.stopped.is_none() {
+                    while !state.pending && state.stopped.is_none() {
                         state = wake.wait(state).unwrap_or_else(|e| e.into_inner());
                     }
                     let stopping = state.stopped.is_some();
                     let body = if stopping {
                         Command::Stop
                     } else {
-                        Command::Output(state.output.take().expect("pending output"))
+                        state.pending = false;
+                        Command::Output(state.controls.clone())
                     };
                     drop(state);
                     sequence += 1;
@@ -311,11 +359,12 @@ impl PlaybackHost {
         });
         Ok(owner)
     }
-    pub fn output(&self, output: Output) {
+    pub fn output(&self, output: Output, drift_enabled: bool) {
         let (lock, wake) = &*self.mailbox;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         if state.stopped.is_none() {
-            state.output = Some(output);
+            state.controls.update(output, drift_enabled);
+            state.pending = true;
             wake.notify_one();
         }
     }
@@ -323,10 +372,32 @@ impl PlaybackHost {
         stop_mailbox(&self.mailbox);
     }
     pub fn snapshot(&self) -> Option<PlaybackSnapshot> {
-        self.snapshot
+        let mut snapshot = self
+            .snapshot
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .take()?;
+        let desired = &self
+            .mailbox
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .controls;
+        let expected = format!(
+            "{}:{}:{}",
+            self.session, desired.output_epoch, desired.drift.epoch
+        );
+        if snapshot
+            .observation
+            .timing
+            .as_ref()
+            .is_none_or(|timing| timing.epoch != expected)
+        {
+            // Keep lifecycle failures visible, but never revive measurements from
+            // an earlier mute/mode even if the intermediate command was coalesced.
+            snapshot.observation = RenderObservation::default();
+        }
+        Some(snapshot)
     }
 }
 impl Drop for PlaybackHost {
@@ -357,19 +428,17 @@ pub fn run_worker(raw: usize) -> Result<(), AppError> {
     validator
         .accept(&frame)
         .map_err(|_| unavailable("Invalid playback protocol."))?;
-    let Command::Init { device_id, output } = frame.body else {
+    let Command::Init {
+        device_id,
+        controls,
+    } = frame.body
+    else {
         return Err(unavailable("Invalid playback initialization."));
     };
     if device_id.is_empty() || device_id.len() > 1024 {
         return Err(unavailable("Invalid playback endpoint."));
     }
-    let control = Arc::new(RenderControl::default());
-    control.set_output(
-        output
-            .volume_linear
-            .unwrap_or(output.volume_percent as f32 / 100.0),
-        output.muted,
-    );
+    let control = Arc::new(RenderControl::new(generation, &controls));
     let commands = control.clone();
     std::thread::spawn(move || {
         while let Ok(Some(frame)) = protocol::read::<Command>(&mut reader) {
@@ -377,12 +446,7 @@ pub fn run_worker(raw: usize) -> Result<(), AppError> {
                 break;
             }
             match frame.body {
-                Command::Output(output) => commands.set_output(
-                    output
-                        .volume_linear
-                        .unwrap_or(output.volume_percent as f32 / 100.0),
-                    output.muted,
-                ),
+                Command::Output(controls) => commands.apply(&controls),
                 Command::Stop | Command::Init { .. } => break,
             }
         }
@@ -443,16 +507,18 @@ pub fn run_worker(raw: usize) -> Result<(), AppError> {
     };
     while !control.stopped.load(SeqCst) {
         if control.callback_frames.load(SeqCst) > 0
-            && mix_bus::now_ms().saturating_sub(control.meter_ms.load(SeqCst)) > 2000
+            && mix_bus::now_ms().saturating_sub(control.callback_ms.load(SeqCst)) > 2000
         {
             control.failed.store(true, SeqCst);
         }
         let connection = if control.failed.load(SeqCst) {
             Connection::Error {
                 code: ErrorCode::ConnectionFailed,
-                message:
+                message: if control.correction_failed.load(SeqCst) {
+                    "Sync correction cannot handle this output's buffers. Turn it off or select another output, then press Play."
+                } else {
                     "The selected playback output stopped. Select it again or press Play to retry."
-                        .into(),
+                }.into(),
             }
         } else if control.callback_frames.load(SeqCst) == 0 {
             Connection::Connecting {
@@ -543,6 +609,67 @@ pub fn inspect_devices() -> Result<serde_json::Value, Box<dyn std::error::Error 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parent_fences_coalesced_mode_and_mute_epochs_without_hiding_lifecycle_failures() {
+        let output = Output {
+            volume_linear: Some(1.0),
+            volume_percent: 100,
+            muted: false,
+        };
+        let host = PlaybackHost {
+            session: 7,
+            mailbox: Arc::new((
+                Mutex::new(Mailbox {
+                    controls: PlaybackControls::new(output.clone(), true),
+                    pending: false,
+                    stopped: None,
+                }),
+                Condvar::new(),
+            )),
+            snapshot: Arc::new(Mutex::new(None)),
+            exit: Arc::new(AtomicU8::new(0)),
+            process_id: Arc::new(AtomicU32::new(0)),
+        };
+        let report = |epoch| PlaybackSnapshot {
+            connection: Connection::Connected,
+            observation: RenderObservation {
+                timing: Some(Timing::new(true, epoch).snapshot()),
+                ..RenderObservation::default()
+            },
+        };
+        *host.snapshot.lock().unwrap() = Some(report([7, 0, 0]));
+        host.output(output.clone(), false);
+        host.output(output.clone(), true);
+        host.output(
+            Output {
+                muted: true,
+                ..output.clone()
+            },
+            true,
+        );
+        host.output(output.clone(), true);
+        assert!(host.snapshot().unwrap().observation.timing.is_none());
+        *host.snapshot.lock().unwrap() = Some(report([7, 2, 2]));
+        assert!(host.snapshot().unwrap().observation.timing.is_some());
+        host.output(
+            Output {
+                volume_linear: Some(0.5),
+                ..output
+            },
+            true,
+        );
+        *host.snapshot.lock().unwrap() = Some(report([7, 2, 2]));
+        assert!(host.snapshot().unwrap().observation.timing.is_some());
+        let mut failure = report([6, 0, 0]);
+        failure.connection = Connection::Error {
+            code: ErrorCode::ConnectionFailed,
+            message: "synthetic worker exit".into(),
+        };
+        *host.snapshot.lock().unwrap() = Some(failure);
+        let observed = host.snapshot().unwrap();
+        assert!(matches!(observed.connection, Connection::Error { .. }));
+        assert!(observed.observation.timing.is_none());
+    }
     #[test]
     fn playback_format_selection_requires_explicit_48k_stereo() {
         use cpal::SupportedBufferSize;

@@ -679,7 +679,7 @@ struct Actor {
     simulated_discord: bool,
     discord: crate::discord::control::Manager,
     next_discord_publish: Instant,
-    discord_restart: std::collections::BTreeSet<String>,
+    discord_restart: std::collections::BTreeMap<String, u32>,
     discord_removing: std::collections::BTreeSet<String>,
     #[cfg(windows)]
     gateway_host: Option<(u32, GatewayHost)>,
@@ -717,7 +717,7 @@ impl Actor {
             simulated_discord: false,
             discord: crate::discord::control::Manager::default(),
             next_discord_publish: Instant::now(),
-            discord_restart: std::collections::BTreeSet::new(),
+            discord_restart: std::collections::BTreeMap::new(),
             discord_removing: std::collections::BTreeSet::new(),
             #[cfg(windows)]
             gateway_host: None,
@@ -1532,7 +1532,8 @@ impl Actor {
                     return Err(busy());
                 }
                 if self.discord.contains(&destination_id) {
-                    self.discord_restart.insert(destination_id.clone());
+                    self.discord_restart
+                        .insert(destination_id.clone(), self.discord.gateway.generation);
                     self.discord.stop(&destination_id, None);
                 }
                 let d = &mut self.snapshot.destinations[index];
@@ -2226,6 +2227,7 @@ impl Actor {
         Ok(())
     }
     fn poll_discord(&mut self) {
+        self.prune_discord_restarts();
         if !self.discord.busy() && self.discord_restart.is_empty() {
             return;
         }
@@ -2265,6 +2267,7 @@ impl Actor {
             }
         }
         let done = self.discord.advance(!self.discord_restart.is_empty());
+        self.prune_discord_restarts();
         for (id, connection) in done {
             if let Some(d) = self
                 .snapshot
@@ -2280,7 +2283,7 @@ impl Actor {
                     .retain(|d| d.destination_id != id);
             }
         }
-        let restart = self.discord_restart.iter().cloned().collect::<Vec<_>>();
+        let restart = self.discord_restart.keys().cloned().collect::<Vec<_>>();
         for id in restart {
             if self.discord.contains(&id) {
                 continue;
@@ -2466,6 +2469,16 @@ impl Actor {
             self.next_discord_publish = Instant::now() + Duration::from_millis(100);
             self.publish();
         }
+    }
+    fn prune_discord_restarts(&mut self) {
+        let gateway = &self.discord.gateway;
+        let eligible = self.discord.gateway_alive
+            && matches!(
+                gateway.phase,
+                GatewayPhase::Connecting | GatewayPhase::Connected | GatewayPhase::Recovering
+            );
+        self.discord_restart
+            .retain(|_, generation| eligible && *generation == gateway.generation);
     }
 
     fn configure_token(&mut self, token: String, reply: oneshot::Sender<Result<(), AppError>>) {
@@ -4414,6 +4427,119 @@ mod tests {
         a.discord.effects.clear();
         a.publish();
         (key, generation)
+    }
+    #[test]
+    fn failed_gateway_discards_pending_room_change_before_another_room_connects() {
+        use crate::discord::protocol::GatewayStatus;
+        let mut a = actor();
+        a.simulated_discord = true;
+        a.snapshot.servers[0].channels.push(VoiceChannel {
+            id: "5".into(),
+            name: "Other fixture room".into(),
+            category_name: None,
+            position: 1,
+        });
+        let mut peer = a.snapshot.servers[0].clone();
+        peer.id = "4".into();
+        a.snapshot.servers.push(peer);
+        for server in ["1", "4"] {
+            a.command(ControlCommand::AddDestination {
+                server_id: server.into(),
+                channel_id: "2".into(),
+            })
+            .unwrap();
+        }
+        // Start only the pure room manager: this fixture never opens audio or
+        // starts a credential-bearing worker on any test platform.
+        a.discord.start(&a.snapshot.destinations[0]).unwrap();
+        a.command(ControlCommand::ChangeDestination {
+            destination_id: "discord-1".into(),
+            server_id: "1".into(),
+            channel_id: "5".into(),
+        })
+        .unwrap();
+        assert!(a.discord_restart.contains_key("discord-1"));
+        let failed_generation = a.discord.gateway.generation;
+        a.discord.gateway_status(
+            failed_generation,
+            GatewayStatus::Failed {
+                code: Failure::Connection,
+            },
+        );
+        a.discord.gateway_exit(failed_generation, true);
+        a.poll_discord();
+        assert!(a.discord_restart.is_empty());
+        assert_eq!(
+            a.snapshot.destinations[0].connection,
+            Connection::Disconnected
+        );
+
+        // A fresh manager models a later explicit connection after the launch
+        // backoff, while preserving the gateway epoch without a wall-clock wait.
+        a.discord = crate::discord::control::Manager::default();
+        a.discord.gateway.generation = failed_generation;
+        a.discord.start(&a.snapshot.destinations[1]).unwrap();
+        let generation = a.discord.gateway.generation;
+        a.discord.gateway_status(generation, GatewayStatus::Ready);
+        a.poll_discord();
+        assert!(!a.discord.contains("discord-1"));
+        assert!(a.discord.rooms["discord-2"].wanted);
+        assert!(a.discord.rooms["discord-2"].joined);
+    }
+    #[test]
+    fn pending_room_changes_belong_only_to_their_live_gateway_epoch() {
+        let mut a = actor();
+        a.discord.gateway_alive = true;
+        a.discord.gateway.generation = 2;
+        a.discord.gateway.phase = GatewayPhase::Recovering;
+        a.discord_restart.insert("old-room".into(), 1);
+        a.discord_restart.insert("current-room".into(), 2);
+        a.prune_discord_restarts();
+        assert!(!a.discord_restart.contains_key("old-room"));
+        assert!(a.discord_restart.contains_key("current-room"));
+        a.discord.gateway_alive = false;
+        a.prune_discord_restarts();
+        assert!(a.discord_restart.is_empty());
+    }
+    #[cfg(not(windows))]
+    #[test]
+    fn explicit_room_change_reconnects_in_same_epoch_with_or_without_a_peer() {
+        use crate::discord::protocol::GatewayStatus;
+        for with_peer in [false, true] {
+            let mut a = actor();
+            let (old_key, old_voice) = simulated_room(&mut a, "discord-1", "1");
+            if with_peer {
+                simulated_room(&mut a, "discord-2", "4");
+            }
+            a.snapshot.servers[0].channels.push(VoiceChannel {
+                id: "5".into(),
+                name: "Other fixture room".into(),
+                category_name: None,
+                position: 1,
+            });
+            a.command(ControlCommand::ChangeDestination {
+                destination_id: "discord-1".into(),
+                server_id: "1".into(),
+                channel_id: "5".into(),
+            })
+            .unwrap();
+            a.discord
+                .gateway_status(1, GatewayStatus::Left { key: old_key });
+            a.discord.voice_exit("discord-1", old_voice, true);
+            a.poll_discord();
+            assert!(a.discord_restart.is_empty());
+            assert_eq!(a.discord.gateway.generation, 1);
+            assert_eq!(a.discord.gateway.phase, GatewayPhase::Connected);
+            assert_eq!(a.discord.rooms["discord-1"].key.channel_id, "5");
+            assert!(a.discord.rooms["discord-1"].wanted);
+            assert!(a.discord.rooms["discord-1"].joined);
+            if with_peer {
+                assert_eq!(
+                    a.discord.rooms["discord-2"].connection,
+                    Connection::Connected
+                );
+            }
+        }
     }
     #[test]
     fn controller_publication_never_exports_room_credentials_and_preserves_peers() {

@@ -272,7 +272,7 @@ pub struct DestinationStrip {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub restore_setup: bool,
     pub keep_in_tray: bool,
@@ -380,6 +380,10 @@ pub struct ControlSnapshot {
     pub destinations: Vec<DestinationStrip>,
     #[serde(default)]
     pub settings: AppSettings,
+    /// Live controls were applied, but the current setup has not been saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preferences_warning: Option<AppError>,
     #[serde(default)]
     pub telemetry: MixTelemetry,
     pub revision: u32,
@@ -408,6 +412,7 @@ struct ControlEventKey<'a> {
     inputs: &'a [InputStrip],
     destinations: &'a [DestinationStrip],
     settings: &'a AppSettings,
+    preferences_warning: &'a Option<AppError>,
     sources: &'a [RecordingSource],
     servers: &'a [Server],
     selection: &'a Selection,
@@ -433,6 +438,7 @@ impl ControlSnapshot {
             inputs,
             destinations,
             settings,
+            preferences_warning,
             sources,
             servers,
             selection,
@@ -461,6 +467,7 @@ impl ControlSnapshot {
             inputs,
             destinations,
             settings,
+            preferences_warning,
             sources,
             servers,
             selection,
@@ -491,6 +498,7 @@ impl Default for ControlSnapshot {
             inputs: Vec::new(),
             destinations: Vec::new(),
             settings: AppSettings::default(),
+            preferences_warning: None,
             telemetry: MixTelemetry::default(),
             revision: 0,
             session_id: 0,
@@ -532,6 +540,7 @@ impl Default for ControlSnapshot {
     rename_all_fields = "camelCase"
 )]
 pub enum ControlCommand {
+    RetryPreferences,
     RefreshPlaybackDevices,
     AddPlaybackDestination {
         device_id: String,
@@ -670,6 +679,19 @@ pub fn typescript_contract() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_settings_fields_use_defaults_without_discarding_existing_choices() {
+        let settings: AppSettings = serde_json::from_str(r#"{"keepInTray":false}"#).unwrap();
+        assert!(!settings.keep_in_tray);
+        assert!(settings.restore_setup);
+        assert_eq!(settings.meter_style, MeterStyle::Simple);
+        assert_eq!(
+            serde_json::from_str::<AppSettings>("{}").unwrap(),
+            AppSettings::default()
+        );
+        assert!(serde_json::from_str::<AppSettings>(r#"{"meterStyle":"unknown"}"#).is_err());
+    }
 
     #[test]
     fn meter_bursts_do_not_change_control_state_or_erase_snapshot_measurements() {

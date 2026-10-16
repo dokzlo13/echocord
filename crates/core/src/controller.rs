@@ -883,6 +883,7 @@ impl Actor {
     }
     fn command(&mut self, command: ControlCommand) -> Result<(), AppError> {
         match command {
+            ControlCommand::RetryPreferences => return self.persist(),
             ControlCommand::RefreshPlaybackDevices => {
                 self.refresh_playback_devices();
                 return Ok(());
@@ -1006,12 +1007,7 @@ impl Actor {
             command => return self.mix_command(command),
         }
         self.publish();
-        self.persist()?;
-        if self.preferences_error.take().is_some() && self.snapshot.bot.status == BotStatus::Ready {
-            self.snapshot.discovery = Discovery::Ready;
-            self.publish();
-        }
-        Ok(())
+        self.persist()
     }
     fn sync_audio(&mut self) -> Result<(), AppError> {
         if self.audio_failed {
@@ -1479,9 +1475,20 @@ impl Actor {
                 .get(&d.destination_id)
                 .is_none_or(|r| !r.removing)
         });
-        save_preferences(&self.config, &snapshot)?;
+        if let Err(warning) = save_preferences(&self.config, &snapshot) {
+            // The live mutation has already succeeded. A disk failure must not
+            // turn it into a rejected command or roll back a real-time control.
+            if self.snapshot.preferences_warning.as_ref() != Some(&warning) {
+                self.snapshot.preferences_warning = Some(warning);
+                self.publish();
+            }
+            return Ok(());
+        }
+        let cleared_warning = self.snapshot.preferences_warning.take().is_some();
         if self.preferences_error.take().is_some() && self.snapshot.bot.status == BotStatus::Ready {
             self.snapshot.discovery = Discovery::Ready;
+            self.publish();
+        } else if cleared_warning {
             self.publish();
         }
         Ok(())
@@ -3268,6 +3275,94 @@ mod tests {
         assert_eq!(app_restored.output.unwrap(), a.snapshot.output);
         config.token_file = config.settings_file.clone();
         assert!(save_preferences(&config, &a.snapshot).is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unsaved_live_controls_remain_applied_until_retry_saves_current_setup() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-unsaved-controls-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let blocked_parent = directory.join("blocked");
+        std::fs::write(&blocked_parent, b"fixture").unwrap();
+        let mut a = actor();
+        a.config.settings_file = Some(blocked_parent.join("prefs.json"));
+        a.command(ControlCommand::AddDestination {
+            server_id: "1".into(),
+            channel_id: "2".into(),
+        })
+        .unwrap();
+        let id = a.snapshot.destinations[0].destination_id.clone();
+        a.command(ControlCommand::SetDestinationVolume {
+            destination_id: id.clone(),
+            volume_db: Some(-12.0),
+        })
+        .unwrap();
+        a.command(ControlCommand::SetDestinationMuted {
+            destination_id: id,
+            muted: true,
+        })
+        .unwrap();
+        a.command(ControlCommand::SetSettings {
+            settings: AppSettings {
+                keep_in_tray: false,
+                ..AppSettings::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(a.snapshot.destinations[0].volume_db, Some(-12.0));
+        assert!(a.snapshot.destinations[0].muted);
+        assert!(!a.snapshot.settings.keep_in_tray);
+        assert!(a.snapshot.preferences_warning.is_some());
+        assert!(a.snapshots.borrow().preferences_warning.is_some());
+        // Commands that do not write settings and failed retries retain it.
+        a.command(ControlCommand::Disconnect).unwrap();
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert!(a.snapshot.preferences_warning.is_some());
+        std::fs::remove_file(&blocked_parent).unwrap();
+        let before_retry = a.snapshot.clone();
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert!(a.snapshot.preferences_warning.is_none());
+        assert!(!before_retry.same_control_state(&a.snapshot));
+        let restored = load_preferences(&a.config).unwrap();
+        assert_eq!(restored.destinations[0].volume_db, Some(-12.0));
+        assert!(restored.destinations[0].muted);
+        assert_eq!(restored.settings, a.snapshot.settings);
+        assert_eq!(
+            restored.destinations[0].connection,
+            Connection::Disconnected
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unsaved_warning_preserves_future_preferences_and_explains_why() {
+        let directory =
+            std::env::temp_dir().join(format!("echocord-unsaved-future-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("prefs.json");
+        let future = br#"{"version":255,"future":"fixture"}"#;
+        std::fs::write(&path, future).unwrap();
+        let mut a = actor();
+        a.config.settings_file = Some(path.clone());
+        a.command(ControlCommand::SetSettings {
+            settings: AppSettings {
+                restore_setup: false,
+                ..AppSettings::default()
+            },
+        })
+        .unwrap();
+        a.command(ControlCommand::RetryPreferences).unwrap();
+        assert!(!a.snapshot.settings.restore_setup);
+        assert!(
+            a.snapshot
+                .preferences_warning
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("newer Echocord")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), future);
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[cfg(not(windows))]
